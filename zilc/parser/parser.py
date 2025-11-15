@@ -147,6 +147,11 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return node
 
+            elif op_name == "REPEAT":
+                node = self.parse_repeat(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
         # Parse operands for generic form
         operands = []
         while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
@@ -412,6 +417,74 @@ class Parser:
             clauses.append((condition, actions))
 
         return CondNode(clauses, line, col)
+
+    def parse_repeat(self, line: int, col: int) -> 'RepeatNode':
+        """Parse REPEAT statement.
+
+        Syntax:
+        <REPEAT () body...>
+        <REPEAT ((var init)...) body...>
+        <REPEAT ((var init)...) (condition) body...>
+
+        Common ZIL loop patterns:
+        - Infinite loop: <REPEAT () ...>
+        - Loop with exit via RETURN
+        - Loop with bindings for loop variables
+        """
+        from .ast_nodes import RepeatNode
+
+        # Parse bindings list (required, can be empty)
+        bindings = []
+        if self.current_token.type == TokenType.LPAREN:
+            self.advance()  # (
+
+            # Parse variable bindings
+            while self.current_token.type == TokenType.LPAREN:
+                self.advance()  # (
+
+                # Expect variable name
+                if self.current_token.type != TokenType.ATOM:
+                    self.error(f"Expected variable name in REPEAT binding, got {self.current_token.type}")
+
+                var_name = self.current_token.value
+                self.advance()
+
+                # Parse initial value
+                init_value = self.parse_expression()
+
+                self.expect(TokenType.RPAREN)
+                bindings.append((var_name, init_value))
+
+            self.expect(TokenType.RPAREN)
+
+        # Check if there's an optional condition clause
+        condition = None
+        if self.current_token.type == TokenType.LPAREN:
+            # Peek ahead to see if this looks like a condition
+            # For now, assume first ( after bindings could be condition
+            # This is a simplification - full ZIL is more complex
+            saved_pos = self.pos
+            saved_token = self.current_token
+
+            self.advance()  # (
+            potential_condition = self.parse_expression()
+            self.expect(TokenType.RPAREN)
+
+            # If there are more expressions, treat as condition
+            # Otherwise, this was the first body expression
+            if self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+                condition = potential_condition
+            else:
+                # Restore - this was actually the body
+                self.pos = saved_pos
+                self.current_token = saved_token
+
+        # Parse body
+        body = []
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            body.append(self.parse_expression())
+
+        return RepeatNode(bindings, condition, body, line, col)
 
 
 def parse(tokens: List[Token], filename: str = "<input>") -> Program:

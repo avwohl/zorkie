@@ -179,6 +179,23 @@ class CondNode(ASTNode):
         return f"Cond({len(self.clauses)} clauses)"
 
 
+class RepeatNode(ASTNode):
+    """REPEAT loop node.
+
+    Syntax: <REPEAT ((var1 init1) (var2 init2) ...) (cond) body...>
+    or simplified: <REPEAT () body...>
+    """
+    def __init__(self, bindings: List[tuple] = None, condition: ASTNode = None,
+                 body: List[ASTNode] = None, line: int = 0, column: int = 0):
+        super().__init__(NodeType.REPEAT, line, column)
+        self.bindings = bindings or []  # List of (var_name, init_value) tuples
+        self.condition = condition  # Exit condition (optional)
+        self.body = body or []
+
+    def __repr__(self):
+        return f"Repeat({len(self.bindings)} bindings, {len(self.body)} stmts)"
+
+
 class TableNode(ASTNode):
     """TABLE/ITABLE/LTABLE node."""
     def __init__(self, table_type: str, flags: List[str] = None, size: int = None,

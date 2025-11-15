@@ -129,6 +129,8 @@ class ImprovedCodeGenerator:
             return self.generate_form(node)
         elif isinstance(node, CondNode):
             return self.generate_cond(node)
+        elif isinstance(node, RepeatNode):
+            return self.generate_repeat(node)
         elif isinstance(node, AtomNode):
             # Standalone atom - evaluate and potentially push to stack
             return b''
@@ -793,22 +795,276 @@ class ImprovedCodeGenerator:
     # ===== COND Statement =====
 
     def generate_cond(self, cond: CondNode) -> bytes:
-        """Generate COND statement with proper branching."""
+        """Generate COND statement with proper branching.
+
+        COND works like this:
+        - Test condition 1, if false jump to next clause
+        - Execute actions for clause 1, then jump to end
+        - Test condition 2, if false jump to next clause
+        - Execute actions for clause 2, then jump to end
+        - ... etc
+        - T clause (if present) always executes if reached
+        """
         code = bytearray()
 
-        # Simplified COND: just execute all true clauses
-        for condition, actions in cond.clauses:
-            # Check if condition is always true (T atom)
-            if isinstance(condition, AtomNode) and condition.value == 'T':
-                # Always execute these actions
-                for action in actions:
-                    code.extend(self.generate_statement(action))
-                break  # T clause ends COND
-            else:
-                # Generate condition test and actions
-                # This is simplified - proper implementation needs labels and jumps
-                for action in actions:
-                    code.extend(self.generate_statement(action))
+        # First pass: generate all clause code WITHOUT branch offsets
+        clause_data = []
+        for i, (condition, actions) in enumerate(cond.clauses):
+            # Check if this is the T (else) clause
+            is_t_clause = isinstance(condition, AtomNode) and condition.value == 'T'
+
+            # Generate the condition test (without proper offset yet)
+            test_code = bytearray()
+            test_size = 0
+            if not is_t_clause:
+                test_code = bytearray(self.generate_condition_test(condition, branch_on_false=True))
+                test_size = len(test_code)
+
+            # Generate actions for this clause
+            actions_code = bytearray()
+            for action in actions:
+                actions_code.extend(self.generate_statement(action))
+
+            # Determine if we need a jump to end (not for last clause or T clause)
+            needs_jump_to_end = (i < len(cond.clauses) - 1)
+
+            clause_data.append({
+                'is_t_clause': is_t_clause,
+                'test_code': test_code,
+                'test_size': test_size,
+                'actions_code': actions_code,
+                'needs_jump_to_end': needs_jump_to_end
+            })
+
+        # Second pass: calculate sizes and fix offsets
+        # Calculate clause sizes
+        for clause in clause_data:
+            clause['actions_size'] = len(clause['actions_code'])
+            clause['jump_size'] = 3 if clause['needs_jump_to_end'] else 0  # JUMP is 3 bytes
+            clause['total_size'] = clause['test_size'] + clause['actions_size'] + clause['jump_size']
+
+        # Calculate cumulative sizes for offset calculations
+        total_cond_size = sum(c['total_size'] for c in clause_data)
+
+        # Third pass: generate with proper offsets
+        current_pos = 0
+        for i, clause in enumerate(clause_data):
+            # Fix the condition test branch offset
+            if not clause['is_t_clause'] and clause['test_size'] > 0:
+                # Branch should jump to next clause if test fails
+                # Offset is from AFTER the branch bytes to the start of next clause
+                next_clause_offset = clause['actions_size'] + clause['jump_size']
+
+                # Fix the branch byte (last byte of test_code)
+                if next_clause_offset < 64:
+                    # 1-byte branch form
+                    # Bit 7=0 (branch on false), bit 6=1 (1-byte), bits 5-0=offset
+                    clause['test_code'][-1] = 0x40 | (next_clause_offset & 0x3F)
+                else:
+                    # 2-byte branch form needed
+                    # Bit 7=0 (branch on false), bit 6=0 (2-byte)
+                    offset_from_branch = next_clause_offset - 2  # -2 because relative to after branch
+                    clause['test_code'][-1] = (offset_from_branch >> 8) & 0x3F
+                    # Need to add second byte
+                    clause['test_code'].append(offset_from_branch & 0xFF)
+                    clause['test_size'] += 1
+                    clause['total_size'] += 1
+
+            # Add the test code
+            code.extend(clause['test_code'])
+
+            # Add the actions
+            code.extend(clause['actions_code'])
+
+            # Add jump to end if needed
+            if clause['needs_jump_to_end']:
+                # Calculate offset to end of COND
+                remaining_size = sum(clause_data[j]['total_size'] for j in range(i + 1, len(clause_data)))
+
+                # JUMP instruction: 0x8C (1OP, short form, opcode 0x0C)
+                code.append(0x8C)
+
+                # Encode offset (2 bytes, signed 14-bit)
+                if remaining_size < 64:
+                    # 1-byte form
+                    code.append(0x40 | (remaining_size & 0x3F))
+                    code.append(0x00)  # Padding
+                else:
+                    # 2-byte form
+                    offset = remaining_size - 2  # Relative to after the jump bytes
+                    code.append((offset >> 8) & 0x3F)
+                    code.append(offset & 0xFF)
+
+            current_pos += clause['total_size']
+
+        return bytes(code)
+
+    def generate_condition_test(self, condition: ASTNode, branch_on_false: bool = False) -> bytes:
+        """Generate a condition test that produces a branch instruction.
+
+        Args:
+            condition: The condition node to test
+            branch_on_false: If True, branch when condition is false (for COND)
+                           If False, branch when condition is true
+
+        Returns:
+            Bytecode for the test with branch instruction
+        """
+        code = bytearray()
+
+        # If condition is a form, it might be a comparison or test
+        if isinstance(condition, FormNode):
+            op_name = condition.operator.value.upper() if isinstance(condition.operator, AtomNode) else ''
+
+            # Handle FSET? (TEST_ATTR)
+            if op_name == 'FSET?':
+                if len(condition.operands) >= 2:
+                    obj = self.get_object_number(condition.operands[0])
+                    attr = self.get_operand_value(condition.operands[1])
+
+                    if obj is not None and isinstance(attr, int):
+                        code.append(0x4A)  # TEST_ATTR opcode
+                        code.append(obj & 0xFF)
+                        code.append(attr & 0xFF)
+                        # Branch byte will be added below
+
+            # Handle EQUAL? (JE)
+            elif op_name in ('=', 'EQUAL?', '==?'):
+                if len(condition.operands) >= 2:
+                    val1 = self.get_operand_value(condition.operands[0])
+                    val2 = self.get_operand_value(condition.operands[1])
+
+                    if isinstance(val1, int) and isinstance(val2, int):
+                        if 0 <= val1 <= 255 and 0 <= val2 <= 255:
+                            code.append(0x41)  # JE opcode
+                            code.append(val1 & 0xFF)
+                            code.append(val2 & 0xFF)
+
+            # Handle L? (JL)
+            elif op_name in ('L?', '<'):
+                if len(condition.operands) >= 2:
+                    val1 = self.get_operand_value(condition.operands[0])
+                    val2 = self.get_operand_value(condition.operands[1])
+
+                    if isinstance(val1, int) and isinstance(val2, int):
+                        if 0 <= val1 <= 255 and 0 <= val2 <= 255:
+                            code.append(0x42)  # JL opcode
+                            code.append(val1 & 0xFF)
+                            code.append(val2 & 0xFF)
+
+            # Handle G? (JG)
+            elif op_name in ('G?', '>'):
+                if len(condition.operands) >= 2:
+                    val1 = self.get_operand_value(condition.operands[0])
+                    val2 = self.get_operand_value(condition.operands[1])
+
+                    if isinstance(val1, int) and isinstance(val2, int):
+                        if 0 <= val1 <= 255 and 0 <= val2 <= 255:
+                            code.append(0x43)  # JG opcode
+                            code.append(val1 & 0xFF)
+                            code.append(val2 & 0xFF)
+
+            # Handle NOT
+            elif op_name == 'NOT':
+                # Generate the inner condition and flip the branch sense
+                if condition.operands:
+                    inner_code = self.generate_condition_test(
+                        condition.operands[0],
+                        branch_on_false=not branch_on_false
+                    )
+                    return inner_code
+
+        # Add branch byte
+        # Z-machine branch format:
+        # Bit 7: 0 = branch on false, 1 = branch on true
+        # Bit 6: 0 = 2-byte offset, 1 = 1-byte offset
+        # Bits 5-0: offset (if 1-byte) or bits 13-8 of offset (if 2-byte)
+
+        # For COND, we need to jump to next clause, which requires forward jumps
+        # For now, use placeholder - will be fixed up by caller
+        if branch_on_false:
+            # Branch on false - bit 7 = 0
+            code.append(0x40)  # Placeholder: 1-byte form, offset 0
+        else:
+            # Branch on true - bit 7 = 1
+            code.append(0xC0)  # Placeholder: 1-byte form, offset 0
+
+        return bytes(code)
+
+    # ===== REPEAT Loop =====
+
+    def generate_repeat(self, repeat: 'RepeatNode') -> bytes:
+        """Generate REPEAT loop with proper branching.
+
+        REPEAT generates:
+        1. Initialize loop variables (if any)
+        2. LOOP_START label
+        3. Body statements
+        4. Jump back to LOOP_START
+        5. LOOP_END label (for RETURN to exit)
+
+        Z-machine doesn't have explicit loop constructs, so we use:
+        - Forward jumps for loop exits (RETURN)
+        - Backward jumps to loop start
+        """
+        from ..parser.ast_nodes import RepeatNode
+        code = bytearray()
+
+        # Initialize loop variable bindings
+        for var_name, init_value in repeat.bindings:
+            # Create local variable if not already in locals
+            if var_name not in self.locals:
+                var_num = len(self.locals) + 1
+                self.locals[var_name] = var_num
+
+            # Generate assignment
+            var_num = self.locals[var_name]
+            value = self.get_operand_value(init_value)
+
+            if isinstance(value, int) and 0 <= value <= 255:
+                # STORE variable small_constant
+                code.append(0x2D)  # STORE opcode (long form, small/small)
+                code.append(var_num & 0xFF)
+                code.append(value & 0xFF)
+
+        # Mark loop start position
+        loop_start_pos = len(code)
+
+        # Generate body statements
+        body_code = bytearray()
+        for stmt in repeat.body:
+            body_code.extend(self.generate_statement(stmt))
+
+        body_size = len(body_code)
+
+        # Add body
+        code.extend(body_code)
+
+        # Generate jump back to loop start
+        # JUMP instruction with negative offset
+        # Offset is from AFTER the jump instruction back to loop_start
+
+        # Jump is 3 bytes: opcode + 2 offset bytes
+        # Offset calculation: -(body_size + 3) to get back to loop_start
+        jump_offset = -(body_size + 3)
+
+        # Z-machine uses signed 14-bit offsets
+        # For negative offsets, use two's complement
+        if jump_offset >= -64:
+            # Can use 1-byte form
+            # Bit 7=1 (always jump), bit 6=1 (1-byte), bits 5-0=offset
+            # For negative, need to handle carefully
+            offset_bits = (jump_offset & 0x3F)
+            code.append(0x8C)  # JUMP opcode
+            code.append(0xC0 | offset_bits)  # Branch true, 1-byte form
+            code.append(0x00)  # Padding
+        else:
+            # Use 2-byte form
+            # Two's complement for 14 bits
+            offset_14bit = jump_offset & 0x3FFF
+            code.append(0x8C)  # JUMP opcode
+            code.append((offset_14bit >> 8) & 0x3F)  # High 6 bits
+            code.append(offset_14bit & 0xFF)  # Low 8 bits
 
         return bytes(code)
 
