@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .lexer import Lexer
 from .parser import Parser
-from .codegen import CodeGenerator
+from .codegen.codegen_improved import ImprovedCodeGenerator
 from .zmachine import ZAssembler, ObjectTable, Dictionary
 
 
@@ -106,7 +106,7 @@ class ZILCompiler:
 
         # Code generation
         self.log("Generating code...")
-        codegen = CodeGenerator(self.version)
+        codegen = ImprovedCodeGenerator(self.version)
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
 
