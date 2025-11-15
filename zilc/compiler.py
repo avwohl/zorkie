@@ -73,6 +73,33 @@ class ZILCompiler:
                 traceback.print_exc()
             return False
 
+    def compile_file_multi(self, main_file: str, included_files: list = None) -> bytes:
+        """
+        Compile multiple ZIL files together.
+
+        Args:
+            main_file: Path to main ZIL file
+            included_files: List of additional files to include
+
+        Returns:
+            Combined compiled bytecode
+        """
+        # Read main file
+        with open(main_file, 'r', encoding='utf-8') as f:
+            main_source = f.read()
+
+        # Combine with included files
+        combined_source = main_source
+
+        if included_files:
+            for inc_file in included_files:
+                self.log(f"  Including: {inc_file}")
+                with open(inc_file, 'r', encoding='utf-8') as f:
+                    combined_source += f"\n\n;\"=== Included from {inc_file} ===\" \n\n"
+                    combined_source += f.read()
+
+        return self.compile_string(combined_source, main_file)
+
     def compile_string(self, source: str, filename: str = "<input>") -> bytes:
         """
         Compile ZIL source code to Z-machine bytecode.
@@ -297,13 +324,43 @@ def main():
     parser.add_argument('-v', '--version', type=int, default=3,
                        choices=[3, 4, 5, 8],
                        help='Target Z-machine version (default: 3)')
+    parser.add_argument('-i', '--include', action='append',
+                       help='Include additional ZIL files (can be used multiple times)')
     parser.add_argument('--verbose', action='store_true',
                        help='Verbose output')
 
     args = parser.parse_args()
 
     compiler = ZILCompiler(version=args.version, verbose=args.verbose)
-    success = compiler.compile_file(args.input, args.output)
+
+    # Use multi-file compilation if includes are specified
+    if args.include:
+        try:
+            # Determine output path
+            output_path = args.output
+            if output_path is None:
+                input_file = Path(args.input)
+                ext = f".z{args.version}"
+                output_path = str(input_file.with_suffix(ext))
+
+            compiler.log(f"Compiling {args.input} with {len(args.include)} included files...")
+            story_data = compiler.compile_file_multi(args.input, args.include)
+
+            # Write output
+            compiler.log(f"Writing {output_path}...")
+            with open(output_path, 'wb') as f:
+                f.write(story_data)
+
+            compiler.log(f"Compilation successful: {len(story_data)} bytes")
+            success = True
+        except Exception as e:
+            print(f"Compilation error: {e}", file=sys.stderr)
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            success = False
+    else:
+        success = compiler.compile_file(args.input, args.output)
 
     sys.exit(0 if success else 1)
 
