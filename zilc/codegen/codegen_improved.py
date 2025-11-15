@@ -231,6 +231,48 @@ class ImprovedCodeGenerator:
             if form.operands and isinstance(form.operands[0], CondNode):
                 return self.generate_cond(form.operands[0])
 
+        # Memory operations
+        elif op_name == 'LOADW':
+            return self.gen_loadw(form.operands)
+        elif op_name == 'LOADB':
+            return self.gen_loadb(form.operands)
+        elif op_name == 'STOREW':
+            return self.gen_storew(form.operands)
+        elif op_name == 'STOREB':
+            return self.gen_storeb(form.operands)
+
+        # Stack operations
+        elif op_name == 'PUSH':
+            return self.gen_push(form.operands)
+        elif op_name == 'PULL':
+            return self.gen_pull(form.operands)
+
+        # Object tree
+        elif op_name == 'GET-CHILD' or op_name == 'FIRST?':
+            return self.gen_get_child(form.operands)
+        elif op_name == 'GET-SIBLING' or op_name == 'NEXT?':
+            return self.gen_get_sibling(form.operands)
+        elif op_name == 'GET-PARENT':
+            return self.gen_get_parent(form.operands)
+
+        # Random and utilities
+        elif op_name == 'RANDOM':
+            return self.gen_random(form.operands)
+        elif op_name == 'RESTART':
+            return self.gen_restart()
+        elif op_name == 'SAVE':
+            return self.gen_save()
+        elif op_name == 'RESTORE':
+            return self.gen_restore()
+        elif op_name == 'VERIFY':
+            return self.gen_verify()
+
+        # Routine calls - check if it's a routine name
+        elif isinstance(form.operator, AtomNode):
+            if form.operator.value in self.routines or form.operator.value.isupper():
+                # Likely a routine call
+                return self.gen_call(form.operator.value, form.operands)
+
         return b''
 
     # ===== Basic Control Flow =====
@@ -814,3 +856,265 @@ class ImprovedCodeGenerator:
         elif isinstance(node, NumberNode):
             return node.value
         return None
+
+    # ===== Routine Calls =====
+
+    def gen_call(self, routine_name: str, operands: List[ASTNode]) -> bytes:
+        """Generate routine call (CALL or CALL_VS)."""
+        code = bytearray()
+
+        # For now, simplified: assume routine address is 0 (will be fixed by linker)
+        # CALL is VAR opcode 0x00 (V1-4) / CALL_VS (V4+)
+
+        # Encode as variable form
+        code.append(0xE0)  # VAR form, opcode 0x00
+
+        # Type byte - determine based on number of operands
+        num_ops = len(operands) + 1  # +1 for routine address
+        if num_ops <= 4:
+            # Pack type bits: routine address (small const) + operand types
+            type_byte = 0x01  # First operand (routine) is small constant
+            for i, op in enumerate(operands[:3]):
+                val = self.get_operand_value(op)
+                if isinstance(val, int) and 0 <= val <= 255:
+                    type_byte |= (0x01 << ((i + 1) * 2))  # Small constant
+                else:
+                    type_byte |= (0x02 << ((i + 1) * 2))  # Variable
+            code.append(type_byte)
+        else:
+            code.append(0x15)  # Simplified: all small constants
+
+        # Routine address (placeholder - would need linker to resolve)
+        code.append(0x00)
+
+        # Operands
+        for op in operands[:3]:  # Max 3 additional operands for now
+            val = self.get_operand_value(op)
+            if isinstance(val, int):
+                if 0 <= val <= 255:
+                    code.append(val & 0xFF)
+                else:
+                    code.extend(struct.pack('>H', val & 0xFFFF))
+
+        # Store result to stack
+        code.append(0x00)
+
+        return bytes(code)
+
+    # ===== Memory Operations =====
+
+    def gen_loadw(self, operands: List[ASTNode]) -> bytes:
+        """Generate LOADW (load word from array)."""
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        array = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+
+        # LOADW is 2OP opcode 0x0F
+        if isinstance(array, int) and isinstance(index, int):
+            if 0 <= array <= 255 and 0 <= index <= 255:
+                code.append(0x4F)  # Long form, opcode 0x0F
+                code.append(array & 0xFF)
+                code.append(index & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_loadb(self, operands: List[ASTNode]) -> bytes:
+        """Generate LOADB (load byte from array)."""
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        array = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+
+        # LOADB is 2OP opcode 0x10
+        if isinstance(array, int) and isinstance(index, int):
+            if 0 <= array <= 255 and 0 <= index <= 255:
+                code.append(0x50)  # Long form, opcode 0x10
+                code.append(array & 0xFF)
+                code.append(index & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_storew(self, operands: List[ASTNode]) -> bytes:
+        """Generate STOREW (store word to array)."""
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+        array = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+        value = self.get_operand_value(operands[2])
+
+        # STOREW is VAR opcode 0x01
+        if isinstance(array, int) and isinstance(index, int) and isinstance(value, int):
+            code.append(0xE1)  # VAR form, opcode 0x01
+            code.append(0x15)  # Type byte: 3 small constants
+            code.append(array & 0xFF)
+            code.append(index & 0xFF)
+            code.append(value & 0xFF)
+
+        return bytes(code)
+
+    def gen_storeb(self, operands: List[ASTNode]) -> bytes:
+        """Generate STOREB (store byte to array)."""
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+        array = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+        value = self.get_operand_value(operands[2])
+
+        # STOREB is VAR opcode 0x02
+        if isinstance(array, int) and isinstance(index, int) and isinstance(value, int):
+            code.append(0xE2)  # VAR form, opcode 0x02
+            code.append(0x15)  # Type byte: 3 small constants
+            code.append(array & 0xFF)
+            code.append(index & 0xFF)
+            code.append(value & 0xFF)
+
+        return bytes(code)
+
+    # ===== Stack Operations =====
+
+    def gen_push(self, operands: List[ASTNode]) -> bytes:
+        """Generate PUSH (push value to stack)."""
+        if not operands:
+            return b''
+
+        code = bytearray()
+        value = self.get_operand_value(operands[0])
+
+        # PUSH is VAR opcode 0x08
+        if isinstance(value, int):
+            code.append(0xE8)  # VAR form, opcode 0x08
+            code.append(0x01)  # Type byte: 1 small constant
+            code.append(value & 0xFF)
+
+        return bytes(code)
+
+    def gen_pull(self, operands: List[ASTNode]) -> bytes:
+        """Generate PULL (pop from stack) - V1-5 only."""
+        if not operands:
+            return b''
+
+        code = bytearray()
+        var_num = self.get_variable_number(operands[0])
+
+        # PULL is VAR opcode 0x09 (V1-5)
+        if self.version <= 5:
+            code.append(0xE9)  # VAR form, opcode 0x09
+            code.append(0x02)  # Type byte: 1 variable
+            code.append(var_num)
+
+        return bytes(code)
+
+    # ===== Object Tree Traversal =====
+
+    def gen_get_child(self, operands: List[ASTNode]) -> bytes:
+        """Generate GET_CHILD (get first child of object)."""
+        if not operands:
+            return b''
+
+        code = bytearray()
+        obj = self.get_object_number(operands[0])
+
+        # GET_CHILD is 1OP opcode 0x02 (store + branch)
+        if obj is not None:
+            code.append(0x82)  # Short 1OP, opcode 0x02, small constant
+            code.append(obj & 0xFF)
+            code.append(0x00)  # Store to stack
+            code.append(0x40)  # Branch byte
+
+        return bytes(code)
+
+    def gen_get_sibling(self, operands: List[ASTNode]) -> bytes:
+        """Generate GET_SIBLING (get next sibling of object)."""
+        if not operands:
+            return b''
+
+        code = bytearray()
+        obj = self.get_object_number(operands[0])
+
+        # GET_SIBLING is 1OP opcode 0x01 (store + branch)
+        if obj is not None:
+            code.append(0x81)  # Short 1OP, opcode 0x01, small constant
+            code.append(obj & 0xFF)
+            code.append(0x00)  # Store to stack
+            code.append(0x40)  # Branch byte
+
+        return bytes(code)
+
+    def gen_get_parent(self, operands: List[ASTNode]) -> bytes:
+        """Generate GET_PARENT (get parent of object)."""
+        if not operands:
+            return b''
+
+        code = bytearray()
+        obj = self.get_object_number(operands[0])
+
+        # GET_PARENT is 1OP opcode 0x03 (store only)
+        if obj is not None:
+            code.append(0x83)  # Short 1OP, opcode 0x03, small constant
+            code.append(obj & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    # ===== Utilities and Built-ins =====
+
+    def gen_random(self, operands: List[ASTNode]) -> bytes:
+        """Generate RANDOM (random number generator)."""
+        if not operands:
+            return b''
+
+        code = bytearray()
+        range_val = self.get_operand_value(operands[0])
+
+        # RANDOM is VAR opcode 0x07
+        if isinstance(range_val, int):
+            code.append(0xE7)  # VAR form, opcode 0x07
+            code.append(0x01)  # Type byte: 1 small constant
+            code.append(range_val & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_restart(self) -> bytes:
+        """Generate RESTART (restart game)."""
+        return bytes([0xB7])  # Short 0OP, opcode 0x07
+
+    def gen_save(self) -> bytes:
+        """Generate SAVE (save game) - branch instruction in V1-4."""
+        code = bytearray()
+        code.append(0xB5)  # Short 0OP, opcode 0x05
+
+        if self.version <= 4:
+            # Branch instruction in V1-4
+            code.append(0x40)  # Branch byte
+
+        return bytes(code)
+
+    def gen_restore(self) -> bytes:
+        """Generate RESTORE (restore game) - branch instruction in V1-4."""
+        code = bytearray()
+        code.append(0xB6)  # Short 0OP, opcode 0x06
+
+        if self.version <= 4:
+            # Branch instruction in V1-4
+            code.append(0x40)  # Branch byte
+
+        return bytes(code)
+
+    def gen_verify(self) -> bytes:
+        """Generate VERIFY (verify game file) - branch instruction."""
+        code = bytearray()
+        code.append(0xBD)  # Short 0OP, opcode 0x0D
+        code.append(0x40)  # Branch byte
+        return bytes(code)
