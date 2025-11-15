@@ -98,6 +98,7 @@ class ZILCompiler:
         self.log(f"  {len(program.objects)} objects")
         self.log(f"  {len(program.rooms)} rooms")
         self.log(f"  {len(program.globals)} globals")
+        self.log(f"  {len(program.syntax)} syntax definitions")
 
         # Use program version if specified
         if program.version:
@@ -256,6 +257,18 @@ class ZILCompiler:
                     dictionary.add_synonym(synonyms.value, obj_num)
 
             obj_num += 1
+
+        # Extract verbs from SYNTAX definitions
+        syntax_verbs = set()
+        for syntax_def in program.syntax:
+            # First word in pattern is the verb
+            if syntax_def.pattern and len(syntax_def.pattern) > 0:
+                verb = syntax_def.pattern[0].lower()
+                syntax_verbs.add(verb)
+                dictionary.add_word(verb, 'verb')
+
+        if syntax_verbs:
+            self.log(f"  Added {len(syntax_verbs)} verbs from SYNTAX definitions")
 
         self.log(f"  Dictionary contains {len(dictionary.words)} words")
         dict_data = dictionary.build()
