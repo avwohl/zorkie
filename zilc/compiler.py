@@ -194,11 +194,70 @@ class ZILCompiler:
 
         objects_data = obj_table.build()
 
-        # Build dictionary
+        # Build dictionary with vocabulary from objects
         self.log("Building dictionary...")
         dictionary = Dictionary(self.version)
-        # TODO: Extract words from SYNTAX definitions
-        dictionary.add_words(['take', 'drop', 'quit', 'look', 'inventory'])
+
+        # Add standard verb vocabulary
+        standard_verbs = [
+            'take', 'drop', 'put', 'examine', 'look', 'inventory',
+            'quit', 'open', 'close', 'read', 'eat', 'drink',
+            'attack', 'kill', 'wait', 'push', 'pull', 'turn',
+            'move', 'climb', 'board', 'pour', 'taste', 'rub',
+            'get', 'pick', 'throw', 'give', 'show', 'tell',
+            'ask', 'go', 'walk', 'run', 'n', 'north', 's', 'south',
+            'e', 'east', 'w', 'west', 'ne', 'nw', 'se', 'sw',
+            'up', 'down', 'in', 'out', 'enter', 'exit',
+            'on', 'off', 'light', 'extinguish', 'unlock', 'lock'
+        ]
+        dictionary.add_words(standard_verbs, 'verb')
+
+        # Extract SYNONYM and ADJECTIVE from objects
+        obj_num = 1
+        for obj in program.objects:
+            # Add synonyms (nouns that refer to this object)
+            if 'SYNONYM' in obj.properties:
+                synonyms = obj.properties['SYNONYM']
+                # SYNONYM can be a list of atoms
+                if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
+                    for syn in synonyms:
+                        if hasattr(syn, 'value'):
+                            dictionary.add_synonym(syn.value, obj_num)
+                        elif isinstance(syn, str):
+                            dictionary.add_synonym(syn, obj_num)
+                elif hasattr(synonyms, 'value'):
+                    dictionary.add_synonym(synonyms.value, obj_num)
+
+            # Add adjectives
+            if 'ADJECTIVE' in obj.properties:
+                adjectives = obj.properties['ADJECTIVE']
+                if hasattr(adjectives, '__iter__') and not isinstance(adjectives, str):
+                    for adj in adjectives:
+                        if hasattr(adj, 'value'):
+                            dictionary.add_adjective(adj.value, obj_num)
+                        elif isinstance(adj, str):
+                            dictionary.add_adjective(adj, obj_num)
+                elif hasattr(adjectives, 'value'):
+                    dictionary.add_adjective(adjectives.value, obj_num)
+
+            obj_num += 1
+
+        # Extract from rooms too
+        for room in program.rooms:
+            if 'SYNONYM' in room.properties:
+                synonyms = room.properties['SYNONYM']
+                if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
+                    for syn in synonyms:
+                        if hasattr(syn, 'value'):
+                            dictionary.add_synonym(syn.value, obj_num)
+                        elif isinstance(syn, str):
+                            dictionary.add_synonym(syn, obj_num)
+                elif hasattr(synonyms, 'value'):
+                    dictionary.add_synonym(synonyms.value, obj_num)
+
+            obj_num += 1
+
+        self.log(f"  Dictionary contains {len(dictionary.words)} words")
         dict_data = dictionary.build()
 
         # Assemble story file
