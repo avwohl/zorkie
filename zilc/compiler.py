@@ -110,13 +110,88 @@ class ZILCompiler:
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
 
-        # Build object table
+        # Build object table with proper properties
         self.log("Building object table...")
-        obj_table = ObjectTable(self.version)
+        obj_table = ObjectTable(self.version, text_encoder=codegen.encoder)
+
+        # Helper to convert FLAGS to attribute bitmask
+        def flags_to_attributes(flags):
+            """Convert FLAGS list to attribute bitmask."""
+            attr_mask = 0
+
+            # Handle single flag or list of flags
+            if not flags:
+                return 0
+
+            # If it's an AST node, extract the value
+            from .parser.ast_nodes import AtomNode, FormNode
+            if isinstance(flags, AtomNode):
+                flags = [flags.value]
+            elif isinstance(flags, (list, tuple)):
+                # Extract atom values from list
+                flag_names = []
+                for f in flags:
+                    if isinstance(f, AtomNode):
+                        flag_names.append(f.value)
+                    elif isinstance(f, str):
+                        flag_names.append(f)
+                flags = flag_names
+            else:
+                return 0
+
+            for flag in flags:
+                # Try to get flag number from constants
+                if flag in codegen.constants:
+                    bit_num = codegen.constants[flag]
+                    attr_mask |= (1 << bit_num)
+            return attr_mask
+
+        # Helper to extract property number and value
+        def extract_properties(obj_node):
+            """Extract properties from object node."""
+            props = {}
+            for key, value in obj_node.properties.items():
+                # Map property name to number
+                # For now, use simplified mapping
+                # In full implementation, would need proper property number assignment
+                prop_map = {
+                    'DESC': 1,
+                    'LDESC': 2,
+                    'SIZE': 3,
+                    'VALUE': 4,
+                    'CAPACITY': 5,
+                }
+
+                if key in prop_map:
+                    prop_num = prop_map[key]
+                    # Extract value from AST node
+                    if hasattr(value, 'value'):
+                        props[prop_num] = value.value
+                    else:
+                        props[prop_num] = value
+
+            return props
+
+        # Add objects with properties
         for obj in program.objects:
-            obj_table.add_object(obj.name)
+            attributes = flags_to_attributes(obj.properties.get('FLAGS', []))
+            properties = extract_properties(obj)
+            obj_table.add_object(
+                name=obj.name,
+                attributes=attributes,
+                properties=properties
+            )
+
+        # Add rooms (which are also objects)
         for room in program.rooms:
-            obj_table.add_object(room.name)
+            attributes = flags_to_attributes(room.properties.get('FLAGS', []))
+            properties = extract_properties(room)
+            obj_table.add_object(
+                name=room.name,
+                attributes=attributes,
+                properties=properties
+            )
+
         objects_data = obj_table.build()
 
         # Build dictionary
