@@ -43,6 +43,64 @@ class ImprovedCodeGenerator:
         self.constants['FALSE'] = 0
         self.constants['TRUE'] = 1
 
+        # Parser system globals (standard ZIL globals)
+        # These are allocated in a specific range for parser use
+        self.parser_globals = {
+            'PRSA': 0x10,   # Parser action (verb number)
+            'PRSO': 0x11,   # Parser direct object
+            'PRSI': 0x12,   # Parser indirect object
+            'HERE': 0x13,   # Current location
+            'WINNER': 0x14, # Current actor (usually player)
+            'MOVES': 0x15,  # Move counter
+        }
+
+        # Reserve these globals
+        for name, num in self.parser_globals.items():
+            self.globals[name] = num
+        self.next_global = 0x16  # Start user globals after parser globals
+
+        # Standard verb action numbers (V? constants)
+        # These map to PRSA values for common verbs
+        self.verb_actions = {
+            'V?TAKE': 1,
+            'V?DROP': 2,
+            'V?PUT': 3,
+            'V?EXAMINE': 4,
+            'V?LOOK': 5,
+            'V?INVENTORY': 6,
+            'V?QUIT': 7,
+            'V?OPEN': 8,
+            'V?CLOSE': 9,
+            'V?READ': 10,
+            'V?EAT': 11,
+            'V?DRINK': 12,
+            'V?ATTACK': 13,
+            'V?KILL': 14,
+            'V?WAIT': 15,
+            'V?PUSH': 16,
+            'V?PULL': 17,
+            'V?TURN': 18,
+            'V?MOVE': 19,
+            'V?CLIMB': 20,
+            'V?CLIMB-ON': 21,
+            'V?BOARD': 22,
+            'V?LAMP-ON': 23,
+            'V?LAMP-OFF': 24,
+            'V?POUR': 25,
+            'V?TASTE': 26,
+            'V?RUB': 27,
+            'V?LOOK-INSIDE': 28,
+            'V?LOOK-UNDER': 29,
+            'V?SAVE': 30,
+            'V?RESTORE': 31,
+            'V?RESTART': 32,
+            # Add more as needed
+        }
+
+        # Add verb constants to constant table
+        for verb, num in self.verb_actions.items():
+            self.constants[verb] = num
+
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
         # Process globals
@@ -268,6 +326,12 @@ class ImprovedCodeGenerator:
             return self.gen_restore()
         elif op_name == 'VERIFY':
             return self.gen_verify()
+
+        # Parser predicates
+        elif op_name == 'VERB?':
+            return self.gen_verb_test(form.operands)
+        elif op_name == 'PERFORM':
+            return self.gen_perform(form.operands)
 
         # Routine calls - check if it's a routine name
         elif isinstance(form.operator, AtomNode):
@@ -1373,4 +1437,123 @@ class ImprovedCodeGenerator:
         code = bytearray()
         code.append(0xBD)  # Short 0OP, opcode 0x0D
         code.append(0x40)  # Branch byte
+        return bytes(code)
+
+    # ===== Parser Predicates =====
+
+    def gen_verb_test(self, operands: List[ASTNode]) -> bytes:
+        """Generate VERB? test - checks if PRSA matches any of the given verbs.
+
+        Usage: <VERB? TAKE DROP PUT>
+        Expands to: <OR <EQUAL? ,PRSA ,V?TAKE> <EQUAL? ,PRSA ,V?DROP> <EQUAL? ,PRSA ,V?PUT>>
+
+        Returns true (branches) if PRSA equals any of the verb constants.
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+
+        # For single verb, generate simple EQUAL? test
+        if len(operands) == 1:
+            verb_name = operands[0].value if isinstance(operands[0], AtomNode) else str(operands[0])
+            verb_const = f'V?{verb_name}'
+
+            # Get verb number
+            if verb_const in self.constants:
+                verb_num = self.constants[verb_const]
+            else:
+                # Unknown verb - treat as 0
+                verb_num = 0
+
+            # Generate: EQUAL? ,PRSA verb_num
+            # This is JE instruction (2OP opcode 0x01)
+            prsa_var = self.globals['PRSA']
+
+            code.append(0x65)  # Long form 2OP, opcode 0x01 (JE), var/small
+            code.append(prsa_var)  # PRSA variable
+            code.append(verb_num & 0xFF)  # Verb constant
+            code.append(0x40)  # Branch on true, offset 0 (placeholder)
+
+        else:
+            # Multiple verbs - need to check each one
+            # Strategy: Use multiple JE tests with same branch target
+            # If any matches, branch to true
+
+            # For simplicity, generate series of JE tests
+            # Each test branches forward if true
+            # Last test falls through if all false
+
+            for i, operand in enumerate(operands):
+                verb_name = operand.value if isinstance(operand, AtomNode) else str(operand)
+                verb_const = f'V?{verb_name}'
+
+                if verb_const in self.constants:
+                    verb_num = self.constants[verb_const]
+                else:
+                    verb_num = 0
+
+                prsa_var = self.globals['PRSA']
+
+                # JE instruction
+                code.append(0x65)  # Long form 2OP, var/small
+                code.append(prsa_var)
+                code.append(verb_num & 0xFF)
+
+                # Branch byte - for now, simple offset
+                # In real implementation, would need to calculate proper offsets
+                code.append(0x40)  # Branch on true
+
+        return bytes(code)
+
+    def gen_perform(self, operands: List[ASTNode]) -> bytes:
+        """Generate PERFORM action dispatch.
+
+        Usage: <PERFORM action object1 [object2]>
+        Example: <PERFORM ,V?TAKE ,LAMP>
+                 <PERFORM ,V?PUT ,BALL ,BOX>
+
+        This sets PRSA, PRSO, PRSI and calls the object's action routine.
+        Simplified implementation: just sets the globals.
+        Full implementation would dispatch to object ACTION property.
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+
+        # Extract action and objects
+        action = operands[0]
+        obj1 = operands[1] if len(operands) > 1 else None
+        obj2 = operands[2] if len(operands) > 2 else None
+
+        # Set PRSA to action
+        action_val = self.get_operand_value(action)
+        if isinstance(action_val, int):
+            prsa_var = self.globals['PRSA']
+            code.append(0x2D)  # STORE opcode
+            code.append(prsa_var)
+            code.append(action_val & 0xFF)
+
+        # Set PRSO to object1
+        if obj1:
+            obj1_val = self.get_operand_value(obj1)
+            if isinstance(obj1_val, int):
+                prso_var = self.globals['PRSO']
+                code.append(0x2D)  # STORE opcode
+                code.append(prso_var)
+                code.append(obj1_val & 0xFF)
+
+        # Set PRSI to object2 (if provided)
+        if obj2:
+            obj2_val = self.get_operand_value(obj2)
+            if isinstance(obj2_val, int):
+                prsi_var = self.globals['PRSI']
+                code.append(0x2D)  # STORE opcode
+                code.append(prsi_var)
+                code.append(obj2_val & 0xFF)
+
+        # TODO: Call object's ACTION routine
+        # For now, just setting globals is sufficient for testing
+
         return bytes(code)
