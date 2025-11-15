@@ -125,6 +125,7 @@ class ZILCompiler:
         self.log(f"  {len(program.objects)} objects")
         self.log(f"  {len(program.rooms)} rooms")
         self.log(f"  {len(program.globals)} globals")
+        self.log(f"  {len(program.propdefs)} property definitions")
         self.log(f"  {len(program.syntax)} syntax definitions")
 
         # Use program version if specified
@@ -174,25 +175,39 @@ class ZILCompiler:
                     attr_mask |= (1 << bit_num)
             return attr_mask
 
+        # Build property mapping from PROPDEF declarations
+        prop_map = {
+            'DESC': 1,    # Standard property always #1
+            'LDESC': 2,   # Standard property always #2
+        }
+        next_prop_num = 3
+
+        # Add user-defined properties from PROPDEF
+        for propdef in program.propdefs:
+            if propdef.name not in prop_map:
+                prop_map[propdef.name] = next_prop_num
+                next_prop_num += 1
+                self.log(f"  PROPDEF {propdef.name} -> property #{prop_map[propdef.name]}")
+
         # Helper to extract property number and value
         def extract_properties(obj_node):
             """Extract properties from object node."""
             props = {}
             for key, value in obj_node.properties.items():
-                # Map property name to number
-                # For now, use simplified mapping
-                # In full implementation, would need proper property number assignment
-                prop_map = {
-                    'DESC': 1,
-                    'LDESC': 2,
-                    'SIZE': 3,
-                    'VALUE': 4,
-                    'CAPACITY': 5,
-                }
-
                 if key in prop_map:
                     prop_num = prop_map[key]
                     # Extract value from AST node
+                    if hasattr(value, 'value'):
+                        props[prop_num] = value.value
+                    else:
+                        props[prop_num] = value
+                elif key not in ['FLAGS', 'SYNONYM', 'ADJECTIVE']:
+                    # Unknown property, assign next number
+                    if key not in prop_map:
+                        prop_map[key] = next_prop_num
+                        self.log(f"  Auto-assigned {key} -> property #{next_prop_num}")
+                        next_prop_num += 1
+                    prop_num = prop_map[key]
                     if hasattr(value, 'value'):
                         props[prop_num] = value.value
                     else:

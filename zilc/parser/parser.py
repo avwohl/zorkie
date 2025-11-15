@@ -65,6 +65,8 @@ class Parser:
                 program.globals.append(node)
             elif isinstance(node, ConstantNode):
                 program.constants.append(node)
+            elif isinstance(node, PropdefNode):
+                program.propdefs.append(node)
             elif isinstance(node, SyntaxNode):
                 program.syntax.append(node)
             elif isinstance(node, VersionNode):
@@ -134,6 +136,11 @@ class Parser:
 
             elif op_name == "CONSTANT":
                 node = self.parse_constant(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "PROPDEF":
+                node = self.parse_propdef(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 
@@ -364,6 +371,23 @@ class Parser:
         value = self.parse_expression()
 
         return ConstantNode(name, value, line, col)
+
+    def parse_propdef(self, line: int, col: int):
+        """Parse PROPDEF property definition."""
+        # <PROPDEF name default-value>
+        from .ast_nodes import PropdefNode
+
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected property name")
+        name = self.current_token.value
+        self.advance()
+
+        # Default value (usually a number)
+        default_value = None
+        if self.current_token.type != TokenType.RANGLE:
+            default_value = self.parse_expression()
+
+        return PropdefNode(name, default_value, line, col)
 
     def parse_table(self, table_type: str, line: int, col: int) -> TableNode:
         """Parse TABLE/ITABLE/LTABLE definition."""

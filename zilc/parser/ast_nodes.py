@@ -27,6 +27,7 @@ class NodeType(Enum):
     VERSION = auto()       # <VERSION n>
     GLOBAL = auto()        # <GLOBAL ...>
     CONSTANT = auto()      # <CONSTANT ...>
+    PROPDEF = auto()       # <PROPDEF name default>
 
     # Table/Array
     TABLE = auto()         # <TABLE ...>
@@ -243,6 +244,18 @@ class ConstantNode(ASTNode):
         return f"Constant({self.name})"
 
 
+class PropdefNode(ASTNode):
+    """PROPDEF property definition."""
+    def __init__(self, name: str, default_value: ASTNode = None,
+                 line: int = 0, column: int = 0):
+        super().__init__(NodeType.PROPDEF, line, column)
+        self.name = name
+        self.default_value = default_value
+
+    def __repr__(self):
+        return f"Propdef({self.name})"
+
+
 @dataclass
 class Program:
     """Top-level program node containing all definitions."""
@@ -252,6 +265,7 @@ class Program:
     rooms: List[RoomNode] = field(default_factory=list)
     globals: List[GlobalNode] = field(default_factory=list)
     constants: List[ConstantNode] = field(default_factory=list)
+    propdefs: List[PropdefNode] = field(default_factory=list)
     syntax: List[SyntaxNode] = field(default_factory=list)
     tables: List[TableNode] = field(default_factory=list)
 
