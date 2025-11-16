@@ -403,7 +403,7 @@ Educational implementation for learning compiler design, virtual machines, and h
 - SYNTAX to action mapping
 - **Tests**: parser_test, perform_test, vocabulary_test, syntax_test
 
-### 📊 Planetfall Progress: ~45% Complete
+### 📊 Planetfall Progress: ~50% Complete
 Current feature implementation vs. Planetfall requirements:
 - ✅ Multi-file compilation (9 files)
 - ✅ PROPDEF (SIZE, CAPACITY, VALUE)
@@ -465,10 +465,24 @@ Current feature implementation vs. Planetfall requirements:
 - **Test**: predicate_test.zil (1,214 bytes)
 - Tests ZERO?, EQUAL?, L?, G? predicates
 
+### ✅ Print Operations (PRINTB, PRINTI, PRINTD)
+- **Commit**: c7c1356
+- PRINTB - Print from byte array (PRINT_PADDR) - 9 uses
+- PRINTI - Print inline strings (property values) - 1 use
+- PRINTD - Print decimal (alias for PRINTN) - 5 uses
+- **Test**: print_test.zil (976 bytes)
+
+### ✅ Property Operations (PTSIZE, NEXTP)
+- **Commit**: 442ee50
+- PTSIZE - Get property length (GET_PROP_LEN) - 7 uses
+- NEXTP - Get next property for iteration (GET_NEXT_PROP)
+- Completes core property manipulation system
+- **Test**: property_ops_test.zil (1,021 bytes)
+
 ---
 
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.4.3 (Parser + Multi-file + PROPDEF + DEFMAC + Tables + Predicates)
+**Current Version**: 0.5.0 (Complete property/table system + DEFMAC + Print ops)
 
 **Status**: 🟢 Active Development - Ready for Real Game Compilation!
