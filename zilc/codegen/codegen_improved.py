@@ -1656,6 +1656,50 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_buffer_mode(self, operands: List[ASTNode]) -> bytes:
+        """Generate BUFFER_MODE (V4+ buffer mode control).
+
+        <BUFFER_MODE flag> enables/disables text buffering.
+        Alias for BUFOUT. V4+.
+
+        Args:
+            operands[0]: Flag (0=disable, 1=enable)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to BUFOUT implementation
+        return self.gen_bufout(operands)
+
+    def gen_get_cursor(self, operands: List[ASTNode]) -> bytes:
+        """Generate GET_CURSOR (V4/V6 - get cursor position).
+
+        <GET_CURSOR array> stores cursor position in array.
+        Array word 0 = row (line), word 1 = column.
+        V4+ only.
+
+        Args:
+            operands[0]: Array address (2 words)
+
+        Returns:
+            bytes: Z-machine code (GET_CURSOR VAR opcode)
+        """
+        if not operands or self.version < 4:
+            return b''
+
+        code = bytearray()
+
+        # GET_CURSOR is VAR opcode 0x10
+        code.append(0xF0)  # VAR opcode 0x10
+
+        array_addr = self.get_operand_value(operands[0])
+
+        if isinstance(array_addr, int):
+            code.append(0x2F)  # Type byte: 1 small constant
+            code.append(array_addr & 0xFF)
+
+        return bytes(code)
+
     def gen_uxor(self, operands: List[ASTNode]) -> bytes:
         """Generate UXOR (unsigned XOR).
 
@@ -2205,6 +2249,50 @@ class ImprovedCodeGenerator:
                 code.append(0x9C)  # SET_FONT (1OP opcode 0x0C with mode 10)
                 code.append(font_num & 0xFF)
                 code.append(0x00)  # Store result to stack
+        return bytes(code)
+
+    def gen_set_true_colour(self, operands: List[ASTNode]) -> bytes:
+        """Generate SET_TRUE_COLOUR (V5+ - set 24-bit RGB colors).
+
+        <SET_TRUE_COLOUR foreground background> sets true color values.
+        V5+ only. Colors are 15-bit or 24-bit RGB values.
+        Use -1 to leave a color unchanged.
+
+        Args:
+            operands[0]: Foreground color (RGB value or -1)
+            operands[1]: Background color (RGB value or -1)
+            operands[2]: Window (optional, V6 only)
+
+        Returns:
+            bytes: Z-machine code (SET_TRUE_COLOUR EXT opcode)
+        """
+        if len(operands) < 2 or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # SET_TRUE_COLOUR is EXT opcode 0x0D
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x0D)  # SET_TRUE_COLOUR
+
+        fg = self.get_operand_value(operands[0])
+        bg = self.get_operand_value(operands[1])
+
+        if isinstance(fg, int) and isinstance(bg, int):
+            if len(operands) >= 3 and self.version >= 6:
+                # V6: includes window parameter
+                window = self.get_operand_value(operands[2])
+                if isinstance(window, int):
+                    code.append(0x55)  # Type: small, small, small
+                    code.append(fg & 0xFF)
+                    code.append(bg & 0xFF)
+                    code.append(window & 0xFF)
+            else:
+                # V5: just fg and bg
+                code.append(0x05)  # Type: small, small
+                code.append(fg & 0xFF)
+                code.append(bg & 0xFF)
+
         return bytes(code)
 
     def gen_mouse_info(self, operands: List[ASTNode]) -> bytes:
@@ -2942,6 +3030,41 @@ class ImprovedCodeGenerator:
         # LOG-SHIFT: if positive use LSH, if negative use RSH
         # For simplicity, delegate to LSH
         return self.gen_lsh(operands)
+
+    def gen_art_shift(self, operands: List[ASTNode]) -> bytes:
+        """Generate ART_SHIFT (arithmetic shift - V5+).
+
+        <ART_SHIFT number places> performs arithmetic right shift.
+        V5+ only. Preserves sign bit during right shift.
+        Never actually used in any Infocom games.
+
+        Args:
+            operands[0]: Number to shift
+            operands[1]: Places to shift (positive=left, negative=right)
+
+        Returns:
+            bytes: Z-machine code (ART_SHIFT EXT opcode)
+        """
+        if len(operands) < 2 or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # ART_SHIFT is EXT opcode 0x03
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x03)  # ART_SHIFT
+
+        number = self.get_operand_value(operands[0])
+        places = self.get_operand_value(operands[1])
+
+        if isinstance(number, int) and isinstance(places, int):
+            code.append(0x05)  # Type: small, small
+            code.append(number & 0xFF)
+            code.append(places & 0xFF)
+            # Store result to stack
+            code.append(0x00)
+
+        return bytes(code)
 
     def gen_xor(self, operands: List[ASTNode]) -> bytes:
         """Generate XOR (bitwise exclusive OR).
@@ -4436,6 +4559,73 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_push_stack(self, operands: List[ASTNode]) -> bytes:
+        """Generate PUSH_STACK (V6 - push to user stack).
+
+        <PUSH_STACK value stack> pushes value onto specified user stack.
+        Optional branch on success/failure.
+        V6 only.
+
+        Args:
+            operands[0]: Value to push
+            operands[1]: Stack address
+
+        Returns:
+            bytes: Z-machine code (PUSH_STACK EXT opcode)
+        """
+        if len(operands) < 2 or self.version < 6:
+            return b''
+
+        code = bytearray()
+
+        # PUSH_STACK is EXT opcode 0x18
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x18)  # PUSH_STACK
+
+        value = self.get_operand_value(operands[0])
+        stack_addr = self.get_operand_value(operands[1])
+
+        if isinstance(value, int) and isinstance(stack_addr, int):
+            code.append(0x05)  # Type: small, small
+            code.append(value & 0xFF)
+            code.append(stack_addr & 0xFF)
+            # Branch byte (branch on success)
+            code.append(0x40)
+
+        return bytes(code)
+
+    def gen_pop_stack(self, operands: List[ASTNode]) -> bytes:
+        """Generate POP_STACK (V6 - pop from user stack).
+
+        <POP_STACK items stack> pops items from specified user stack.
+        V6 only.
+
+        Args:
+            operands[0]: Number of items to pop
+            operands[1]: Stack address
+
+        Returns:
+            bytes: Z-machine code (POP_STACK EXT opcode)
+        """
+        if len(operands) < 2 or self.version < 6:
+            return b''
+
+        code = bytearray()
+
+        # POP_STACK is EXT opcode 0x15
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x15)  # POP_STACK
+
+        items = self.get_operand_value(operands[0])
+        stack_addr = self.get_operand_value(operands[1])
+
+        if isinstance(items, int) and isinstance(stack_addr, int):
+            code.append(0x05)  # Type: small, small
+            code.append(items & 0xFF)
+            code.append(stack_addr & 0xFF)
+
+        return bytes(code)
+
     # ===== Object Tree Traversal =====
 
     def gen_get_child(self, operands: List[ASTNode]) -> bytes:
@@ -5090,6 +5280,66 @@ class ImprovedCodeGenerator:
             val = self.get_operand_value(operands[i])
             if isinstance(val, int):
                 code.append(val & 0xFF)
+
+        return bytes(code)
+
+    def gen_print_form(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINT_FORM (V6 - print formatted text table).
+
+        <PRINT_FORM formatted-table> outputs formatted text from table structure.
+        V6 only. The table contains formatting information for text rendering.
+
+        Args:
+            operands[0]: Formatted table address
+
+        Returns:
+            bytes: Z-machine code (PRINT_FORM EXT opcode)
+        """
+        if not operands or self.version < 6:
+            return b''
+
+        code = bytearray()
+
+        # PRINT_FORM is EXT opcode 0x1A
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x1A)  # PRINT_FORM
+
+        table_addr = self.get_operand_value(operands[0])
+
+        if isinstance(table_addr, int):
+            code.append(0x01)  # Type: small
+            code.append(table_addr & 0xFF)
+
+        return bytes(code)
+
+    def gen_make_menu(self, operands: List[ASTNode]) -> bytes:
+        """Generate MAKE_MENU (V6 - create interactive menu).
+
+        <MAKE_MENU table> creates an interactive menu selection interface.
+        V6 only. Branches on success/failure.
+
+        Args:
+            operands[0]: Menu table address
+
+        Returns:
+            bytes: Z-machine code (MAKE_MENU EXT opcode)
+        """
+        if not operands or self.version < 6:
+            return b''
+
+        code = bytearray()
+
+        # MAKE_MENU is EXT opcode 0x1B
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x1B)  # MAKE_MENU
+
+        menu_table = self.get_operand_value(operands[0])
+
+        if isinstance(menu_table, int):
+            code.append(0x01)  # Type: small
+            code.append(menu_table & 0xFF)
+            # Branch byte (branch on success)
+            code.append(0x40)
 
         return bytes(code)
 

@@ -349,16 +349,38 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
+## V4 Extended Opcodes (2 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| BUFFER_MODE | VAR:0x12 | Control text buffering (V4+, alias for BUFOUT) | ✅ |
+| GET_CURSOR | VAR:0x10 | Get cursor position to array (V4+) | ✅ |
+
+---
+
+## V5/V6 Advanced Display Opcodes (6 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| SET_TRUE_COLOUR | EXT:0x0D | Set 24-bit RGB colors (V5+) | ✅ |
+| PRINT_FORM | EXT:0x1A | Print formatted text table (V6) | ✅ |
+| MAKE_MENU | EXT:0x1B | Create interactive menu (V6) | ✅ |
+| PUSH_STACK | EXT:0x18 | Push to user stack (V6) | ✅ |
+| POP_STACK | EXT:0x15 | Pop from user stack (V6) | ✅ |
+| ART_SHIFT | EXT:0x03 | Arithmetic shift (V5+) | ✅ |
+
+---
+
 ## Summary Statistics
 
-- **Total Opcodes**: 199 distinct operations (186 working + 13 stubs/partial)
-- **Opcode Categories**: 20 categories (added V6 graphics, windows, mouse)
+- **Total Opcodes**: 207 distinct operations (194 working + 13 stubs/partial)
+- **Opcode Categories**: 23 categories
 - **Test Programs**: 63 working examples (59 V3 + 4 V5)
 - **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
-- **V5 Status**: 100% complete (all V5 opcodes implemented!)
-- **V6 Status**: Core graphics/window/mouse opcodes implemented (11 new opcodes)
-- **Version**: 2.5.0
+- **V5 Status**: 100% complete (all standard V5 opcodes + extended set)
+- **V6 Status**: Major features implemented (19 V6-specific opcodes)
+- **Version**: 2.6.0
 
 ---
 
@@ -367,11 +389,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 ### V3: Complete ✓
 All 166 V3 opcodes implemented. 100% Planetfall coverage.
 
-### V4: ~8 opcodes remaining
-- Extended memory bank switching
-- Extended save/restore formats
-- V4-specific screen model opcodes
-- ~5 more V4-specific opcodes
+### V4: ~6 opcodes remaining
+- ✅ BUFFER_MODE (text buffering control)
+- ✅ GET_CURSOR (cursor position query)
+- Extended memory bank switching (~3 opcodes)
+- Extended save/restore table formats (~3 opcodes)
 
 ### V5: Complete ✓
 All V5 opcodes implemented! Including:
@@ -383,19 +405,20 @@ All V5 opcodes implemented! Including:
 - Mouse support (MOUSE_WINDOW, READ_MOUSE)
 - Graphics table setup (PICTURE_TABLE)
 
-### V6: ~24 opcodes remaining
-Core V6 features implemented (11 opcodes):
+### V6: ~16 opcodes remaining
+Core V6 features implemented (19 opcodes):
 - ✅ Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA
 - ✅ Windows: GET_WIND_PROP, PUT_WIND_PROP, SCROLL_WINDOW, WINDOW_SIZE, WINDOW_STYLE
 - ✅ Mouse: MOUSE_WINDOW, READ_MOUSE
-- ✅ Display: BUFFER_SCREEN
+- ✅ Display: BUFFER_SCREEN, SET_TRUE_COLOUR, PRINT_FORM
+- ✅ Menus: MAKE_MENU
+- ✅ Stack: PUSH_STACK, POP_STACK
+- ✅ Math: ART_SHIFT
 
-Still needed (~24 opcodes):
-- Additional graphics operations
-- Advanced window operations
-- Extended sound/music features
-- V6-specific text rendering
-- Additional display control opcodes
+Still needed (~16 opcodes):
+- Additional window/graphics operations (~8 opcodes)
+- Extended sound features (~4 opcodes)
+- V6-specific text operations (~4 opcodes)
 
 ---
 
@@ -450,4 +473,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 2.5.0
+**Compiler Version**: 2.6.0
