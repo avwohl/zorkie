@@ -201,6 +201,7 @@ class ZILCompiler:
         # Helper to extract property number and value
         def extract_properties(obj_node):
             """Extract properties from object node."""
+            nonlocal next_prop_num  # Allow modification of outer scope variable
             props = {}
             for key, value in obj_node.properties.items():
                 if key in prop_map:

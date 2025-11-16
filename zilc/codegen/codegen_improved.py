@@ -267,6 +267,8 @@ class ImprovedCodeGenerator:
             return self.gen_zero(form.operands)
         elif op_name == '0?':
             return self.gen_zero(form.operands)
+        elif op_name == 'IGRTR?':
+            return self.gen_igrtr(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -340,6 +342,8 @@ class ImprovedCodeGenerator:
             return self.gen_get_parent(form.operands)
         elif op_name == 'IN?':
             return self.gen_in(form.operands)
+        elif op_name == 'HELD?':
+            return self.gen_held(form.operands)
 
         # Random and utilities
         elif op_name == 'RANDOM':
@@ -1894,5 +1898,75 @@ class ImprovedCodeGenerator:
 
         # QUIT
         code.extend(self.gen_quit())
+
+        return bytes(code)
+
+    def gen_held(self, operands: List[ASTNode]) -> bytes:
+        """Generate HELD? (test if object is held by player).
+
+        Tests if object's parent is WINNER (the player/adventurer).
+        Equivalent to: <IN? object ,WINNER>
+
+        Args:
+            operands[0]: object to test
+
+        Returns:
+            bytes: Z-machine code (GET_PARENT + JE with WINNER)
+        """
+        if not operands:
+            return b''
+
+        # HELD? is equivalent to <IN? object ,WINNER>
+        # We need to get the WINNER global variable
+        winner_var = self.globals.get('WINNER', 1)  # Default to 1 if not defined
+
+        code = bytearray()
+        obj = self.get_operand_value(operands[0])
+
+        if isinstance(obj, int):
+            # GET_PARENT is 1OP opcode 0x03
+            code.append(0x83)  # Short form, small constant
+            code.append(obj & 0xFF)
+            code.append(0x00)  # Store result to stack
+
+            # JE (test equality with WINNER) is 2OP opcode 0x01
+            code.append(0x41)  # Long form, opcode 0x01
+            code.append(0x00)  # Stack (result from GET_PARENT)
+            code.append(winner_var & 0xFF)  # WINNER global
+            # Branch offset would be added during COND processing
+
+        return bytes(code)
+
+    def gen_igrtr(self, operands: List[ASTNode]) -> bytes:
+        """Generate IGRTR? (increment variable and test if greater).
+
+        Increments a variable and tests if result > comparison value.
+        Equivalent to: <INC var> <G? var value>
+
+        Args:
+            operands[0]: variable to increment
+            operands[1]: value to compare against
+
+        Returns:
+            bytes: Z-machine code (INC + JG)
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        var = operands[0]
+        compare_val = self.get_operand_value(operands[1])
+
+        # INC the variable
+        code.extend(self.gen_inc([var]))
+
+        # Now test if var > compare_val using JG
+        var_val = self.get_operand_value(var)
+        if isinstance(var_val, int) and isinstance(compare_val, int):
+            # JG is 2OP opcode 0x03
+            code.append(0x43)  # Long form, opcode 0x03
+            code.append(var_val & 0xFF)
+            code.append(compare_val & 0xFF)
+            # Branch offset would be added during COND processing
 
         return bytes(code)

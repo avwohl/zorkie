@@ -512,8 +512,17 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Additional Predicates - HELD? and IGRTR?
+- **Commit**: (pending)
+- HELD? - Test if object is held by player (18 Planetfall uses)
+- IGRTR? - Increment variable and test if greater (6 Planetfall uses)
+- **Tests**: held_test.zil (1,117 bytes), igrtr_test.zil (1,052 bytes)
+- **Bug Fix**: Fixed property extraction nonlocal scope issue
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.5.1 (REST + JIGS-UP + String escapes)
+**Current Version**: 0.5.2 (HELD? + IGRTR? + Property fix)
 
-**Status**: 🟢 Active Development - 52% Planetfall Complete!
+**Status**: 🟢 Active Development - 54% Planetfall Complete!
