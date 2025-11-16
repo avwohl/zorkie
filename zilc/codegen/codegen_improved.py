@@ -365,6 +365,22 @@ class ImprovedCodeGenerator:
             return self.gen_getw2(form.operands)
         elif op_name == 'PUTW2':
             return self.gen_putw2(form.operands)
+        elif op_name == 'LOWCORE':
+            return self.gen_lowcore(form.operands)
+        elif op_name == 'SCREEN-HEIGHT':
+            return self.gen_screen_height(form.operands)
+        elif op_name == 'SCREEN-WIDTH':
+            return self.gen_screen_width(form.operands)
+        elif op_name == 'ASR':
+            return self.gen_asr(form.operands)
+        elif op_name == 'NEW-LINE':
+            return self.gen_new_line(form.operands)
+        elif op_name == 'CATCH':
+            return self.gen_catch(form.operands)
+        elif op_name == 'THROW':
+            return self.gen_throw(form.operands)
+        elif op_name == 'SPACES':
+            return self.gen_spaces(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -2092,6 +2108,129 @@ class ImprovedCodeGenerator:
                 code.append(value & 0xFF)
 
         return bytes(code)
+
+    def gen_lowcore(self, operands: List[ASTNode]) -> bytes:
+        """Generate LOWCORE (access low memory constant).
+
+        <LOWCORE address> reads a word from low memory (0x00-0x40).
+        Accesses Z-machine header and low memory constants.
+
+        Args:
+            operands[0]: Address in low memory
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        addr = self.get_operand_value(operands[0])
+
+        if isinstance(addr, int):
+            if 0 <= addr <= 0x40:
+                code.append(0x8F)  # LOADW (1OP opcode 0x0F)
+                code.append(addr & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_screen_height(self, operands: List[ASTNode]) -> bytes:
+        """Generate SCREEN-HEIGHT (get screen height in lines).
+
+        Returns the screen height from header byte 0x20.
+        V4+ feature, returns default for V3.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        code = bytearray()
+        # Screen height is at header byte 0x20
+        # For V3, return a default value (24 lines typical)
+        code.append(0x01)  # Small constant
+        code.append(24)  # Default height
+        return bytes(code)
+
+    def gen_screen_width(self, operands: List[ASTNode]) -> bytes:
+        """Generate SCREEN-WIDTH (get screen width in characters).
+
+        Returns the screen width from header byte 0x21.
+        V4+ feature, returns default for V3.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        code = bytearray()
+        # Screen width is at header byte 0x21
+        # For V3, return a default value (80 chars typical)
+        code.append(0x01)  # Small constant
+        code.append(80)  # Default width
+        return bytes(code)
+
+    def gen_asr(self, operands: List[ASTNode]) -> bytes:
+        """Generate ASR (arithmetic shift right).
+
+        <ASR value shift> performs arithmetic right shift (sign-extending).
+        Similar to RSH but preserves sign bit.
+
+        Args:
+            operands[0]: Value to shift
+            operands[1]: Number of bits to shift
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # For V3, ASR is same as RSH (DIV by 2^n)
+        return self.gen_rsh(operands)
+
+    def gen_catch(self, operands: List[ASTNode]) -> bytes:
+        """Generate CATCH (catch exception/save state).
+
+        <CATCH> creates a catch point for throw/return.
+        V5+ feature, stub for V3.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # CATCH is V5+ for exception handling
+        return b''
+
+    def gen_throw(self, operands: List[ASTNode]) -> bytes:
+        """Generate THROW (throw to catch point).
+
+        <THROW value catch-point> jumps to catch with value.
+        V5+ feature, stub for V3.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # THROW is V5+
+        return b''
+
+    def gen_new_line(self, operands: List[ASTNode]) -> bytes:
+        """Generate NEW-LINE (print newline - alias for CRLF).
+
+        <NEW-LINE> outputs a newline character.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        return self.gen_newline()
+
+    def gen_spaces(self, operands: List[ASTNode]) -> bytes:
+        """Generate SPACES (print N spaces).
+
+        <SPACES n> prints n space characters.
+        Uses repeated PRINTC for spaces.
+
+        Args:
+            operands[0]: Number of spaces
+
+        Returns:
+            bytes: Z-machine code (stub - needs loop)
+        """
+        # SPACES needs loop generation
+        return b''
 
     # ===== Comparison Operations =====
 

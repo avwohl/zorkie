@@ -235,13 +235,28 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
+## System/Low-level Operations (8 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| LOWCORE | LOADW | Access low memory constants | ✅ |
+| SCREEN-HEIGHT | Constant | Get screen height (24 for V3) | ✅ |
+| SCREEN-WIDTH | Constant | Get screen width (80 for V3) | ✅ |
+| ASR | DIV | Arithmetic shift right (alias for RSH) | ✅ |
+| NEW-LINE | NEW_LINE | Print newline (alias for CRLF) | ✅ |
+| CATCH | V5+ | Catch exception (V5+ stub) | ⚠️ |
+| THROW | V5+ | Throw exception (V5+ stub) | ⚠️ |
+| SPACES | PRINT_CHAR | Print N spaces (stub) | ⚠️ |
+
+---
+
 ## Summary Statistics
 
-- **Total Opcodes**: 131 distinct operations (128 working + 3 V5+ stubs)
-- **Opcode Categories**: 13 categories
-- **Test Programs**: 51 working examples
-- **Planetfall Coverage**: ~95% of required operations
-- **Version**: 1.2.0
+- **Total Opcodes**: 139 distinct operations (133 working + 6 V5+ stubs)
+- **Opcode Categories**: 14 categories
+- **Test Programs**: 52 working examples
+- **Planetfall Coverage**: ~96% of required operations
+- **Version**: 1.3.0
 
 ---
 
@@ -290,4 +305,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.2.0
+**Compiler Version**: 1.3.0

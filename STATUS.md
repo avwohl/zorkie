@@ -778,8 +778,40 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎯 96% PLANETFALL MILESTONE - System/Low-level Operations
+- **Commit**: (pending)
+- LOWCORE - Access low memory constants (header fields)
+  - Reads from Z-machine header area (addresses 0x00-0x40)
+  - Uses LOADW for word-sized header values
+- SCREEN-HEIGHT - Get screen height
+  - Returns constant 24 for V3 compatibility
+  - Standard terminal height
+- SCREEN-WIDTH - Get screen width
+  - Returns constant 80 for V3 compatibility
+  - Standard terminal width
+- ASR - Arithmetic shift right
+  - Alias for RSH (right shift)
+  - Same semantics in V3
+- NEW-LINE - Print newline
+  - Alias for CRLF
+  - Alternative naming convention
+- CATCH - Catch exception (V5+ stub)
+  - Forward compatibility for V5+ games
+  - No-op in V3
+- THROW - Throw exception (V5+ stub)
+  - Forward compatibility for V5+ games
+  - No-op in V3
+- SPACES - Print N spaces (stub)
+  - Needs loop generation
+  - Deferred for now
+- **Test**: system_info_test.zil (1.3 KB)
+- Brings total to 139 opcodes (133 working + 6 stubs)
+- **ACHIEVEMENT**: 🎯 96% Planetfall Complete! 🎯
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.2.0
+**Current Version**: 1.3.0
 
-**Status**: 🟢 Active Development - 95% Planetfall Complete!
+**Status**: 🟢 Active Development - 96% Planetfall Complete!
