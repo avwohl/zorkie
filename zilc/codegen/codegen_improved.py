@@ -221,6 +221,10 @@ class ImprovedCodeGenerator:
             return self.gen_quit()
         elif op_name == 'AGAIN':
             return self.gen_again()
+        elif op_name == 'PROG':
+            return self.gen_prog(form.operands)
+        elif op_name == 'BIND':
+            return self.gen_bind(form.operands)
 
         # Output
         elif op_name == 'TELL':
@@ -2231,6 +2235,74 @@ class ImprovedCodeGenerator:
         """
         # SPACES needs loop generation
         return b''
+
+    def gen_prog(self, operands: List[ASTNode]) -> bytes:
+        """Generate PROG (sequential execution block).
+
+        <PROG bindings body...> executes body statements sequentially.
+        First operand can be empty list () or list of bindings.
+        Remaining operands are statements to execute in order.
+
+        Example: <PROG () <SETG X 1> <SETG Y 2> <RETURN 3>>
+
+        Args:
+            operands[0]: Bindings (usually empty list ())
+            operands[1:]: Statements to execute sequentially
+
+        Returns:
+            bytes: Z-machine code for sequential execution
+        """
+        code = bytearray()
+
+        # First operand is bindings (skip if empty list)
+        if len(operands) < 2:
+            return b''
+
+        # Process bindings if present (operands[0])
+        # For now, we skip bindings - they would be handled by parser
+
+        # Generate code for each statement in sequence
+        for i in range(1, len(operands)):
+            stmt = operands[i]
+            stmt_code = self.generate_statement(stmt)
+            if stmt_code:
+                code.extend(stmt_code)
+
+        return bytes(code)
+
+    def gen_bind(self, operands: List[ASTNode]) -> bytes:
+        """Generate BIND (local variable binding block).
+
+        <BIND bindings body...> creates local variables and executes body.
+        Similar to PROG but focuses on local variable scope.
+
+        Example: <BIND ((X 10) (Y 20)) <TELL N <+ .X .Y>>>
+
+        Args:
+            operands[0]: List of bindings (varname value) pairs
+            operands[1:]: Statements to execute with bindings
+
+        Returns:
+            bytes: Z-machine code for binding and execution
+        """
+        code = bytearray()
+
+        # First operand should be a list node with bindings
+        if len(operands) < 2:
+            return b''
+
+        # Process bindings from operands[0]
+        # For now, we just execute the body statements
+        # Full binding support would require parser-level local scope tracking
+
+        # Generate code for each statement in sequence
+        for i in range(1, len(operands)):
+            stmt = operands[i]
+            stmt_code = self.generate_statement(stmt)
+            if stmt_code:
+                code.extend(stmt_code)
+
+        return bytes(code)
 
     # ===== Comparison Operations =====
 

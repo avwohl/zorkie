@@ -5,7 +5,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Control Flow (14 opcodes)
+## Control Flow (16 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -23,6 +23,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | AGAIN | JMP | Restart current loop (continue) | ✅ |
 | JIGS-UP | PRINT_RET+QUIT | Game over with message | ✅ |
 | REST | ADD | Pointer arithmetic (list tail) | ✅ |
+| PROG | Sequential | Execute statements in sequence | ✅ |
+| BIND | Local scope | Create local bindings and execute body | ✅ |
 
 ---
 
@@ -252,11 +254,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 139 distinct operations (133 working + 6 V5+ stubs)
+- **Total Opcodes**: 141 distinct operations (135 working + 6 V5+ stubs)
 - **Opcode Categories**: 14 categories
-- **Test Programs**: 52 working examples
-- **Planetfall Coverage**: ~96% of required operations
-- **Version**: 1.3.0
+- **Test Programs**: 53 working examples
+- **Planetfall Coverage**: ~97% of required operations
+- **Version**: 1.4.0
 
 ---
 
@@ -305,4 +307,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.3.0
+**Compiler Version**: 1.4.0

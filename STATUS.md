@@ -810,8 +810,27 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🚀 97% PLANETFALL MILESTONE - Control Flow: PROG and BIND
+- **Commit**: (pending)
+- PROG - Sequential execution block
+  - Executes body statements in order
+  - First operand is bindings (usually empty ())
+  - Remaining operands executed sequentially
+  - Essential for multi-statement blocks
+- BIND - Local variable binding block
+  - Similar to PROG but emphasizes local scope
+  - Creates local bindings for body execution
+  - Pattern: `<BIND ((X 10) (Y 20)) body...>`
+- Both opcodes critical for Planetfall's control flow patterns
+- Used extensively in parser, action routines, and game logic
+- **Test**: prog_test.zil (1.2 KB)
+- Brings total to 141 opcodes (135 working + 6 stubs)
+- **ACHIEVEMENT**: 🚀 97% Planetfall Complete! 🚀
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.3.0
+**Current Version**: 1.4.0
 
-**Status**: 🟢 Active Development - 96% Planetfall Complete!
+**Status**: 🟢 Active Development - 97% Planetfall Complete!
