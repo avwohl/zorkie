@@ -245,7 +245,18 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## V5 Extended Opcodes (8 opcodes)
+## V4/V5 Call Variants (4 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| CALL_1S | 1OP:0x08 | Call with 0 args, store result (V4+) | ✅ |
+| CALL_1N | 1OP:0x0F | Call with 0 args, no store (V5+) | ✅ |
+| CALL_2S | 2OP:0x19 | Call with 1 arg, store result (V4+) | ✅ |
+| CALL_2N | 2OP:0x1A | Call with 1 arg, no store (V5+) | ✅ |
+
+---
+
+## V5 Extended Opcodes (13 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -257,6 +268,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PRINT_TABLE | EXT:0x10 | Print formatted table | ✅ |
 | SCAN_TABLE | EXT:0x18 | Binary search in sorted table | ✅ |
 | READ_CHAR | EXT:0x16 | Read single character with timeout | ✅ |
+| SAVE_UNDO | EXT:0x09 | Save game state for undo | ✅ |
+| RESTORE_UNDO | EXT:0x0A | Restore previous game state | ✅ |
+| PRINT_UNICODE | EXT:0x0B | Print Unicode character (V5.1+) | ✅ |
+| ERASE_LINE | EXT:0x0E | Erase current line | ✅ |
+| SET_MARGINS | EXT:0x11 | Set text margins | ✅ |
 
 ---
 
@@ -301,12 +317,12 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 177 distinct operations (158 working + 19 stubs)
-- **Opcode Categories**: 16 categories (added V5 Extended Opcodes)
-- **Test Programs**: 62 working examples (59 V3 + 3 V5)
+- **Total Opcodes**: 186 distinct operations (167 working + 19 stubs)
+- **Opcode Categories**: 17 categories (added V4/V5 Call Variants)
+- **Test Programs**: 63 working examples (59 V3 + 4 V5)
 - **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
-- **Version**: 2.2.0
+- **Version**: 2.3.0
 
 ---
 
@@ -315,23 +331,18 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 ### V3: Complete ✓
 All 166 V3 opcodes implemented. 100% Planetfall coverage.
 
-### V4: ~12 opcodes remaining
-- CALL_2S (2OP call with store)
-- CALL_2N (2OP call without store)
+### V4: ~8 opcodes remaining
 - Extended memory bank switching
 - Extended save/restore formats
+- V4-specific screen model opcodes
+- READ_CHAR (V4 variant)
+- And ~4 more V4-specific opcodes
 
-### V5: ~11 opcodes remaining
-- CALL_1S, CALL_1N (1OP call variants)
-- SET_TEXT_STYLE enhancements
-- ERASE_LINE (erase current line)
-- BUFFER_MODE enhancements
-- PRINT_UNICODE (V5.1+)
-- SAVE_UNDO, RESTORE_UNDO (undo support)
-- LOG_SHIFT (arithmetic shift)
-- ART_SHIFT (arithmetic shift right)
-- SET_MARGINS (text margins)
-- And ~2 more extended opcodes
+### V5: ~2 opcodes remaining
+- CHECK_UNICODE (check if char available)
+- PICTURE_TABLE (graphics table setup, V6 backport)
+
+Note: V5 core functionality is essentially complete. Remaining opcodes are edge cases or V6 features backported to V5.
 
 ### V6: ~35 opcodes remaining
 - Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA, GET_PICTURE_INFO

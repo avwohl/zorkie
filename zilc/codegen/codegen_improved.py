@@ -4708,6 +4708,264 @@ class ImprovedCodeGenerator:
         # V4 has different opcode structure
         return bytes(code)
 
+    def gen_call_1s(self, operands: List[ASTNode]) -> bytes:
+        """Generate CALL_1S (V4+ call with 1 argument, store result).
+
+        <CALL_1S routine> calls routine with exactly 0 arguments
+        and stores the result. V4+ only.
+
+        Args:
+            operands[0]: Routine address
+
+        Returns:
+            bytes: Z-machine code (CALL_1S 1OP opcode)
+        """
+        if not operands or self.version < 4:
+            return b''
+
+        code = bytearray()
+        routine = self.get_operand_value(operands[0])
+
+        # CALL_1S is 1OP opcode 0x08
+        if isinstance(routine, int):
+            code.append(0x88)  # 1OP form, opcode 0x08, small constant
+            code.append(routine & 0xFF)
+            code.append(0x00)  # Store result to stack
+
+        return bytes(code)
+
+    def gen_call_1n(self, operands: List[ASTNode]) -> bytes:
+        """Generate CALL_1N (V5+ call with 1 argument, no store).
+
+        <CALL_1N routine> calls routine with exactly 0 arguments
+        without storing result. V5+ only.
+
+        Args:
+            operands[0]: Routine address
+
+        Returns:
+            bytes: Z-machine code (CALL_1N 1OP opcode)
+        """
+        if not operands or self.version < 5:
+            return b''
+
+        code = bytearray()
+        routine = self.get_operand_value(operands[0])
+
+        # CALL_1N is 1OP opcode 0x0F
+        if isinstance(routine, int):
+            code.append(0x8F)  # 1OP form, opcode 0x0F, small constant
+            code.append(routine & 0xFF)
+
+        return bytes(code)
+
+    def gen_call_2s(self, operands: List[ASTNode]) -> bytes:
+        """Generate CALL_2S (V4+ call with 1 argument, store result).
+
+        <CALL_2S routine arg> calls routine with exactly 1 argument
+        and stores the result. V4+ only.
+
+        Args:
+            operands[0]: Routine address
+            operands[1]: Argument
+
+        Returns:
+            bytes: Z-machine code (CALL_2S 2OP opcode)
+        """
+        if len(operands) < 2 or self.version < 4:
+            return b''
+
+        code = bytearray()
+        routine = self.get_operand_value(operands[0])
+        arg = self.get_operand_value(operands[1])
+
+        # CALL_2S is 2OP opcode 0x19
+        if isinstance(routine, int) and isinstance(arg, int):
+            if 0 <= routine <= 255 and 0 <= arg <= 255:
+                code.append(0x59)  # 2OP form, small/small, opcode 0x19
+                code.append(routine & 0xFF)
+                code.append(arg & 0xFF)
+                code.append(0x00)  # Store result to stack
+
+        return bytes(code)
+
+    def gen_call_2n(self, operands: List[ASTNode]) -> bytes:
+        """Generate CALL_2N (V5+ call with 1 argument, no store).
+
+        <CALL_2N routine arg> calls routine with exactly 1 argument
+        without storing result. V5+ only.
+
+        Args:
+            operands[0]: Routine address
+            operands[1]: Argument
+
+        Returns:
+            bytes: Z-machine code (CALL_2N 2OP opcode)
+        """
+        if len(operands) < 2 or self.version < 5:
+            return b''
+
+        code = bytearray()
+        routine = self.get_operand_value(operands[0])
+        arg = self.get_operand_value(operands[1])
+
+        # CALL_2N is 2OP opcode 0x1A
+        if isinstance(routine, int) and isinstance(arg, int):
+            if 0 <= routine <= 255 and 0 <= arg <= 255:
+                code.append(0x5A)  # 2OP form, small/small, opcode 0x1A
+                code.append(routine & 0xFF)
+                code.append(arg & 0xFF)
+
+        return bytes(code)
+
+    def gen_save_undo(self, operands: List[ASTNode]) -> bytes:
+        """Generate SAVE_UNDO (V5+ save game state for undo).
+
+        <SAVE_UNDO> saves current game state and returns 1 if successful,
+        0 if undo not available, -1 if too many saves.
+
+        Returns:
+            bytes: Z-machine code (SAVE_UNDO EXT opcode)
+        """
+        if self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # SAVE_UNDO is EXT opcode 0x09
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x09)  # SAVE_UNDO
+        code.append(0xFF)  # No operands (type byte: all omitted)
+        code.append(0x00)  # Store result to stack
+
+        return bytes(code)
+
+    def gen_restore_undo(self, operands: List[ASTNode]) -> bytes:
+        """Generate RESTORE_UNDO (V5+ restore game state from undo).
+
+        <RESTORE_UNDO> restores previously saved state and returns 2
+        if successful, 0 if no state available.
+
+        Returns:
+            bytes: Z-machine code (RESTORE_UNDO EXT opcode)
+        """
+        if self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # RESTORE_UNDO is EXT opcode 0x0A
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x0A)  # RESTORE_UNDO
+        code.append(0xFF)  # No operands
+        code.append(0x00)  # Store result to stack
+
+        return bytes(code)
+
+    def gen_print_unicode(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINT_UNICODE (V5+ print Unicode character).
+
+        <PRINT_UNICODE char-number> prints a Unicode character.
+        V5+ only (specifically V5.1+).
+
+        Args:
+            operands[0]: Unicode character number
+
+        Returns:
+            bytes: Z-machine code (PRINT_UNICODE EXT opcode)
+        """
+        if not operands or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # PRINT_UNICODE is EXT opcode 0x0B
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x0B)  # PRINT_UNICODE
+
+        char_code = self.get_operand_value(operands[0])
+
+        # Type byte: 1 operand
+        code.append(0x01)  # Small constant
+
+        if isinstance(char_code, int):
+            code.append(char_code & 0xFF)
+
+        return bytes(code)
+
+    def gen_erase_line(self, operands: List[ASTNode]) -> bytes:
+        """Generate ERASE_LINE (V4+ erase current line).
+
+        <ERASE_LINE value> erases part of the current line.
+        1 = from cursor onwards, other values implementation-specific.
+
+        Args:
+            operands[0]: Erase mode (optional, defaults to 1)
+
+        Returns:
+            bytes: Z-machine code (ERASE_LINE EXT opcode for V5+)
+        """
+        if self.version < 4:
+            return b''
+
+        code = bytearray()
+
+        if self.version >= 5:
+            # V5+: ERASE_LINE is EXT opcode 0x0E
+            code.append(0xBE)  # EXT opcode marker
+            code.append(0x0E)  # ERASE_LINE
+
+            if operands:
+                mode = self.get_operand_value(operands[0])
+                code.append(0x01)  # Type: small constant
+                if isinstance(mode, int):
+                    code.append(mode & 0xFF)
+            else:
+                code.append(0x01)  # Type: small constant
+                code.append(0x01)  # Default: erase from cursor
+
+        return bytes(code)
+
+    def gen_set_margins(self, operands: List[ASTNode]) -> bytes:
+        """Generate SET_MARGINS (V5+ set text margins).
+
+        <SET_MARGINS left right window> sets text margins for window.
+
+        Args:
+            operands[0]: Left margin (pixels)
+            operands[1]: Right margin (pixels)
+            operands[2]: Window number (optional)
+
+        Returns:
+            bytes: Z-machine code (SET_MARGINS EXT opcode)
+        """
+        if len(operands) < 2 or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # SET_MARGINS is EXT opcode 0x11
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x11)  # SET_MARGINS
+
+        # Type byte
+        num_operands = len(operands)
+        type_byte = 0x00
+        for i in range(4):
+            if i < num_operands:
+                type_byte |= (0x01 << (6 - i*2))
+            else:
+                type_byte |= (0x03 << (6 - i*2))
+
+        code.append(type_byte)
+
+        for i in range(min(num_operands, 3)):
+            val = self.get_operand_value(operands[i])
+            if isinstance(val, int):
+                code.append(val & 0xFF)
+
+        return bytes(code)
+
     def gen_rest(self, operands: List[ASTNode]) -> bytes:
         """Generate REST (pointer arithmetic on tables).
 

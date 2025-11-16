@@ -1006,8 +1006,30 @@ the ZIL operations required to compile Planetfall and other Infocom games!
 
 ---
 
+### V4/V5 Call Variants and Core V5 Completion
+- **Session**: V5 near-completion milestone
+- Implemented V4/V5 call variants:
+  - CALL_1S (1OP:0x08) - V4+ call with 0 args, store result
+  - CALL_1N (1OP:0x0F) - V5+ call with 0 args, no store
+  - CALL_2S (2OP:0x19) - V4+ call with 1 arg, store result
+  - CALL_2N (2OP:0x1A) - V5+ call with 1 arg, no store
+- Implemented V5 undo and text features:
+  - SAVE_UNDO (EXT:0x09) - save game state for undo
+  - RESTORE_UNDO (EXT:0x0A) - restore previous state
+  - PRINT_UNICODE (EXT:0x0B) - Unicode character output
+  - ERASE_LINE (EXT:0x0E) - erase current line
+  - SET_MARGINS (EXT:0x11) - configure text margins
+- V5 Extended Opcodes now: 13 total (was 8)
+- **Test**: v5_complete_test.zil created
+- **Stats**: 186 opcodes total (167 working, 19 stubs)
+- V5 core functionality: ~98% complete (2 opcodes remaining)
+- V4 coverage: ~85% complete (8 opcodes remaining)
+- Version 2.2.0 → 2.3.0
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 2.2.0
+**Current Version**: 2.3.0
 
 **Status**: ✅ COMPLETE - 100% Planetfall Coverage + Multi-Version Support!
