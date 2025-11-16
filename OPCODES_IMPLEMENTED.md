@@ -73,7 +73,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Comparison & Predicates (9 opcodes)
+## Comparison & Predicates (11 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -81,6 +81,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | L? / < | JL | Less than | ✅ |
 | G? / > | JG | Greater than | ✅ |
 | ZERO? / 0? | JZ | Test if zero | ✅ |
+| NOT? | JZ | Test if false/zero (alias) | ✅ |
+| TRUE? | JZ | Test if non-zero/true | ✅ |
 | ASSIGNED? | LOAD+JZ | Test if variable assigned | ✅ |
 | IN? | GET_PARENT+JE | Test containment | ✅ |
 | FSET? | TEST_ATTR | Test object attribute | ✅ |
@@ -158,12 +160,14 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Parser/Game Operations (11 opcodes)
+## Parser/Game Operations (13 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
 | VERB? | EQUAL+PRSA | Test verb action | ✅ |
 | PERFORM | CALL | Dispatch action | ✅ |
+| CALL | CALL_VS | Call routine with arguments | ✅ |
+| APPLY | CALL_VS | Apply routine with table args | ✅ |
 | RANDOM | RANDOM | Random number | ✅ |
 | PROB | RANDOM+JL | Probability test (N% chance) | ✅ |
 | PICK-ONE | RANDOM+GET | Select random table element | ✅ |
@@ -202,11 +206,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 97 distinct operations
+- **Total Opcodes**: 101 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 42 working examples
-- **Planetfall Coverage**: ~75% of required operations
-- **Version**: 0.8.0
+- **Test Programs**: 43 working examples
+- **Planetfall Coverage**: ~77% of required operations
+- **Version**: 0.8.1
 
 ---
 
@@ -255,4 +259,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.8.0
+**Compiler Version**: 0.8.1

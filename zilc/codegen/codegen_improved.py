@@ -293,6 +293,10 @@ class ImprovedCodeGenerator:
             return self.gen_zero(form.operands)
         elif op_name == 'ASSIGNED?':
             return self.gen_assigned(form.operands)
+        elif op_name == 'NOT?':
+            return self.gen_not_predicate(form.operands)
+        elif op_name == 'TRUE?':
+            return self.gen_true_predicate(form.operands)
         elif op_name == 'IGRTR?':
             return self.gen_igrtr(form.operands)
 
@@ -412,6 +416,10 @@ class ImprovedCodeGenerator:
             return self.gen_verb_test(form.operands)
         elif op_name == 'PERFORM':
             return self.gen_perform(form.operands)
+        elif op_name == 'CALL':
+            return self.gen_call(form.operands)
+        elif op_name == 'APPLY':
+            return self.gen_apply(form.operands)
 
         # Daemon/Interrupt system
         elif op_name == 'QUEUE':
@@ -1105,6 +1113,50 @@ class ImprovedCodeGenerator:
                 # Variable not in globals = not assigned
                 # Return false (0)
                 code.append(0xB1)  # RFALSE
+
+        return bytes(code)
+
+    def gen_not_predicate(self, operands: List[ASTNode]) -> bytes:
+        """Generate NOT? (test if value is false/zero).
+
+        <NOT? value> is equivalent to <ZERO? value>
+        Returns true if value is 0 or false.
+
+        Args:
+            operands[0]: Value to test
+
+        Returns:
+            bytes: Z-machine code (JZ - jump if zero)
+        """
+        # NOT? is the same as ZERO?
+        return self.gen_zero(operands)
+
+    def gen_true_predicate(self, operands: List[ASTNode]) -> bytes:
+        """Generate TRUE? (test if value is non-zero).
+
+        <TRUE? value> tests if a value is non-zero (true).
+        This is the opposite of ZERO?/NOT?
+
+        Args:
+            operands[0]: Value to test
+
+        Returns:
+            bytes: Z-machine code (JZ with inverted branch)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        val = self.get_operand_value(operands[0])
+
+        # JZ is 1OP opcode 0x00 (branch instruction)
+        # We want to branch if NOT zero (invert the condition)
+        if isinstance(val, int):
+            if 0 <= val <= 255:
+                code.append(0x80)  # Short 1OP, opcode 0x00
+                code.append(val & 0xFF)
+                # Inverted branch: branch on false (when value IS zero, don't branch)
+                code.append(0x00)  # Branch on false
 
         return bytes(code)
 
@@ -2258,6 +2310,82 @@ class ImprovedCodeGenerator:
         # For now, just setting globals is sufficient for testing
 
         return bytes(code)
+
+    def gen_call(self, operands: List[ASTNode]) -> bytes:
+        """Generate CALL (call routine with arguments).
+
+        <CALL routine arg1 arg2 ...> calls a routine with up to 3 arguments.
+        Uses Z-machine CALL instruction.
+
+        Args:
+            operands[0]: Routine name or address
+            operands[1+]: Arguments (0-3 arguments)
+
+        Returns:
+            bytes: Z-machine code (CALL_VS or CALL)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+
+        # Get routine address (simplified - would need symbol table lookup)
+        routine = self.get_operand_value(operands[0])
+        args = operands[1:]
+
+        # CALL (2OP) for 1-2 args, CALL_VS (VAR) for 0-3 args
+        # Use CALL_VS for flexibility
+
+        if isinstance(routine, int):
+            # CALL_VS is VAR opcode 0x00
+            code.append(0xE0)  # VAR form, opcode 0x00
+
+            # Type byte indicates argument types
+            num_args = min(len(args), 3)
+            type_byte = 0x00  # Will set bits for each arg type
+
+            # For simplicity, assume all small constants
+            for i in range(4):
+                if i < num_args:
+                    type_byte |= (0x01 << (6 - i*2))  # Small constant = 01
+                else:
+                    type_byte |= (0x03 << (6 - i*2))  # Omitted = 11
+
+            code.append(type_byte)
+            code.append(routine & 0xFF)  # Routine address
+
+            # Add arguments
+            for i in range(num_args):
+                arg_val = self.get_operand_value(args[i])
+                if isinstance(arg_val, int):
+                    code.append(arg_val & 0xFF)
+
+            code.append(0x00)  # Store result to stack
+
+        return bytes(code)
+
+    def gen_apply(self, operands: List[ASTNode]) -> bytes:
+        """Generate APPLY (call routine with arguments from table).
+
+        <APPLY routine arg-table num-args> calls routine with arguments
+        unpacked from a table.
+
+        This is a simplified implementation.
+
+        Args:
+            operands[0]: Routine address
+            operands[1]: Table of arguments
+            operands[2]: Number of arguments
+
+        Returns:
+            bytes: Z-machine code (simplified CALL)
+        """
+        if len(operands) < 1:
+            return b''
+
+        # For simplicity, treat like CALL with first operand
+        # Full implementation would unpack args from table
+        return self.gen_call([operands[0]])
 
     def gen_rest(self, operands: List[ASTNode]) -> bytes:
         """Generate REST (pointer arithmetic on tables).

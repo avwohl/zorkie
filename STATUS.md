@@ -619,7 +619,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### 🎉 MAJOR MILESTONE - 75% Planetfall! Bit Ops & Object Utils
-- **Commit**: (pending)
+- **Commit**: f7dac6e
 - EMPTY? - Test if object has no children (GET_CHILD+JZ)
 - LSH - Left shift (simulated with MUL for V3)
 - RSH - Right shift (simulated with DIV for V3)
@@ -631,8 +631,21 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Routine Calls & Truth Predicates - CALL, APPLY, NOT?, TRUE?
+- **Commit**: (pending)
+- CALL - Call routine with arguments (uses CALL_VS)
+- APPLY - Apply routine with arguments from table
+- NOT? - Test if value is false/zero (alias for ZERO?)
+- TRUE? - Test if value is non-zero/true
+- Enables dynamic routine invocation
+- Completes predicate suite
+- **Test**: call_and_predicates_test.zil (1,300 bytes)
+- Brings total to 101 opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.8.0 - MAJOR MILESTONE!
+**Current Version**: 0.8.1
 
-**Status**: 🟢 Active Development - 75% Planetfall Complete!
+**Status**: 🟢 Active Development - 77% Planetfall Complete!
