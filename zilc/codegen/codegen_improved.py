@@ -247,6 +247,12 @@ class ImprovedCodeGenerator:
             return self.gen_inc(form.operands)
         elif op_name == 'DEC':
             return self.gen_dec(form.operands)
+        elif op_name == 'VALUE':
+            return self.gen_value(form.operands)
+        elif op_name == 'LVAL':
+            return self.gen_lval(form.operands)
+        elif op_name == 'GVAL':
+            return self.gen_gval(form.operands)
 
         # Arithmetic
         elif op_name in ('+', 'ADD'):
@@ -338,6 +344,10 @@ class ImprovedCodeGenerator:
             return self.gen_getb(form.operands)
         elif op_name == 'PUTB':
             return self.gen_putb(form.operands)
+        elif op_name == 'LENGTH':
+            return self.gen_length(form.operands)
+        elif op_name == 'NTH':
+            return self.gen_nth(form.operands)
 
         # Stack operations
         elif op_name == 'PUSH':
@@ -611,6 +621,69 @@ class ImprovedCodeGenerator:
         # DEC is 1OP opcode 0x06
         code.append(0x86)  # Short 1OP, opcode 0x06, variable type
         code.append(var_num)
+
+        return bytes(code)
+
+    def gen_value(self, operands: List[ASTNode]) -> bytes:
+        """Generate VALUE (get variable value).
+
+        <VALUE var> reads the value of a variable (local or global).
+        Uses LOAD instruction (1OP opcode 0x0E).
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        var_num = self.get_variable_number(operands[0])
+
+        # LOAD is 1OP opcode 0x0E
+        code.append(0x8E)  # Short 1OP, opcode 0x0E, variable type
+        code.append(var_num)
+        code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_lval(self, operands: List[ASTNode]) -> bytes:
+        """Generate LVAL (get local variable value).
+
+        <LVAL var> reads the value of a local variable.
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        if isinstance(operands[0], AtomNode):
+            var_num = self.locals.get(operands[0].value, 1)
+        else:
+            return b''
+
+        # LOAD is 1OP opcode 0x0E
+        code.append(0x8E)  # Short 1OP, opcode 0x0E, variable type
+        code.append(var_num)
+        code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_gval(self, operands: List[ASTNode]) -> bytes:
+        """Generate GVAL (get global variable value).
+
+        <GVAL var> reads the value of a global variable.
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        if isinstance(operands[0], AtomNode):
+            var_num = self.globals.get(operands[0].value)
+            if var_num is None:
+                return b''
+        else:
+            return b''
+
+        # LOAD is 1OP opcode 0x0E
+        code.append(0x8E)  # Short 1OP, opcode 0x0E, variable type
+        code.append(var_num)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -1573,6 +1646,51 @@ class ImprovedCodeGenerator:
             code.append(table & 0xFF)
             code.append(index & 0xFF)
             code.append(value & 0xFF)
+
+        return bytes(code)
+
+    def gen_length(self, operands: List[ASTNode]) -> bytes:
+        """Generate LENGTH (get table/string length).
+
+        <LENGTH table> returns the size stored at offset 0 of the table.
+        ZIL tables store their length in the first word.
+        Uses LOADW to read table[0].
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+
+        # LOADW is 2OP opcode 0x0F
+        if isinstance(table, int):
+            code.append(0x4F)  # Long form, opcode 0x0F
+            code.append(table & 0xFF)
+            code.append(0x00)  # Index 0 (length stored at offset 0)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_nth(self, operands: List[ASTNode]) -> bytes:
+        """Generate NTH (get Nth element from table, 0-based).
+
+        <NTH table index> returns table[index] where index is 0-based.
+        This is unlike GET which is 1-based.
+        Uses LOADW instruction directly.
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+
+        # LOADW is 2OP opcode 0x0F
+        if isinstance(table, int) and isinstance(index, int):
+            code.append(0x4F)  # Long form, opcode 0x0F
+            code.append(table & 0xFF)
+            code.append(index & 0xFF)
+            code.append(0x00)  # Store to stack
 
         return bytes(code)
 

@@ -551,16 +551,29 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Control Flow Opcodes - RFATAL and AGAIN
-- **Commit**: (pending)
+- **Commit**: 703541f
 - RFATAL - Return false for fatal conditions (24 Planetfall uses)
 - AGAIN - Restart current loop / continue (6 uses)
 - **Test**: control_flow_test.zil (1,110 bytes)
 - Brings total to 77+ opcodes implemented
+- **Milestone**: 60% Planetfall Complete!
+
+---
+
+### ✅ Variable and Table Utilities - VALUE, LVAL, GVAL, LENGTH, NTH
+- **Commit**: (pending)
+- VALUE - Get variable value (general indirection)
+- LVAL - Get local variable value
+- GVAL - Get global variable value
+- LENGTH - Get table/string length
+- NTH - Get Nth element from table (0-based, complements GET)
+- **Test**: variable_and_table_utils.zil (1,300 bytes)
+- Brings total to 82 opcodes implemented
 
 ---
 
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.6.0 - MAJOR MILESTONE! 🎉
+**Current Version**: 0.6.1
 
-**Status**: 🟢 Active Development - 60% Planetfall Complete!
+**Status**: 🟢 Active Development - 61% Planetfall Complete!

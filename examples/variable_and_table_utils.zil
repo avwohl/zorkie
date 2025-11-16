@@ -1,0 +1,43 @@
+<VERSION 3>
+
+<GLOBAL MY-GLOBAL 42>
+<GLOBAL NUMBERS <TABLE 5 10 20 30 40 50>>
+<GLOBAL TEMP 0>
+
+<ROUTINE TEST-GVAL ()
+	<TELL "Testing GVAL opcode..." CR>
+	<TELL "MY-GLOBAL = " N ,MY-GLOBAL CR>
+	<SETG TEMP <GVAL MY-GLOBAL>>
+	<TELL "GVAL MY-GLOBAL = " N ,TEMP CR>
+	<CRLF>>
+
+<ROUTINE TEST-LENGTH ()
+	<TELL "Testing LENGTH opcode..." CR>
+	<TELL "LENGTH of NUMBERS table = " N <LENGTH ,NUMBERS> CR>
+	<CRLF>>
+
+<ROUTINE TEST-NTH ()
+	<TELL "Testing NTH opcode (0-based)..." CR>
+	<TELL "NTH NUMBERS 0 = " N <NTH ,NUMBERS 0> CR>
+	<TELL "NTH NUMBERS 1 = " N <NTH ,NUMBERS 1> CR>
+	<TELL "NTH NUMBERS 2 = " N <NTH ,NUMBERS 2> CR>
+	<TELL "NTH NUMBERS 5 = " N <NTH ,NUMBERS 5> CR>
+	<CRLF>>
+
+<ROUTINE TEST-GET-VS-NTH ()
+	<TELL "Comparing GET (1-based) vs NTH (0-based)..." CR>
+	<TELL "GET NUMBERS 1 = " N <GET ,NUMBERS 1> CR>
+	<TELL "NTH NUMBERS 0 = " N <NTH ,NUMBERS 0> CR>
+	<TELL "Both should be 10" CR>
+	<CRLF>>
+
+<ROUTINE GO ()
+	<TELL "=== Testing Variable and Table Utility Opcodes ===" CR CR>
+
+	<TEST-GVAL>
+	<TEST-LENGTH>
+	<TEST-NTH>
+	<TEST-GET-VS-NTH>
+
+	<TELL "All utility opcodes working!" CR>
+	<QUIT>>

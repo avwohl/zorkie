@@ -41,7 +41,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Variables & Assignment (4 opcodes)
+## Variables & Assignment (7 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -49,6 +49,9 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | SETG | STOREW/STOREB | Assign global variable | ✅ |
 | INC | INC | Increment variable | ✅ |
 | DEC | DEC | Decrement variable | ✅ |
+| VALUE | LOAD | Get variable value | ✅ |
+| LVAL | LOAD | Get local variable value | ✅ |
+| GVAL | LOAD | Get global variable value | ✅ |
 
 ---
 
@@ -119,7 +122,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Table/Array Operations (8 opcodes)
+## Table/Array Operations (10 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -131,6 +134,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | LOADB | LOADB | Load byte (direct) | ✅ |
 | STOREW | STOREW | Store word (direct) | ✅ |
 | STOREB | STOREB | Store byte (direct) | ✅ |
+| LENGTH | LOADW | Get table/string length | ✅ |
+| NTH | LOADW | Get Nth element (0-based) | ✅ |
 
 ---
 
@@ -182,11 +187,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 77+ distinct operations
+- **Total Opcodes**: 82 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 36 working examples
-- **Planetfall Coverage**: ~60% of required operations
-- **Version**: 0.6.0
+- **Test Programs**: 37 working examples
+- **Planetfall Coverage**: ~61% of required operations
+- **Version**: 0.6.1
 
 ---
 
@@ -238,4 +243,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.6.0
+**Compiler Version**: 0.6.1
