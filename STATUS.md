@@ -403,7 +403,7 @@ Educational implementation for learning compiler design, virtual machines, and h
 - SYNTAX to action mapping
 - **Tests**: parser_test, perform_test, vocabulary_test, syntax_test
 
-### 📊 Planetfall Progress: ~40% Complete
+### 📊 Planetfall Progress: ~45% Complete
 Current feature implementation vs. Planetfall requirements:
 - ✅ Multi-file compilation (9 files)
 - ✅ PROPDEF (SIZE, CAPACITY, VALUE)
@@ -411,8 +411,9 @@ Current feature implementation vs. Planetfall requirements:
 - ✅ Vocabulary (SYNONYM, ADJECTIVE)
 - ✅ Parser globals
 - ✅ **DEFMAC macros** (ENABLE, DISABLE, ABS, OPENABLE?, etc.)
+- ✅ **Table operations** (GET, PUT, GETB, PUTB - 300+ uses)
 - ⚠️ **Missing**: Advanced DEFMAC features (TUPLE expansion, complex AUX)
-- ⚠️ Advanced opcodes (some array operations)
+- ⚠️ Some advanced opcodes (FIRST?, IN?, INTBL?, ZERO?)
 - ⚠️ String optimization (BUZZ words)
 
 ---
@@ -420,7 +421,7 @@ Current feature implementation vs. Planetfall requirements:
 ## Recent Session Updates (2025-11-16)
 
 ### ✅ DEFMAC Macro System
-- **Commit**: ab5433a
+- **Commit**: ab5433a, 13e1fcf
 - Complete macro definition and expansion implementation
 - MacroNode AST type and MacroExpander class
 - Quote operator (') support in lexer/parser
@@ -441,10 +442,19 @@ Current feature implementation vs. Planetfall requirements:
 - ⚠️ Partial: TUPLE variadic parameters (parsed but not fully expanded)
 - ⚠️ Partial: AUX variables with complex defaults
 
+### ✅ Table Operations (GET/PUT)
+- **Commit**: 7b17a35
+- Complete table access operations for arrays/tables
+- GET/PUT for word-based access (1-based in ZIL)
+- GETB/PUTB for byte-based access (0-based)
+- Maps to Z-machine LOADW/STOREW/LOADB/STOREB
+- **Test**: table_test.zil (993 bytes)
+- **Essential for**: Planetfall (300+ uses of GET/PUT operations)
+
 ---
 
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.4.0 (Parser + Multi-file + PROPDEF + DEFMAC)
+**Current Version**: 0.4.1 (Parser + Multi-file + PROPDEF + DEFMAC + Tables)
 
 **Status**: 🟢 Active Development - Ready for Real Game Compilation!
