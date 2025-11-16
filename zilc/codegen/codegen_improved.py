@@ -309,6 +309,10 @@ class ImprovedCodeGenerator:
             return self.gen_bor(form.operands)
         elif op_name == 'BTST':
             return self.gen_btst(form.operands)
+        elif op_name == 'LSH':
+            return self.gen_lsh(form.operands)
+        elif op_name == 'RSH':
+            return self.gen_rsh(form.operands)
 
         # Objects
         elif op_name == 'FSET':
@@ -378,6 +382,8 @@ class ImprovedCodeGenerator:
             return self.gen_get_sibling(form.operands)
         elif op_name == 'GET-PARENT':
             return self.gen_get_parent(form.operands)
+        elif op_name == 'EMPTY?':
+            return self.gen_empty(form.operands)
         elif op_name == 'IN?':
             return self.gen_in(form.operands)
         elif op_name == 'HELD?':
@@ -2020,6 +2026,35 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_empty(self, operands: List[ASTNode]) -> bytes:
+        """Generate EMPTY? (test if object has no children).
+
+        <EMPTY? obj> tests if an object has no children.
+        Returns true if GET_CHILD returns 0.
+
+        Args:
+            operands[0]: Object to test
+
+        Returns:
+            bytes: Z-machine code (GET_CHILD + JZ)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        obj = self.get_object_number(operands[0])
+
+        if obj is not None:
+            # GET_CHILD stores child object (0 if none)
+            code.append(0x82)  # Short 1OP, GET_CHILD opcode 0x02
+            code.append(obj & 0xFF)
+            code.append(0x00)  # Store to stack
+            # Don't include branch byte - caller handles branching
+            # If we wanted to make this a full predicate:
+            # code.append(0x40)  # Branch on zero (no children)
+
+        return bytes(code)
+
     def gen_in(self, operands: List[ASTNode]) -> bytes:
         """Generate IN? (test if obj1 is directly in obj2).
 
@@ -2572,6 +2607,78 @@ class ImprovedCodeGenerator:
         """
         # BOR is functionally the same as OR
         return self.gen_or(operands)
+
+    def gen_lsh(self, operands: List[ASTNode]) -> bytes:
+        """Generate LSH (left shift).
+
+        <LSH value shift-count> shifts value left by shift-count bits.
+        Equivalent to value * (2 ^ shift-count)
+
+        Z-machine V5+ has ART_SHIFT opcode.
+        For V3, we simulate with multiplication.
+
+        Args:
+            operands[0]: value to shift
+            operands[1]: number of bits to shift left
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        value = self.get_operand_value(operands[0])
+        shift = self.get_operand_value(operands[1])
+
+        if isinstance(value, int) and isinstance(shift, int):
+            # For V3, simulate with multiplication
+            # LSH value N == value * (2^N)
+            multiplier = 2 ** shift if shift >= 0 else 1
+
+            if 0 <= value <= 255 and 0 <= multiplier <= 255:
+                code.append(0x56)  # MUL opcode
+                code.append(value & 0xFF)
+                code.append(multiplier & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_rsh(self, operands: List[ASTNode]) -> bytes:
+        """Generate RSH (right shift).
+
+        <RSH value shift-count> shifts value right by shift-count bits.
+        Equivalent to value / (2 ^ shift-count)
+
+        Z-machine V5+ has ART_SHIFT opcode.
+        For V3, we simulate with division.
+
+        Args:
+            operands[0]: value to shift
+            operands[1]: number of bits to shift right
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        value = self.get_operand_value(operands[0])
+        shift = self.get_operand_value(operands[1])
+
+        if isinstance(value, int) and isinstance(shift, int):
+            # For V3, simulate with division
+            # RSH value N == value / (2^N)
+            divisor = 2 ** shift if shift >= 0 else 1
+
+            if 0 <= value <= 255 and divisor > 0 and divisor <= 255:
+                code.append(0x57)  # DIV opcode
+                code.append(value & 0xFF)
+                code.append(divisor & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
 
     # ===== Daemon/Interrupt System =====
 

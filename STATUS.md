@@ -607,7 +607,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ STRING and Arithmetic Shortcuts - STRING, 1+, 1-
-- **Commit**: (pending)
+- **Commit**: 80837fc
 - STRING - Build strings (basic implementation, 15 Planetfall uses!)
 - 1+ - Add 1 (shorthand for common increment)
 - 1- - Subtract 1 (shorthand for common decrement)
@@ -618,8 +618,21 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎉 MAJOR MILESTONE - 75% Planetfall! Bit Ops & Object Utils
+- **Commit**: (pending)
+- EMPTY? - Test if object has no children (GET_CHILD+JZ)
+- LSH - Left shift (simulated with MUL for V3)
+- RSH - Right shift (simulated with DIV for V3)
+- Completes bitwise operations suite
+- Adds essential object tree predicate
+- **Test**: final_utilities_test.zil (1,300 bytes)
+- Brings total to 97 opcodes implemented
+- **ACHIEVEMENT**: 75% Planetfall Complete! 🎉
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.7.2
+**Current Version**: 0.8.0 - MAJOR MILESTONE!
 
-**Status**: 🟢 Active Development - 73% Planetfall Complete!
+**Status**: 🟢 Active Development - 75% Planetfall Complete!

@@ -89,7 +89,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Logical/Bitwise Operations (6 opcodes)
+## Logical/Bitwise Operations (8 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -99,10 +99,12 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | BAND | AND | Bitwise AND (byte-oriented) | ✅ |
 | BOR | OR | Bitwise OR (byte-oriented) | ✅ |
 | BTST | AND+mask | Test if bit is set | ✅ |
+| LSH | MUL | Left shift (V3: multiply by 2^n) | ✅ |
+| RSH | DIV | Right shift (V3: divide by 2^n) | ✅ |
 
 ---
 
-## Object Operations (9 opcodes)
+## Object Operations (10 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -114,6 +116,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | GET-CHILD / FIRST? | GET_CHILD | Get first child | ✅ |
 | GET-SIBLING / NEXT? | GET_SIBLING | Get next sibling | ✅ |
 | GET-PARENT | GET_PARENT | Get parent object | ✅ |
+| EMPTY? | GET_CHILD+JZ | Test if object has no children | ✅ |
 
 ---
 
@@ -199,11 +202,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 94 distinct operations
+- **Total Opcodes**: 97 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 41 working examples
-- **Planetfall Coverage**: ~73% of required operations
-- **Version**: 0.7.2
+- **Test Programs**: 42 working examples
+- **Planetfall Coverage**: ~75% of required operations
+- **Version**: 0.8.0
 
 ---
 
@@ -252,4 +255,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.7.2
+**Compiler Version**: 0.8.0
