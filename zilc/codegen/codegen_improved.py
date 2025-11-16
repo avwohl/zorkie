@@ -257,6 +257,10 @@ class ImprovedCodeGenerator:
             return self.gen_less(form.operands)
         elif op_name in ('G?', '>'):
             return self.gen_greater(form.operands)
+        elif op_name == 'ZERO?':
+            return self.gen_zero(form.operands)
+        elif op_name == '0?':
+            return self.gen_zero(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -666,6 +670,27 @@ class ImprovedCodeGenerator:
                 code.append(val1 & 0xFF)
                 code.append(val2 & 0xFF)
                 code.append(0x40)  # Branch byte
+
+        return bytes(code)
+
+    def gen_zero(self, operands: List[ASTNode]) -> bytes:
+        """Generate ZERO? test (jump if zero).
+
+        <ZERO? value> is equivalent to <EQUAL? value 0>
+        Uses JZ (jump if zero) - 1OP opcode 0x00
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        val = self.get_operand_value(operands[0])
+
+        # JZ is 1OP opcode 0x00 (branch instruction)
+        if isinstance(val, int):
+            if 0 <= val <= 255:
+                code.append(0x80)  # Short 1OP, opcode 0x00, small constant
+                code.append(val & 0xFF)
+                code.append(0x40)  # Branch on true, offset 0 (placeholder)
 
         return bytes(code)
 
