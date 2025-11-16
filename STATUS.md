@@ -1028,8 +1028,30 @@ the ZIL operations required to compile Planetfall and other Infocom games!
 
 ---
 
+### V5 100% COMPLETION
+- **Milestone**: Complete V5 Z-machine implementation
+- Implemented final V5 opcodes:
+  - CHECK_UNICODE (EXT:0x03) - check Unicode character availability
+  - PICTURE_TABLE (EXT:0x13) - graphics table setup (V6 backport)
+- V5 Extended Opcodes: 15 total (complete set)
+- **Stats**: 188 opcodes total (169 working, 19 stubs)
+- V5: 100% complete (all V5 opcodes implemented)
+- V4: ~85% complete (8 opcodes remaining)
+- V3: 100% complete (all Planetfall opcodes)
+- Version 2.3.0 → 2.4.0
+
+V5 Complete Feature List:
+- 15 extended opcodes (CALL_VS2, CALL_VN2, TOKENISE, etc.)
+- 4 call variants (CALL_1S, CALL_1N, CALL_2S, CALL_2N)
+- Full Unicode support
+- Undo system support
+- Advanced text processing and table operations
+- Graphics table configuration
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 2.3.0
+**Current Version**: 2.4.0
 
 **Status**: ✅ COMPLETE - 100% Planetfall Coverage + Multi-Version Support!

@@ -256,7 +256,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## V5 Extended Opcodes (13 opcodes)
+## V5 Extended Opcodes (15 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -273,6 +273,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PRINT_UNICODE | EXT:0x0B | Print Unicode character (V5.1+) | ✅ |
 | ERASE_LINE | EXT:0x0E | Erase current line | ✅ |
 | SET_MARGINS | EXT:0x11 | Set text margins | ✅ |
+| CHECK_UNICODE | EXT:0x03 | Check Unicode character availability | ✅ |
+| PICTURE_TABLE | EXT:0x13 | Setup graphics table (V6 backport) | ✅ |
 
 ---
 
@@ -317,12 +319,13 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 186 distinct operations (167 working + 19 stubs)
-- **Opcode Categories**: 17 categories (added V4/V5 Call Variants)
+- **Total Opcodes**: 188 distinct operations (169 working + 19 stubs)
+- **Opcode Categories**: 17 categories
 - **Test Programs**: 63 working examples (59 V3 + 4 V5)
 - **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
-- **Version**: 2.3.0
+- **V5 Status**: 100% complete (all V5 opcodes implemented!)
+- **Version**: 2.4.0
 
 ---
 
@@ -335,14 +338,16 @@ All 166 V3 opcodes implemented. 100% Planetfall coverage.
 - Extended memory bank switching
 - Extended save/restore formats
 - V4-specific screen model opcodes
-- READ_CHAR (V4 variant)
-- And ~4 more V4-specific opcodes
+- And ~5 more V4-specific opcodes
 
-### V5: ~2 opcodes remaining
-- CHECK_UNICODE (check if char available)
-- PICTURE_TABLE (graphics table setup, V6 backport)
-
-Note: V5 core functionality is essentially complete. Remaining opcodes are edge cases or V6 features backported to V5.
+### V5: Complete ✓
+All V5 opcodes implemented! Including:
+- 15 extended opcodes (EXT:0x00-0x18)
+- 4 call variants (CALL_1S/1N/2S/2N)
+- Full Unicode support (PRINT_UNICODE, CHECK_UNICODE)
+- Undo support (SAVE_UNDO, RESTORE_UNDO)
+- Advanced text/table operations
+- Graphics table setup (PICTURE_TABLE)
 
 ### V6: ~35 opcodes remaining
 - Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA, GET_PICTURE_INFO

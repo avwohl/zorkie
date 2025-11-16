@@ -4966,6 +4966,70 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_check_unicode(self, operands: List[ASTNode]) -> bytes:
+        """Generate CHECK_UNICODE (V5+ check Unicode character availability).
+
+        <CHECK_UNICODE char-number> checks if a Unicode character
+        can be printed. Returns 0 if not available, non-zero if available.
+
+        Args:
+            operands[0]: Unicode character number
+
+        Returns:
+            bytes: Z-machine code (CHECK_UNICODE EXT opcode)
+        """
+        if not operands or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # CHECK_UNICODE is EXT opcode 0x03
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x03)  # CHECK_UNICODE
+
+        char_code = self.get_operand_value(operands[0])
+
+        # Type byte: 1 operand
+        code.append(0x01)  # Small constant
+
+        if isinstance(char_code, int):
+            code.append(char_code & 0xFF)
+
+        code.append(0x00)  # Store result to stack
+
+        return bytes(code)
+
+    def gen_picture_table(self, operands: List[ASTNode]) -> bytes:
+        """Generate PICTURE_TABLE (V6 backported to V5, setup graphics table).
+
+        <PICTURE_TABLE table> sets up the picture table for graphics.
+        Primarily a V6 feature, but some V5 interpreters support it.
+
+        Args:
+            operands[0]: Picture table address
+
+        Returns:
+            bytes: Z-machine code (PICTURE_TABLE EXT opcode)
+        """
+        if not operands or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # PICTURE_TABLE is EXT opcode 0x13 (V6, but available in some V5)
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x13)  # PICTURE_TABLE
+
+        table_addr = self.get_operand_value(operands[0])
+
+        # Type byte: 1 operand
+        code.append(0x01)  # Small constant
+
+        if isinstance(table_addr, int):
+            code.append(table_addr & 0xFF)
+
+        return bytes(code)
+
     def gen_rest(self, operands: List[ASTNode]) -> bytes:
         """Generate REST (pointer arithmetic on tables).
 
