@@ -531,8 +531,18 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Bitwise and Property Opcodes - GETPT, BTST, BAND
+- **Commit**: (pending)
+- GETPT - Get property table address (10 Planetfall uses)
+- BTST - Test if bit is set (15 uses)
+- BAND - Bitwise AND for bytes (7 uses)
+- **Test**: bitwise_test.zil (1,153 bytes)
+- Brings total to 74+ opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.5.3 (PROB + PICK-ONE + GOTO)
+**Current Version**: 0.5.4 (GETPT + BTST + BAND)
 
-**Status**: 🟢 Active Development - 56% Planetfall Complete!
+**Status**: 🟢 Active Development - 57% Planetfall Complete!

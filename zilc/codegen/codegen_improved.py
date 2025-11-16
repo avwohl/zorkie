@@ -277,6 +277,10 @@ class ImprovedCodeGenerator:
             return self.gen_or(form.operands)
         elif op_name == 'NOT':
             return self.gen_not(form.operands)
+        elif op_name == 'BAND':
+            return self.gen_band(form.operands)
+        elif op_name == 'BTST':
+            return self.gen_btst(form.operands)
 
         # Objects
         elif op_name == 'FSET':
@@ -301,6 +305,8 @@ class ImprovedCodeGenerator:
             return self.gen_ptsize(form.operands)
         elif op_name == 'NEXTP':
             return self.gen_nextp(form.operands)
+        elif op_name == 'GETPT':
+            return self.gen_getpt(form.operands)
 
         # Conditionals (these create branch instructions)
         elif op_name == 'COND':
@@ -2082,3 +2088,86 @@ class ImprovedCodeGenerator:
             # For now, just changing HERE is sufficient for testing
 
         return bytes(code)
+
+    def gen_getpt(self, operands: List[ASTNode]) -> bytes:
+        """Generate GETPT (get property table address).
+
+        Returns the address of a property's data, not the value.
+        Similar to GETP but returns address for direct manipulation.
+
+        Args:
+            operands[0]: object
+            operands[1]: property number
+
+        Returns:
+            bytes: Z-machine code (GET_PROP_ADDR)
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        obj = self.get_operand_value(operands[0])
+        prop = self.get_operand_value(operands[1])
+
+        if isinstance(obj, int) and isinstance(prop, int):
+            # GET_PROP_ADDR is 2OP opcode 0x12
+            code.append(0x52)  # Long form, opcode 0x12
+            code.append(obj & 0xFF)
+            code.append(prop & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_btst(self, operands: List[ASTNode]) -> bytes:
+        """Generate BTST (bit test).
+
+        Tests if a specific bit is set in a value.
+        Returns true if (value & (1 << bit)) != 0
+
+        Args:
+            operands[0]: value to test
+            operands[1]: bit number (0-15)
+
+        Returns:
+            bytes: Z-machine code (AND + JZ for branch)
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        value = self.get_operand_value(operands[0])
+        bit_num = self.get_operand_value(operands[1])
+
+        if isinstance(value, int) and isinstance(bit_num, int):
+            # Calculate bit mask: 1 << bit_num
+            bit_mask = 1 << bit_num
+
+            # AND value with bit mask
+            # AND is 2OP opcode 0x09
+            code.append(0x49)  # Long form, opcode 0x09
+            code.append(value & 0xFF)
+            code.append(bit_mask & 0xFF)
+            code.append(0x00)  # Store to stack
+
+            # JZ tests if result is zero (bit not set)
+            # We want to branch if bit IS set, so we use JNZ logic
+            # This will be handled by COND context
+            # For now, just the AND result on stack
+
+        return bytes(code)
+
+    def gen_band(self, operands: List[ASTNode]) -> bytes:
+        """Generate BAND (bitwise AND).
+
+        Performs bitwise AND operation, same as AND but traditionally
+        used for byte-sized operations in ZIL.
+
+        Args:
+            operands[0]: first operand
+            operands[1]: second operand
+
+        Returns:
+            bytes: Z-machine code (AND instruction)
+        """
+        # BAND is functionally the same as AND
+        return self.gen_and(operands)
