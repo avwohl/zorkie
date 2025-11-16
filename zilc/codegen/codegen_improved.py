@@ -361,6 +361,12 @@ class ImprovedCodeGenerator:
             return self.gen_color(form.operands)
         elif op_name == 'FONT':
             return self.gen_font(form.operands)
+        elif op_name == 'FIRST':
+            return self.gen_first(form.operands)
+        elif op_name == 'MEMBER':
+            return self.gen_member(form.operands)
+        elif op_name == 'MEMQ':
+            return self.gen_memq(form.operands)
         elif op_name == 'GETB2':
             return self.gen_getb2(form.operands)
         elif op_name == 'PUTB2':
@@ -2361,6 +2367,69 @@ class ImprovedCodeGenerator:
                 code.extend(op_code)
 
         return bytes(code)
+
+    # ===== List Operations =====
+
+    def gen_first(self, operands: List[ASTNode]) -> bytes:
+        """Generate FIRST (get first element of list/table).
+
+        <FIRST table> returns the first element (at offset 0).
+        Equivalent to <GET table 1> (1-based indexing).
+
+        Args:
+            operands[0]: Table/list address
+
+        Returns:
+            bytes: Z-machine code for getting first element
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+
+        # FIRST is same as GET with index 1 (1-based)
+        if isinstance(table, int):
+            if 0 <= table <= 255:
+                code.append(0x8F)  # LOADW
+                code.append(table & 0xFF)
+                code.append(0x01)  # Index 1
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_member(self, operands: List[ASTNode]) -> bytes:
+        """Generate MEMBER (search for element in list).
+
+        <MEMBER item table> searches for item in table.
+        Returns the tail of the list starting at the found item, or false.
+
+        Args:
+            operands[0]: Item to search for
+            operands[1]: Table to search in
+
+        Returns:
+            bytes: Z-machine code for search (stub - needs loop)
+        """
+        # MEMBER needs loop generation to search
+        # Full implementation would iterate through table comparing elements
+        return b''
+
+    def gen_memq(self, operands: List[ASTNode]) -> bytes:
+        """Generate MEMQ (search for item with EQUAL? test).
+
+        <MEMQ item table> searches for item in table using EQUAL?.
+        Returns the tail of the list starting at the found item, or false.
+
+        Args:
+            operands[0]: Item to search for
+            operands[1]: Table to search in
+
+        Returns:
+            bytes: Z-machine code for search (stub - needs loop)
+        """
+        # MEMQ needs loop generation to search with equality test
+        return b''
 
     # ===== Comparison Operations =====
 

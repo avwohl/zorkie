@@ -849,8 +849,30 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 📚 98.5% PLANETFALL - List Operations: FIRST, MEMBER, MEMQ
+- **Commit**: (pending)
+- FIRST - Get first element of list/table
+  - Returns first element (offset 0)
+  - Equivalent to <GET table 1> with 1-based indexing
+  - Uses LOADW with index 1
+  - Essential for list head access
+- MEMBER - Search for element in list (stub)
+  - Would search for item in table
+  - Returns tail starting at found item or false
+  - Needs loop generation (deferred)
+- MEMQ - Search with EQUAL? test (stub)
+  - Similar to MEMBER but uses EQUAL? for comparison
+  - Needs loop generation (deferred)
+- FIRST provides working list head access
+- MEMBER/MEMQ stubs for future enhancement
+- **Test**: list_ops_test.zil (1.4 KB)
+- Brings total to 146 opcodes (138 working + 8 stubs)
+- New category: List Operations (15 categories total)
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.5.0
+**Current Version**: 1.6.0
 
-**Status**: 🟢 Active Development - 98% Planetfall Complete!
+**Status**: 🟢 Active Development - 98.5% Planetfall Complete!

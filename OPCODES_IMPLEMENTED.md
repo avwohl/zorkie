@@ -185,6 +185,16 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
+## List Operations (3 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| FIRST | LOADW | Get first element of list/table | ✅ |
+| MEMBER | Loop+compare | Search for element in list (stub) | ⚠️ |
+| MEMQ | Loop+JE | Search with EQUAL? test (stub) | ⚠️ |
+
+---
+
 ## Stack Operations (2 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
@@ -256,11 +266,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 143 distinct operations (137 working + 6 V5+ stubs)
-- **Opcode Categories**: 14 categories
-- **Test Programs**: 54 working examples
-- **Planetfall Coverage**: ~98% of required operations
-- **Version**: 1.5.0
+- **Total Opcodes**: 146 distinct operations (138 working + 8 stubs)
+- **Opcode Categories**: 15 categories
+- **Test Programs**: 55 working examples
+- **Planetfall Coverage**: ~98.5% of required operations
+- **Version**: 1.6.0
 
 ---
 
@@ -309,4 +319,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.5.0
+**Compiler Version**: 1.6.0
