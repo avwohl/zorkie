@@ -324,6 +324,8 @@ class ImprovedCodeGenerator:
             return self.gen_get_sibling(form.operands)
         elif op_name == 'GET-PARENT':
             return self.gen_get_parent(form.operands)
+        elif op_name == 'IN?':
+            return self.gen_in(form.operands)
 
         # Random and utilities
         elif op_name == 'RANDOM':
@@ -1493,6 +1495,39 @@ class ImprovedCodeGenerator:
             code.append(0x83)  # Short 1OP, opcode 0x03, small constant
             code.append(obj & 0xFF)
             code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_in(self, operands: List[ASTNode]) -> bytes:
+        """Generate IN? (test if obj1 is directly in obj2).
+
+        <IN? obj1 obj2> tests if obj1's parent is obj2.
+        This is equivalent to: <EQUAL? <LOC obj1> obj2>
+
+        Implementation: GET_PARENT obj1, then compare with obj2.
+        For now, we generate: EQUAL? (GET_PARENT obj1) obj2
+        which branches on true.
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        obj1 = self.get_object_number(operands[0])
+        obj2 = self.get_object_number(operands[1])
+
+        if obj1 is not None and obj2 is not None:
+            # Get parent of obj1
+            code.append(0x83)  # GET_PARENT 1OP, opcode 0x03
+            code.append(obj1 & 0xFF)
+            code.append(0x00)  # Store to stack
+
+            # Compare with obj2 using JE (jump if equal)
+            # JE is 2OP opcode 0x01 (branch instruction)
+            code.append(0x41)  # Long form JE, opcode 0x01
+            code.append(0x00)  # Stack (result of GET_PARENT)
+            code.append(obj2 & 0xFF)
+            # Branch offset will be filled by branch logic
+            code.append(0x40)  # Branch on true, offset 0 (placeholder)
 
         return bytes(code)
 
