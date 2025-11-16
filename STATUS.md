@@ -375,8 +375,49 @@ Educational implementation for learning compiler design, virtual machines, and h
 
 ---
 
-**Last Updated**: 2025-01-15
+---
 
-**Current Version**: 0.2.0 (Major milestone - working compiler!)
+## Recent Session Updates (2025-11-15)
 
-**Status**: 🟢 Active Development - Compiler Complete Enough for Simple Games!
+### ✅ Multi-File Compilation (IFILE)
+- **Commit**: b056839
+- Added `compile_file_multi()` method for combining multiple ZIL files
+- CLI support: `-i/--include` (multiple files)
+- **Test**: multifile_test (3 files → 1,460 bytes)
+- **Essential for**: Planetfall (9 files)
+
+### ✅ PROPDEF Property Definitions
+- **Commit**: f38f729
+- Dynamic property number assignment from PROPDEF declarations
+- Standard properties: DESC=#1, LDESC=#2, user-defined start at #3
+- Auto-assignment for undeclared properties
+- **Test**: propdef_test.zil (5 properties → 1,847 bytes)
+- **Essential for**: Planetfall property system (SIZE, CAPACITY, VALUE)
+
+### ✅ Parser System (Previous Session)
+- Parser globals: PRSA, PRSO, PRSI, HERE, WINNER, MOVES
+- 32 verb action constants (V?TAKE, V?DROP, etc.)
+- VERB? predicate for action checking
+- PERFORM action dispatch
+- Vocabulary dictionary with SYNONYM/ADJECTIVE
+- SYNTAX to action mapping
+- **Tests**: parser_test, perform_test, vocabulary_test, syntax_test
+
+### 📊 Planetfall Progress: ~30% Complete
+Current feature implementation vs. Planetfall requirements:
+- ✅ Multi-file compilation (9 files)
+- ✅ PROPDEF (SIZE, CAPACITY, VALUE)
+- ✅ SYNTAX verb/action system
+- ✅ Vocabulary (SYNONYM, ADJECTIVE)
+- ✅ Parser globals
+- ⚠️ **Missing**: DEFMAC macros (next priority)
+- ⚠️ Advanced opcodes (RANDOM, etc.)
+- ⚠️ String optimization (BUZZ words)
+
+---
+
+**Last Updated**: 2025-11-15
+
+**Current Version**: 0.3.0 (Parser system + Multi-file + PROPDEF)
+
+**Status**: 🟢 Active Development - Ready for Real Game Compilation!
