@@ -1228,6 +1228,30 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_erase_window(self, operands: List[ASTNode]) -> bytes:
+        """Generate ERASE_WINDOW (V4+ - clear window).
+
+        <ERASE_WINDOW window> clears specified window.
+        -1 = unsplit screen, -2 = clear without unsplitting.
+        Alias for CLEAR with parameter. VAR:0x0D.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            # No parameter, clear entire screen
+            return self.gen_clear([])
+
+        code = bytearray()
+        window = self.get_operand_value(operands[0])
+
+        code.append(0xED)  # ERASE_WINDOW (VAR opcode 0x0D)
+        code.append(0x2F)  # Type byte: 1 small constant
+        if isinstance(window, int):
+            code.append(window & 0xFF)
+
+        return bytes(code)
+
     def gen_split(self, operands: List[ASTNode]) -> bytes:
         """Generate SPLIT (split window).
 
@@ -1278,6 +1302,30 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_split_window(self, operands: List[ASTNode]) -> bytes:
+        """Generate SPLIT_WINDOW (V3+ - split screen).
+
+        <SPLIT_WINDOW lines> divides screen into windows.
+        Alias for SPLIT. VAR:0x0A.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to SPLIT implementation
+        return self.gen_split(operands)
+
+    def gen_set_window(self, operands: List[ASTNode]) -> bytes:
+        """Generate SET_WINDOW (V3+ - select window).
+
+        <SET_WINDOW window> selects active window.
+        Alias for SCREEN. VAR:0x0B.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to SCREEN implementation
+        return self.gen_screen(operands)
+
     def gen_curset(self, operands: List[ASTNode]) -> bytes:
         """Generate CURSET (set cursor position).
 
@@ -1305,6 +1353,18 @@ class ImprovedCodeGenerator:
             code.append(col & 0xFF)
 
         return bytes(code)
+
+    def gen_set_cursor(self, operands: List[ASTNode]) -> bytes:
+        """Generate SET_CURSOR (V4+ - position cursor).
+
+        <SET_CURSOR line column window> sets cursor position.
+        Alias for CURSET. VAR:0x0F.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to CURSET implementation
+        return self.gen_curset(operands)
 
     def gen_get_wind_prop(self, operands: List[ASTNode]) -> bytes:
         """Generate GET_WIND_PROP (V6 - get window property).
@@ -1573,7 +1633,7 @@ class ImprovedCodeGenerator:
         """Generate HLIGHT (set text style/highlighting).
 
         <HLIGHT style> sets text style (bold, italic, reverse, etc).
-        In V3+, this is the SET_TEXT_STYLE opcode (VAR opcode 0x11).
+        In V4+, this is the SET_TEXT_STYLE opcode (VAR opcode 0x11).
 
         Styles: 0=normal, 1=reverse, 2=bold, 4=italic, 8=fixed
 
@@ -1596,15 +1656,30 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_set_text_style(self, operands: List[ASTNode]) -> bytes:
+        """Generate SET_TEXT_STYLE (V4+ - set text formatting).
+
+        <SET_TEXT_STYLE style> applies text formatting.
+        Alias for HLIGHT. VAR:0x11.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to HLIGHT implementation
+        return self.gen_hlight(operands)
+
     def gen_input(self, operands: List[ASTNode]) -> bytes:
         """Generate INPUT (read text input).
 
-        <INPUT buffer parse> reads a line of text from the player.
-        In V3, this is the SREAD opcode (VAR opcode 0x01).
+        <INPUT buffer parse time routine> reads a line of text from the player.
+        V3: SREAD (VAR:0x04) with buffer and parse
+        V4+: Supports optional time and routine for timed input
 
         Args:
             operands[0]: Text buffer address
             operands[1]: Parse buffer address (optional)
+            operands[2]: Time in tenths of seconds (V4+, optional)
+            operands[3]: Routine to call on timeout (V4+, optional)
 
         Returns:
             bytes: Z-machine code
@@ -1613,22 +1688,52 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        text_buf = self.get_operand_value(operands[0])
+        num_ops = len(operands)
 
-        if isinstance(text_buf, int):
-            code.append(0xE1)  # SREAD/READ (VAR opcode 0x01)
+        # SREAD/AREAD is VAR opcode 0x04
+        code.append(0xE4)  # VAR opcode 0x04
 
-            if len(operands) >= 2:
-                parse_buf = self.get_operand_value(operands[1])
-                if isinstance(parse_buf, int):
-                    code.append(0x15)  # Type byte: 2 small constants
-                    code.append(text_buf & 0xFF)
-                    code.append(parse_buf & 0xFF)
+        # Build type byte based on number of operands
+        type_byte = 0x00
+        for i in range(4):
+            if i < num_ops:
+                type_byte |= (0x01 << (6 - i*2))  # Small constant
             else:
-                code.append(0x2F)  # Type byte: 1 small constant
-                code.append(text_buf & 0xFF)
+                type_byte |= (0x03 << (6 - i*2))  # Omitted
+
+        code.append(type_byte)
+
+        # Add operands
+        for i in range(min(num_ops, 4)):
+            val = self.get_operand_value(operands[i])
+            if isinstance(val, int):
+                code.append(val & 0xFF)
 
         return bytes(code)
+
+    def gen_sread(self, operands: List[ASTNode]) -> bytes:
+        """Generate SREAD (V3/V4 read text input).
+
+        <SREAD buffer parse time routine> reads text input.
+        Alias for INPUT. In V3/V4 called SREAD, V5+ called AREAD.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to INPUT implementation
+        return self.gen_input(operands)
+
+    def gen_aread(self, operands: List[ASTNode]) -> bytes:
+        """Generate AREAD (V5+ read text input).
+
+        <AREAD buffer parse time routine> reads text input.
+        Alias for INPUT. V5+ name for SREAD.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to INPUT implementation
+        return self.gen_input(operands)
 
     def gen_bufout(self, operands: List[ASTNode]) -> bytes:
         """Generate BUFOUT (buffer mode control).
@@ -4841,24 +4946,38 @@ class ImprovedCodeGenerator:
         return bytes([0xB7])  # Short 0OP, opcode 0x07
 
     def gen_save(self) -> bytes:
-        """Generate SAVE (save game) - branch instruction in V1-4."""
+        """Generate SAVE (save game).
+
+        V1-3: Branch instruction (branches on success)
+        V4+: Store instruction (returns 0=fail, 1=success)
+        """
         code = bytearray()
         code.append(0xB5)  # Short 0OP, opcode 0x05
 
-        if self.version <= 4:
-            # Branch instruction in V1-4
+        if self.version <= 3:
+            # Branch instruction in V1-3
             code.append(0x40)  # Branch byte
+        elif self.version == 4:
+            # V4: Store instruction (returns result)
+            code.append(0x00)  # Store to stack (SP)
 
         return bytes(code)
 
     def gen_restore(self) -> bytes:
-        """Generate RESTORE (restore game) - branch instruction in V1-4."""
+        """Generate RESTORE (restore game).
+
+        V1-3: Branch instruction (branch never taken)
+        V4+: Store instruction (returns result)
+        """
         code = bytearray()
         code.append(0xB6)  # Short 0OP, opcode 0x06
 
-        if self.version <= 4:
-            # Branch instruction in V1-4
+        if self.version <= 3:
+            # Branch instruction in V1-3
             code.append(0x40)  # Branch byte
+        elif self.version == 4:
+            # V4: Store instruction (returns result)
+            code.append(0x00)  # Store to stack (SP)
 
         return bytes(code)
 

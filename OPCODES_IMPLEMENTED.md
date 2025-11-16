@@ -382,6 +382,13 @@ Many Z-machine opcodes have multiple names in ZIL. The following aliases are sup
 | COPY_TABLE | COPYT | Table copy/zero (V5+ EXT:0x1D) |
 | SET_COLOUR | COLOR | Text colors (V5+ 2OP:0x1B) |
 | BUFFER_MODE | BUFOUT | Text buffering (V4+ VAR:0x12) |
+| SREAD | INPUT | Text input V3/V4 name (VAR:0x04) |
+| AREAD | INPUT | Text input V5+ name (VAR:0x04) |
+| SPLIT_WINDOW | SPLIT | Split screen (VAR:0x0A) |
+| SET_WINDOW | SCREEN | Select window (VAR:0x0B) |
+| ERASE_WINDOW | CLEAR | Clear window (VAR:0x0D) |
+| SET_CURSOR | CURSET | Position cursor (VAR:0x0F) |
+| SET_TEXT_STYLE | HLIGHT | Text formatting (VAR:0x11) |
 
 ---
 
@@ -389,13 +396,15 @@ Many Z-machine opcodes have multiple names in ZIL. The following aliases are sup
 
 - **Total Opcodes**: 211 distinct operations (198 working + 13 stubs/partial)
 - **Opcode Categories**: 23 categories
-- **Aliases**: 5 additional opcode aliases
+- **Aliases**: 12 standard Z-machine opcode aliases
 - **Test Programs**: 63 working examples (59 V3 + 4 V5)
 - **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
-- **V5 Status**: 100% complete (all standard V5 opcodes + extended set)
+- **V3 Status**: ✅ 100% complete (all 166 opcodes)
+- **V4 Status**: ✅ 100% complete (all V4 opcodes + timed input)
+- **V5 Status**: ✅ 100% complete (all standard V5 opcodes + extended set)
 - **V6 Status**: Major features implemented (19 V6-specific opcodes)
-- **Version**: 2.7.0
+- **Version**: 3.0.0
 
 ---
 
@@ -404,11 +413,16 @@ Many Z-machine opcodes have multiple names in ZIL. The following aliases are sup
 ### V3: Complete ✓
 All 166 V3 opcodes implemented. 100% Planetfall coverage.
 
-### V4: ~6 opcodes remaining
-- ✅ BUFFER_MODE (text buffering control)
-- ✅ GET_CURSOR (cursor position query)
-- Extended memory bank switching (~3 opcodes)
-- Extended save/restore table formats (~3 opcodes)
+### V4: ✅ Complete (100%)
+All V4 opcodes fully implemented including:
+- ✅ SAVE/RESTORE with V4 store semantics (returns 0/1 instead of branch)
+- ✅ SREAD/INPUT with timed input support (time + routine params)
+- ✅ CALL_1S, CALL_2S (V4 call variants)
+- ✅ Window management (SPLIT_WINDOW, SET_WINDOW, ERASE_WINDOW)
+- ✅ Cursor control (SET_CURSOR, GET_CURSOR)
+- ✅ Text formatting (SET_TEXT_STYLE, BUFFER_MODE)
+- ✅ I/O streams (OUTPUT_STREAM, INPUT_STREAM)
+- ✅ Character input (READ_CHAR with timeout)
 
 ### V5: Complete ✓
 All V5 opcodes implemented! Including:
@@ -488,4 +502,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 2.7.0
+**Compiler Version**: 3.0.0 - V4 100% Complete!
