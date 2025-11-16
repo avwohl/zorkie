@@ -85,7 +85,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Comparison & Predicates (11 opcodes)
+## Comparison & Predicates (12 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -100,6 +100,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | FSET? | TEST_ATTR | Test object attribute | ✅ |
 | HELD? | GET_PARENT+JE+WINNER | Test if player holds object | ✅ |
 | IGRTR? | INC+JG | Increment and test greater | ✅ |
+| DLESS? | DEC+JL | Decrement and test less | ✅ |
 
 ---
 
@@ -220,11 +221,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 114 distinct operations
+- **Total Opcodes**: 115 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 46 working examples
-- **Planetfall Coverage**: ~84% of required operations
-- **Version**: 0.9.8
+- **Test Programs**: 47 working examples
+- **Planetfall Coverage**: ~85% of required operations
+- **Version**: 1.0.0
 
 ---
 
@@ -273,4 +274,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.9.8
+**Compiler Version**: 1.0.0

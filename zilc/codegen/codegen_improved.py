@@ -331,6 +331,8 @@ class ImprovedCodeGenerator:
             return self.gen_true_predicate(form.operands)
         elif op_name == 'IGRTR?':
             return self.gen_igrtr(form.operands)
+        elif op_name == 'DLESS?':
+            return self.gen_dless(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -1429,6 +1431,59 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code
         """
         return self.gen_input(operands)
+
+    def gen_dless(self, operands: List[ASTNode]) -> bytes:
+        """Generate DLESS? (decrement and test if less).
+
+        <DLESS? var value> decrements var and tests if result < value.
+        Similar to IGRTR? but for less-than.
+        Uses DEC followed by JL.
+
+        Args:
+            operands[0]: Variable to decrement
+            operands[1]: Value to compare against
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        var_num = self.get_variable_number(operands[0])
+        val = self.get_operand_value(operands[1])
+
+        if isinstance(val, int):
+            # DEC variable
+            code.append(0x86)  # DEC (1OP opcode 0x06)
+            code.append(var_num)
+
+            # JL variable value
+            if 0 <= val <= 255:
+                code.append(0x82)  # JL (2OP opcode 0x02) - small/small form
+                code.append(var_num)
+                code.append(val & 0xFF)
+                code.append(0x40)  # Branch byte
+
+        return bytes(code)
+
+    def gen_check(self, operands: List[ASTNode]) -> bytes:
+        """Generate CHECK (check flag in bitmap).
+
+        <CHECK bitmap flag> tests if a specific bit/flag is set.
+        Similar to BTST but for bitmap structures.
+        Uses LOADB + AND + JZ pattern.
+
+        Args:
+            operands[0]: Bitmap table address
+            operands[1]: Flag number to test
+
+        Returns:
+            bytes: Z-machine code (stub for now)
+        """
+        # CHECK is complex - needs bit calculation
+        # For now return empty - would need proper bit indexing
+        return b''
 
     # ===== Comparison Operations =====
 

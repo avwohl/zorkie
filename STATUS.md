@@ -675,7 +675,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Advanced Opcodes - USL, DIROUT, PRINTOBJ, READ
-- **Commit**: (pending)
+- **Commit**: bb40266
 - USL - Unsigned shift left (alias for LSH)
 - DIROUT - Direct output to memory table (OUTPUT_STREAM VAR 0xF3)
   - Stream 3 for table redirection
@@ -690,8 +690,23 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎉 85% PLANETFALL MILESTONE - DLESS? Predicate
+- **Commit**: (pending)
+- DLESS? - Decrement and test if less (DEC+JL)
+  - Companion to IGRTR? for countdown loops
+  - Uses DEC (1OP 0x86) + JL (2OP 0x82)
+  - Essential for loop termination conditions
+- Completes decrement/test predicate family
+- Enables efficient countdown patterns
+- **Test**: dless_test.zil (1,098 bytes)
+- Brings total to 115 opcodes implemented
+- **ACHIEVEMENT**: 🎉 85% Planetfall Complete! 🎉
+- **MAJOR MILESTONE**: Version 1.0.0 Released!
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.9.8
+**Current Version**: 1.0.0
 
-**Status**: 🟢 Active Development - 84% Planetfall Complete!
+**Status**: 🟢 Active Development - 85% Planetfall Complete!
