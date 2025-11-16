@@ -403,21 +403,48 @@ Educational implementation for learning compiler design, virtual machines, and h
 - SYNTAX to action mapping
 - **Tests**: parser_test, perform_test, vocabulary_test, syntax_test
 
-### 📊 Planetfall Progress: ~30% Complete
+### 📊 Planetfall Progress: ~40% Complete
 Current feature implementation vs. Planetfall requirements:
 - ✅ Multi-file compilation (9 files)
 - ✅ PROPDEF (SIZE, CAPACITY, VALUE)
 - ✅ SYNTAX verb/action system
 - ✅ Vocabulary (SYNONYM, ADJECTIVE)
 - ✅ Parser globals
-- ⚠️ **Missing**: DEFMAC macros (next priority)
-- ⚠️ Advanced opcodes (RANDOM, etc.)
+- ✅ **DEFMAC macros** (ENABLE, DISABLE, ABS, OPENABLE?, etc.)
+- ⚠️ **Missing**: Advanced DEFMAC features (TUPLE expansion, complex AUX)
+- ⚠️ Advanced opcodes (some array operations)
 - ⚠️ String optimization (BUZZ words)
 
 ---
 
-**Last Updated**: 2025-11-15
+## Recent Session Updates (2025-11-16)
 
-**Current Version**: 0.3.0 (Parser system + Multi-file + PROPDEF)
+### ✅ DEFMAC Macro System
+- **Commit**: ab5433a
+- Complete macro definition and expansion implementation
+- MacroNode AST type and MacroExpander class
+- Quote operator (') support in lexer/parser
+- Parameter binding and substitution (.VAR references)
+- FORM constructor for code generation templates
+- Quoted parameters ('PARAM), TUPLE, and AUX support
+- **Tests**: macro_test.zil, planetfall_macros.zil (both compile)
+- **Essential for**: Planetfall (ENABLE, DISABLE, ABS, OPENABLE?, VERB?, etc.)
+
+### Macro Features Implemented:
+- ✅ Basic macro definition: `<DEFMAC name (params) body>`
+- ✅ Parameter substitution with `.VAR`
+- ✅ Quoted parameters: `'PARAM`
+- ✅ FORM constructor: `<FORM op .arg1 .arg2>`
+- ✅ Recursive macro expansion
+- ✅ Integration with compiler pipeline
+- ⚠️ Partial: List splicing `!.VAR` (needs more work)
+- ⚠️ Partial: TUPLE variadic parameters (parsed but not fully expanded)
+- ⚠️ Partial: AUX variables with complex defaults
+
+---
+
+**Last Updated**: 2025-11-16
+
+**Current Version**: 0.4.0 (Parser + Multi-file + PROPDEF + DEFMAC)
 
 **Status**: 🟢 Active Development - Ready for Real Game Compilation!
