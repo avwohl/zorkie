@@ -279,6 +279,8 @@ class ImprovedCodeGenerator:
             return self.gen_not(form.operands)
         elif op_name == 'BAND':
             return self.gen_band(form.operands)
+        elif op_name == 'BOR':
+            return self.gen_bor(form.operands)
         elif op_name == 'BTST':
             return self.gen_btst(form.operands)
 
@@ -2171,3 +2173,19 @@ class ImprovedCodeGenerator:
         """
         # BAND is functionally the same as AND
         return self.gen_and(operands)
+
+    def gen_bor(self, operands: List[ASTNode]) -> bytes:
+        """Generate BOR (bitwise OR).
+
+        Performs bitwise OR operation, same as OR but traditionally
+        used for byte-sized operations in ZIL.
+
+        Args:
+            operands[0]: first operand
+            operands[1]: second operand
+
+        Returns:
+            bytes: Z-machine code (OR instruction)
+        """
+        # BOR is functionally the same as OR
+        return self.gen_or(operands)

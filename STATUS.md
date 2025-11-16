@@ -541,8 +541,17 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ BOR Opcode - Completing Bitwise Operations
+- **Commit**: (pending)
+- BOR - Bitwise OR for bytes (2 Planetfall uses)
+- Complements BAND to provide full byte-oriented bit operations
+- Updated bitwise_test.zil to demonstrate all bitwise ops
+- Brings total to 75+ opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.5.4 (GETPT + BTST + BAND)
+**Current Version**: 0.5.5 (BOR + Complete Bitwise Suite)
 
-**Status**: 🟢 Active Development - 57% Planetfall Complete!
+**Status**: 🟢 Active Development - 58% Planetfall Complete!

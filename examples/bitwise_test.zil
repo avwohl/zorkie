@@ -13,6 +13,12 @@
 	<TELL "FLAGS AND 7 = " N <BAND ,FLAGS 7> " (binary: 0111)" CR>
 	<CRLF>
 
+	<TELL "Testing BOR (bitwise OR):" CR>
+	<SETG FLAGS 12>
+	<TELL "FLAGS = " N ,FLAGS " (binary: 1100)" CR>
+	<TELL "FLAGS OR 3 = " N <BOR ,FLAGS 3> " (binary: 1111)" CR>
+	<CRLF>
+
 	<TELL "Testing BTST (bit test):" CR>
 	<SETG FLAGS 8>
 	<TELL "FLAGS = " N ,FLAGS " (bit 3 set)" CR>

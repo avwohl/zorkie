@@ -77,7 +77,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Logical/Bitwise Operations (5 opcodes)
+## Logical/Bitwise Operations (6 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -85,6 +85,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | OR | OR | Bitwise OR | ✅ |
 | NOT | NOT | Bitwise NOT | ✅ |
 | BAND | AND | Bitwise AND (byte-oriented) | ✅ |
+| BOR | OR | Bitwise OR (byte-oriented) | ✅ |
 | BTST | AND+mask | Test if bit is set | ✅ |
 
 ---
@@ -179,11 +180,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 74+ distinct operations
+- **Total Opcodes**: 75+ distinct operations
 - **Opcode Categories**: 13 categories
 - **Test Programs**: 35 working examples
-- **Planetfall Coverage**: ~57% of required operations
-- **Version**: 0.5.4
+- **Planetfall Coverage**: ~58% of required operations
+- **Version**: 0.5.5
 
 ---
 
@@ -235,4 +236,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.5.4
+**Compiler Version**: 0.5.5
