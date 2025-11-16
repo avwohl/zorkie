@@ -26,7 +26,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Output/Print Operations (11 opcodes)
+## Output/Print Operations (15 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -40,6 +40,10 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PRINTI | PRINT | Print inline (property) | ✅ |
 | PRINTADDR | PRINT_ADDR | Print string at byte address | ✅ |
 | STRING | Memory alloc | Build string (basic, no interpolation) | ✅ |
+| SOUND | SOUND_EFFECT | Play sound effect | ✅ |
+| CLEAR | ERASE_WINDOW | Clear screen | ✅ |
+| SPLIT | SPLIT_WINDOW | Split screen into windows | ✅ |
+| SCREEN | SET_WINDOW | Select active window | ✅ |
 
 ---
 
@@ -57,7 +61,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Arithmetic Operations (9 opcodes)
+## Arithmetic Operations (10 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -70,6 +74,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | 1- | SUB | Subtract 1 (shorthand) | ✅ |
 | MIN | Comparison | Minimum of two values | ✅ |
 | MAX | Comparison | Maximum of two values | ✅ |
+| ABS | Math | Absolute value | ✅ |
 
 ---
 
@@ -206,11 +211,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 101 distinct operations
+- **Total Opcodes**: 105 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 43 working examples
-- **Planetfall Coverage**: ~77% of required operations
-- **Version**: 0.8.1
+- **Test Programs**: 44 working examples
+- **Planetfall Coverage**: ~80% of required operations
+- **Version**: 0.9.0
 
 ---
 
@@ -259,4 +264,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.8.1
+**Compiler Version**: 0.9.0

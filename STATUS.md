@@ -632,7 +632,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Routine Calls & Truth Predicates - CALL, APPLY, NOT?, TRUE?
-- **Commit**: (pending)
+- **Commit**: 2572093
 - CALL - Call routine with arguments (uses CALL_VS)
 - APPLY - Apply routine with arguments from table
 - NOT? - Test if value is false/zero (alias for ZERO?)
@@ -644,8 +644,23 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎉 80% PLANETFALL MILESTONE - Utility Opcodes: ABS, SOUND, CLEAR, SPLIT, SCREEN
+- **Commit**: (pending)
+- ABS - Absolute value
+- SOUND - Play sound effects (SOUND_EFFECT opcode)
+- CLEAR - Clear screen (ERASE_WINDOW opcode)
+- SPLIT - Split screen into upper/lower windows (SPLIT_WINDOW)
+- SCREEN - Select active window (SET_WINDOW)
+- Adds essential screen control for interactive fiction
+- Completes core utility opcode set
+- **Test**: utility_opcodes_test.zil (1,356 bytes)
+- Brings total to 105 opcodes implemented
+- **ACHIEVEMENT**: 🎉 80% Planetfall Complete! 🎉
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.8.1
+**Current Version**: 0.9.0
 
-**Status**: 🟢 Active Development - 77% Planetfall Complete!
+**Status**: 🟢 Active Development - 80% Planetfall Complete!

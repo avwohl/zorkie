@@ -279,6 +279,16 @@ class ImprovedCodeGenerator:
             return self.gen_min(form.operands)
         elif op_name == 'MAX':
             return self.gen_max(form.operands)
+        elif op_name == 'ABS':
+            return self.gen_abs(form.operands)
+        elif op_name == 'SOUND':
+            return self.gen_sound(form.operands)
+        elif op_name == 'CLEAR':
+            return self.gen_clear(form.operands)
+        elif op_name == 'SPLIT':
+            return self.gen_split(form.operands)
+        elif op_name == 'SCREEN':
+            return self.gen_screen(form.operands)
 
         # Comparison
         elif op_name in ('=', 'EQUAL?', '==?'):
@@ -999,6 +1009,128 @@ class ImprovedCodeGenerator:
             else:
                 code.append(0x01)  # Small constant
                 code.append(val2 & 0xFF)
+
+        return bytes(code)
+
+    def gen_abs(self, operands: List[ASTNode]) -> bytes:
+        """Generate ABS (absolute value).
+
+        <ABS value> returns the absolute value of a number.
+        For positive values, returns value.
+        For negative values, returns -value.
+
+        In Z-machine, we can test if negative and negate if needed.
+
+        Args:
+            operands[0]: Value to get absolute value of
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        value = self.get_operand_value(operands[0])
+
+        if isinstance(value, int):
+            # Simple compile-time evaluation
+            abs_val = abs(value)
+            if 0 <= abs_val <= 255:
+                code.append(0x01)  # Small constant
+                code.append(abs_val & 0xFF)
+
+        return bytes(code)
+
+    def gen_sound(self, operands: List[ASTNode]) -> bytes:
+        """Generate SOUND (play sound effect).
+
+        <SOUND effect> plays a sound effect.
+        In V3, this is the SOUND_EFFECT opcode (VAR opcode 0x05).
+
+        Args:
+            operands[0]: Sound effect number (1-N)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        effect = self.get_operand_value(operands[0])
+
+        if isinstance(effect, int):
+            code.append(0xE5)  # SOUND_EFFECT (VAR opcode 0x05)
+            code.append(0x2F)  # Type byte: 1 small constant, rest omitted
+            code.append(effect & 0xFF)
+
+        return bytes(code)
+
+    def gen_clear(self, operands: List[ASTNode]) -> bytes:
+        """Generate CLEAR (clear screen).
+
+        <CLEAR> clears the screen.
+        In V3, this is the ERASE_WINDOW opcode (VAR opcode 0x0D).
+        Window -1 means clear entire screen.
+
+        Returns:
+            bytes: Z-machine code
+        """
+        code = bytearray()
+        code.append(0xED)  # ERASE_WINDOW (VAR opcode 0x0D)
+        code.append(0x2F)  # Type byte: 1 small constant, rest omitted
+        code.append(0xFF)  # Window -1 (entire screen)
+
+        return bytes(code)
+
+    def gen_split(self, operands: List[ASTNode]) -> bytes:
+        """Generate SPLIT (split window).
+
+        <SPLIT lines> splits the screen into upper and lower windows.
+        In V3, this is the SPLIT_WINDOW opcode (VAR opcode 0x0A).
+
+        Args:
+            operands[0]: Number of lines for upper window
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        lines = self.get_operand_value(operands[0])
+
+        if isinstance(lines, int):
+            code.append(0xEA)  # SPLIT_WINDOW (VAR opcode 0x0A)
+            code.append(0x2F)  # Type byte: 1 small constant, rest omitted
+            code.append(lines & 0xFF)
+
+        return bytes(code)
+
+    def gen_screen(self, operands: List[ASTNode]) -> bytes:
+        """Generate SCREEN (select window).
+
+        <SCREEN window> selects which window to write to.
+        In V3, this is the SET_WINDOW opcode (VAR opcode 0x0B).
+
+        Args:
+            operands[0]: Window number (0=lower, 1=upper)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        window = self.get_operand_value(operands[0])
+
+        if isinstance(window, int):
+            code.append(0xEB)  # SET_WINDOW (VAR opcode 0x0B)
+            code.append(0x2F)  # Type byte: 1 small constant, rest omitted
+            code.append(window & 0xFF)
 
         return bytes(code)
 
