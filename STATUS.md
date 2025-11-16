@@ -443,7 +443,7 @@ Current feature implementation vs. Planetfall requirements:
 - ⚠️ Partial: AUX variables with complex defaults
 
 ### ✅ Table Operations (GET/PUT)
-- **Commit**: 7b17a35
+- **Commit**: 7b17a35, 9d279a5
 - Complete table access operations for arrays/tables
 - GET/PUT for word-based access (1-based in ZIL)
 - GETB/PUTB for byte-based access (0-based)
@@ -451,10 +451,17 @@ Current feature implementation vs. Planetfall requirements:
 - **Test**: table_test.zil (993 bytes)
 - **Essential for**: Planetfall (300+ uses of GET/PUT operations)
 
+### ✅ IN? Object Containment Predicate
+- **Commit**: c74fc09
+- Tests if obj1 is directly contained in obj2 (parent check)
+- Uses GET_PARENT + JE branch instruction combination
+- **Test**: in_test.zil (1,195 bytes)
+- **Essential for**: Planetfall (133 uses)
+
 ---
 
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.4.1 (Parser + Multi-file + PROPDEF + DEFMAC + Tables)
+**Current Version**: 0.4.2 (Parser + Multi-file + PROPDEF + DEFMAC + Tables + IN?)
 
 **Status**: 🟢 Active Development - Ready for Real Game Compilation!
