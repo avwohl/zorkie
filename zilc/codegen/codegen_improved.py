@@ -359,6 +359,14 @@ class ImprovedCodeGenerator:
         elif op_name == 'PERFORM':
             return self.gen_perform(form.operands)
 
+        # List/table operations
+        elif op_name == 'REST':
+            return self.gen_rest(form.operands)
+
+        # Game control
+        elif op_name == 'JIGS-UP':
+            return self.gen_jigs_up(form.operands)
+
         # Routine calls - check if it's a routine name
         elif isinstance(form.operator, AtomNode):
             if form.operator.value in self.routines or form.operator.value.isupper():
@@ -1812,5 +1820,79 @@ class ImprovedCodeGenerator:
 
         # TODO: Call object's ACTION routine
         # For now, just setting globals is sufficient for testing
+
+        return bytes(code)
+
+    def gen_rest(self, operands: List[ASTNode]) -> bytes:
+        """Generate REST (pointer arithmetic on tables).
+
+        REST takes a table address and an offset, returning address + (offset * 2).
+        Used for list/table traversal.
+
+        Args:
+            operands[0]: table/array address
+            operands[1]: offset (optional, defaults to 1 for list tail)
+
+        Returns:
+            bytes: Z-machine code (ADD to compute new address)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+
+        # If offset provided, use it; otherwise use 1 (skip first element)
+        if len(operands) > 1:
+            offset = self.get_operand_value(operands[1])
+        else:
+            offset = 1
+
+        # REST returns table_address + (offset * 2)
+        # For word-based tables, each element is 2 bytes
+        # Use ADD to compute: table + (offset * 2)
+
+        if isinstance(table, int) and isinstance(offset, int):
+            # Calculate byte offset
+            byte_offset = offset * 2
+
+            # ADD is 2OP opcode 0x14
+            code.append(0x54)  # Long form, opcode 0x14
+            code.append(table & 0xFF)
+            code.append(byte_offset & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_jigs_up(self, operands: List[ASTNode]) -> bytes:
+        """Generate JIGS-UP (game over with message).
+
+        Prints a death message and ends the game.
+
+        Args:
+            operands[0]: optional string message
+
+        Returns:
+            bytes: Z-machine code (PRINT_RET with message, then QUIT)
+        """
+        code = bytearray()
+
+        # If message provided, print it
+        if operands and isinstance(operands[0], StringNode):
+            # Use PRINT_RET (0x03) to print and return true
+            message = operands[0].value
+            encoded_words = self.encoder.encode_string(message)
+
+            code.append(0xB3)  # PRINT_RET opcode
+            # Convert words to bytes
+            for word in encoded_words:
+                code.append((word >> 8) & 0xFF)
+                code.append(word & 0xFF)
+
+        # Print death message
+        code.extend(self.gen_tell([StringNode("\n*** You have died ***\n", 0, 0)]))
+
+        # QUIT
+        code.extend(self.gen_quit())
 
         return bytes(code)

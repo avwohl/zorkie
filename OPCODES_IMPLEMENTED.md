@@ -5,7 +5,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Control Flow (10 opcodes)
+## Control Flow (12 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -19,6 +19,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | VERIFY | VERIFY | Verify story file | ✅ |
 | COND | JZ/JE/etc | Multi-clause conditional | ✅ |
 | REPEAT | JMP | Loop with optional bindings | ✅ |
+| JIGS-UP | PRINT_RET+QUIT | Game over with message | ✅ |
+| REST | ADD | Pointer arithmetic (list tail) | ✅ |
 
 ---
 
@@ -169,11 +171,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 64+ distinct operations
+- **Total Opcodes**: 66+ distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 27 working examples
-- **Planetfall Coverage**: ~50% of required operations
-- **Version**: 0.5.0
+- **Test Programs**: 29 working examples
+- **Planetfall Coverage**: ~52% of required operations
+- **Version**: 0.5.1
 
 ---
 
@@ -182,11 +184,9 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | ZIL Opcode | Description | Planetfall Uses |
 |------------|-------------|-----------------|
 | QUEUE | Daemon scheduling | 78 |
+| INT | Interrupt control | 45 |
 | STRING | Build strings with escapes/interpolation | 15 |
 | DEQUEUE | Remove daemon | - |
-| INT | Interrupt control | 45 |
-| JIGS-UP | Game over routine | 42 |
-| REST | List tail operation | 37 |
 
 ---
 
@@ -227,4 +227,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.5.0
+**Compiler Version**: 0.5.1

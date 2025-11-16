@@ -503,8 +503,17 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Additional Opcodes - REST and JIGS-UP
+- **Commit**: (pending)
+- REST - Pointer arithmetic for list/table traversal (37 Planetfall uses)
+- JIGS-UP - Game over with death message (42 Planetfall uses)
+- **Tests**: rest_test.zil (1,047 bytes), jigs_up_test.zil (1,113 bytes)
+- Brings total to 66+ opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.5.0 (Complete property/table system + DEFMAC + Print ops)
+**Current Version**: 0.5.1 (REST + JIGS-UP + String escapes)
 
-**Status**: 🟢 Active Development - Ready for Real Game Compilation!
+**Status**: 🟢 Active Development - 52% Planetfall Complete!
