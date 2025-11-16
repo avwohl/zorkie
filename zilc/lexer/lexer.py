@@ -237,6 +237,14 @@ class Lexer:
             line = self.line
             col = self.column
 
+            # Conditional compilation: %<...> - skip the %
+            if ch == '%' and self.peek(1) == '<':
+                self.advance()  # Skip %
+                # Fall through to handle <
+                ch = self.peek()
+                line = self.line
+                col = self.column
+
             # Delimiters
             if ch == '<':
                 self.advance()

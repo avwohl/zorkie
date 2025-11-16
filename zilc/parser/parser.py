@@ -55,6 +55,10 @@ class Parser:
         while self.current_token.type != TokenType.EOF:
             node = self.parse_top_level()
 
+            # Skip None nodes (comments, standalone strings, etc.)
+            if node is None:
+                continue
+
             if isinstance(node, RoutineNode):
                 program.routines.append(node)
             elif isinstance(node, ObjectNode):
@@ -82,6 +86,10 @@ class Parser:
         """Parse a top-level form."""
         if self.current_token.type == TokenType.LANGLE:
             return self.parse_form()
+        elif self.current_token.type == TokenType.STRING:
+            # Skip standalone strings (comments/documentation)
+            self.advance()
+            return None
         else:
             self.error(f"Unexpected token at top level: {self.current_token.type.name}")
 
@@ -126,10 +134,24 @@ class Parser:
 
             elif op_name == "VERSION":
                 version_num = self.parse_expression()
-                if not isinstance(version_num, NumberNode):
-                    self.error("VERSION requires a number")
+                # Handle VERSION ZIP (Z-code Interpreter Program) = version 3
+                if isinstance(version_num, AtomNode):
+                    if version_num.value == "ZIP":
+                        version_value = 3
+                    elif version_num.value == "EZIP":
+                        version_value = 4
+                    elif version_num.value == "XZIP":
+                        version_value = 5
+                    elif version_num.value == "YZIP":
+                        version_value = 6
+                    else:
+                        self.error(f"Unknown version name: {version_num.value}")
+                elif isinstance(version_num, NumberNode):
+                    version_value = version_num.value
+                else:
+                    self.error("VERSION requires a number or version name (ZIP/EZIP/XZIP/YZIP)")
                 self.expect(TokenType.RANGLE)
-                return VersionNode(version_num.value, line, col)
+                return VersionNode(version_value, line, col)
 
             elif op_name == "GLOBAL":
                 node = self.parse_global(line, col)
