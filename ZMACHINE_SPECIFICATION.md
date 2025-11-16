@@ -12,13 +12,13 @@ The Z-machine is a virtual machine designed by Infocom in the late 1970s to enab
 - **Legacy**: Over 100 commercial games, modern interpreters still active
 
 ### 1.3 Version History
-- **Version 1-2**: Early Zork games (rare)
-- **Version 3**: Most Infocom games, 128KB limit
-- **Version 4**: Extended features, 256KB limit
-- **Version 5**: Graphics, sound, color support
-- **Version 6**: Advanced graphics, proportional fonts
-- **Version 7**: Never used by Infocom
-- **Version 8**: Modern extension, 512KB limit
+- **Version 1-2**: Early Zork games (rare, 1979-1981)
+- **Version 3**: Most Infocom games, 128KB limit (1982-1988)
+- **Version 4**: Extended features, 256KB limit (1984-1988)
+- **Version 5**: Color, sound, undo support, 256KB limit (1986-1988)
+- **Version 6**: Advanced graphics, mouse input, proportional fonts, 256KB limit (1988-1989)
+- **Version 7**: Created 1995 by Graham Nelson, never widely used, 512KB limit
+- **Version 8**: Created 1995 by Graham Nelson, modern standard for large games, 512KB limit
 
 ### 1.4 Standards Document
 The authoritative specification is "The Z-Machine Standards Document" by Graham Nelson (v1.1, February 24, 2014), available at inform-fiction.org.
@@ -648,12 +648,27 @@ Each routine call creates a stack frame containing:
 - Pictures and complex layouts
 
 ### 10.6 Version 7
-- Defined but never used by Infocom
+- **Created**: 1995 by Graham Nelson (not Infocom)
+- **Purpose**: Support large Inform games exceeding V5's 256KB limit
+- **File size**: 512KB maximum
+- **Functionally identical to V5** except:
+  - Packed address calculation: `4P + 8×R_O` for routines, `4P + 8×S_O` for strings
+  - Uses header fields $28 (routines offset ÷ 8) and $2A (strings offset ÷ 8)
+- **Usage**: Almost never used, poor interpreter support
+- **Reason for disuse**: V8's simpler addressing made it obsolete
 
 ### 10.7 Version 8
-- 512KB story file limit
-- Modern extension
-- Enhanced memory addressing
+- **Created**: 1995 by Graham Nelson (not Infocom)
+- **Purpose**: Support large Inform games, became the standard over V7
+- **File size**: 512KB maximum
+- **Functionally identical to V5** except:
+  - Packed address calculation: `8P` (simpler than V7)
+  - File length divisor: 8 (header $1A × 8 = file size)
+- **Usage**: Widely supported, standard for modern large IF games
+- **Advantages over V7**:
+  - Simpler packed addressing formula
+  - No need for offset header fields
+  - Better interpreter compatibility
 
 ## 11. File Structure
 
@@ -683,12 +698,13 @@ Each routine call creates a stack frame containing:
 
 Header word $1A contains file length divided by a constant:
 
-| Version | Divisor | Max Size |
-|---------|---------|----------|
-| 1-3     | 2       | 128 KB   |
-| 4-5     | 4       | 256 KB   |
-| 6-7     | 4       | 256 KB   |
-| 8       | 8       | 512 KB   |
+| Version | Divisor | Max Size | Notes |
+|---------|---------|----------|-------|
+| 1-3     | 2       | 128 KB   | Infocom standard |
+| 4-5     | 4       | 256 KB   | Infocom extended |
+| 6       | 4       | 256 KB   | Infocom graphics |
+| 7       | 4       | 512 KB   | Graham Nelson 1995, rarely used |
+| 8       | 8       | 512 KB   | Graham Nelson 1995, modern standard |
 
 Actual file length = header[$1A] × divisor
 
@@ -912,22 +928,68 @@ Same as ASCII.
 | 155-251 | ✓  | ✓      | Extra characters (V5+ via Unicode table) |
 | 252-254 | ✓  | -      | Menu/mouse events |
 
-## Appendix C: Version Summary Table
+## Appendix C: Understanding Version 7 vs Version 8
 
-| Feature | V1-2 | V3 | V4 | V5 | V6 | V8 |
-|---------|------|----|----|----|----|-----|
-| Max file size | 128K | 128K | 256K | 256K | 256K | 512K |
-| Max objects | 255 | 255 | 65535 | 65535 | 65535 | 65535 |
-| Attributes | 32 | 32 | 48 | 48 | 48 | 48 |
-| Alphabet shift | Perm | Temp | Temp | Temp | Temp | Temp |
-| Abbreviations | V2 | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Timed input | - | - | ✓ | ✓ | ✓ | ✓ |
-| Colors | - | - | - | ✓ | ✓ | ✓ |
-| Sound | - | - | - | ✓ | ✓ | ✓ |
-| Undo | - | - | - | ✓ | ✓ | ✓ |
-| Graphics | - | - | - | - | ✓ | ✓ |
-| Mouse | - | - | - | - | ✓ | ✓ |
-| Custom alphabet | - | - | - | ✓ | ✓ | ✓ |
+### C.1 Why Two 512KB Versions?
+
+In 1995, Graham Nelson created both V7 and V8 to support Inform games larger than V5's 256KB limit. The existence of two versions addressing the same problem is historical:
+
+1. **V7 was created first** as a natural extension of V6's packed addressing scheme
+2. **V8 was created shortly after** with a simpler addressing formula
+3. **V8 became the standard** due to its simplicity and better interpreter support
+
+### C.2 Technical Differences
+
+The **only** differences between V7 and V8 are:
+
+| Aspect | Version 7 | Version 8 |
+|--------|-----------|-----------|
+| **Routine packed address** | `4P + 8×R_O` | `8P` |
+| **String packed address** | `4P + 8×S_O` | `8P` |
+| **Header $28-29** | Routines offset ÷ 8 | Not used |
+| **Header $2A-2B** | Strings offset ÷ 8 | Not used |
+| **File length divisor** | 4 | 8 |
+
+Where:
+- `P` = packed address value
+- `R_O` = routines offset from header $28 (V7 only)
+- `S_O` = strings offset from header $2A (V7 only)
+
+### C.3 Why V8 Won
+
+**Simplicity**: V8's formula (`8P`) is trivial to implement compared to V7's (`4P + 8×offset`)
+
+**Compatibility**: Fewer interpreters properly implement the V7 offset mechanism
+
+**No Advantage**: V7 offers no benefits over V8, only additional complexity
+
+### C.4 Recommendation for Implementation
+
+- **Support V8**: It's the modern standard for large games
+- **Skip V7**: Almost no games use it, interpreter support is poor
+- **Functionally identical to V5**: V8 uses the same opcodes, just different addressing
+
+## Appendix D: Version Summary Table
+
+| Feature | V1-2 | V3 | V4 | V5 | V6 | V7 | V8 |
+|---------|------|----|----|----|----|-----|-----|
+| **Created by** | Infocom | Infocom | Infocom | Infocom | Infocom | G. Nelson | G. Nelson |
+| **Year** | 1979-81 | 1982 | 1984 | 1986 | 1988 | 1995 | 1995 |
+| **Max file size** | 128K | 128K | 256K | 256K | 256K | 512K | 512K |
+| **Packed addr** | 2P | 2P | 4P | 4P | 4P+offset | 4P+offset | 8P |
+| **Max objects** | 255 | 255 | 65535 | 65535 | 65535 | 65535 | 65535 |
+| **Attributes** | 32 | 32 | 48 | 48 | 48 | 48 | 48 |
+| **Alphabet shift** | Perm | Temp | Temp | Temp | Temp | Temp | Temp |
+| **Abbreviations** | V2 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Timed input** | - | - | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Colors** | - | - | - | ✓ | ✓ | ✓ | ✓ |
+| **Sound** | - | - | - | ✓ | ✓ | ✓ | ✓ |
+| **Undo** | - | - | - | ✓ | ✓ | ✓ | ✓ |
+| **Graphics** | - | - | - | - | ✓ | ✓ | ✓ |
+| **Mouse** | - | - | - | - | ✓ | ✓ | ✓ |
+| **Custom alphabet** | - | - | - | ✓ | ✓ | ✓ | ✓ |
+| **Interpreter support** | Rare | Excellent | Excellent | Excellent | Good | Poor | Excellent |
+| **Usage** | Historical | Common | Common | Common | Rare | Almost none | Modern IF |
 
 ---
 

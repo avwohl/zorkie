@@ -599,7 +599,7 @@ class ImprovedCodeGenerator:
         elif isinstance(form.operator, AtomNode):
             if form.operator.value in self.routines or form.operator.value.isupper():
                 # Likely a routine call
-                return self.gen_call(form.operator.value, form.operands)
+                return self.gen_routine_call(form.operator.value, form.operands)
 
         return b''
 
@@ -4466,7 +4466,7 @@ class ImprovedCodeGenerator:
 
     # ===== Routine Calls =====
 
-    def gen_call(self, routine_name: str, operands: List[ASTNode]) -> bytes:
+    def gen_routine_call(self, routine_name: str, operands: List[ASTNode]) -> bytes:
         """Generate routine call (CALL or CALL_VS)."""
         code = bytearray()
 

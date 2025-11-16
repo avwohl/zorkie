@@ -45,7 +45,7 @@ class Parser:
     def expect(self, token_type: TokenType) -> Token:
         """Consume token of expected type or raise error."""
         if self.current_token.type != token_type:
-            self.error(f"Expected {token_type.name}, got {self.current_token.type.name}")
+            self.error(f"Expected {token_type.name}, got {self.current_token.type.name} ({repr(self.current_token.value)})")
         return self.advance()
 
     def parse(self) -> Program:
@@ -59,28 +59,46 @@ class Parser:
             if node is None:
                 continue
 
-            if isinstance(node, RoutineNode):
-                program.routines.append(node)
-            elif isinstance(node, ObjectNode):
-                program.objects.append(node)
-            elif isinstance(node, RoomNode):
-                program.rooms.append(node)
-            elif isinstance(node, GlobalNode):
-                program.globals.append(node)
-            elif isinstance(node, ConstantNode):
-                program.constants.append(node)
-            elif isinstance(node, PropdefNode):
-                program.propdefs.append(node)
-            elif isinstance(node, SyntaxNode):
-                program.syntax.append(node)
-            elif isinstance(node, MacroNode):
-                program.macros.append(node)
-            elif isinstance(node, VersionNode):
-                program.version = node.version
-            elif isinstance(node, TableNode):
-                program.tables.append(node)
+            # Handle lists of nodes (from VERSION? expansion)
+            if isinstance(node, list):
+                for n in node:
+                    self._add_node_to_program(program, n)
+            else:
+                self._add_node_to_program(program, node)
 
         return program
+
+    def _add_node_to_program(self, program, node):
+        """Helper to add a single node to the program."""
+        if node is None:
+            return
+
+        if isinstance(node, RoutineNode):
+            program.routines.append(node)
+        elif isinstance(node, ObjectNode):
+            program.objects.append(node)
+        elif isinstance(node, RoomNode):
+            program.rooms.append(node)
+        elif isinstance(node, GlobalNode):
+            program.globals.append(node)
+        elif isinstance(node, ConstantNode):
+            program.constants.append(node)
+        elif isinstance(node, PropdefNode):
+            program.propdefs.append(node)
+        elif isinstance(node, SyntaxNode):
+            program.syntax.append(node)
+        elif isinstance(node, MacroNode):
+            program.macros.append(node)
+        elif isinstance(node, VersionNode):
+            program.version = node.version
+        elif isinstance(node, TableNode):
+            program.tables.append(node)
+        elif isinstance(node, BuzzNode):
+            # Add all buzz words to program's buzz_words list
+            program.buzz_words.extend(node.words)
+        elif isinstance(node, SynonymNode):
+            # Add all synonym words to program's synonym_words list
+            program.synonym_words.extend(node.words)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -88,6 +106,14 @@ class Parser:
             return self.parse_form()
         elif self.current_token.type == TokenType.STRING:
             # Skip standalone strings (comments/documentation)
+            self.advance()
+            return None
+        elif self.current_token.type == TokenType.ATOM and self.current_token.value in ('\\', '\\\\'):
+            # Skip standalone backslash (page break marker)
+            self.advance()
+            return None
+        elif self.current_token.type == TokenType.RANGLE:
+            # Skip stray closing brackets (may result from complex macro expansions)
             self.advance()
             return None
         else:
@@ -173,6 +199,94 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return node
 
+            elif op_name == "DEFINE":
+                # DEFINE is like DEFMAC but for compile-time only
+                # Parse it the same way but mark as compile-time
+                node = self.parse_defmac(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "EVAL":
+                # EVAL is compile-time evaluation - parse but don't generate code
+                expr = self.parse_expression()
+                self.expect(TokenType.RANGLE)
+                # Return None to skip this at top level
+                return None
+
+            elif op_name == "DEFAULT-DEFINITION":
+                # DEFAULT-DEFINITION contains default macro definitions
+                # Parse name and body expressions but don't generate code
+                if self.current_token.type == TokenType.ATOM:
+                    self.advance()  # Skip name
+                # Parse all expressions until closing >
+                while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+                    self.parse_expression()
+                self.expect(TokenType.RANGLE)
+                return None
+
+            elif op_name == "VERSION?":
+                # VERSION? conditional compilation
+                # Syntax: <VERSION? (ZIP body...) (EZIP body...) (ELSE body...)>
+                # Parse each clause and only return the matching one for our version
+                from .ast_nodes import Program
+
+
+                # Get version from parent or default to 3
+                version = 3  # Default
+                # Try to get from program globals if available
+
+                selected_bodies = []
+                found_match = False
+
+                while self.current_token.type == TokenType.LPAREN:
+                    self.advance()  # Skip (
+
+                    # Parse condition name (ZIP, EZIP, XZIP, ELSE, etc.)
+                    clause_type = None
+                    if self.current_token.type == TokenType.ATOM:
+                        clause_type = self.current_token.value.upper()
+                        self.advance()
+
+                    # Parse body expressions for this clause
+                    clause_bodies = []
+                    while self.current_token.type not in (TokenType.RPAREN, TokenType.EOF):
+                        clause_bodies.append(self.parse_expression())
+
+                    self.expect(TokenType.RPAREN)
+
+                    # Check if this clause matches our version
+                    if not found_match:
+                        if clause_type == "ZIP" and version == 3:
+                            selected_bodies = clause_bodies
+                            found_match = True
+                        elif clause_type == "EZIP" and version == 4:
+                            selected_bodies = clause_bodies
+                            found_match = True
+                        elif clause_type == "XZIP" and version == 5:
+                            selected_bodies = clause_bodies
+                            found_match = True
+                        elif clause_type == "ELSE" and not found_match:
+                            selected_bodies = clause_bodies
+                            found_match = True
+
+                self.expect(TokenType.RANGLE)
+
+
+                # Return the selected bodies as a list of nodes
+                # These will be added to the program as if they were top-level
+                return selected_bodies if selected_bodies else None
+
+            elif op_name == "BUZZ":
+                node = self.parse_buzz(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "SYNONYM":
+                # Standalone SYNONYM declaration (not in an object)
+                node = self.parse_synonym_declaration(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
             elif op_name in ("TABLE", "ITABLE", "LTABLE"):
                 node = self.parse_table(op_name, line, col)
                 self.expect(TokenType.RANGLE)
@@ -211,6 +325,13 @@ class Parser:
             return FormNode(quote_atom, [quoted_expr], line, col)
 
         if token.type == TokenType.LANGLE:
+            # Check for empty form <>
+            # peek(1) looks at the NEXT token after current
+            next_tok = self.peek(1)
+            if next_tok and next_tok.type == TokenType.RANGLE:
+                self.advance()  # Skip <
+                self.advance()  # Skip >
+                return FormNode(AtomNode("<>", line, col), [], line, col)
             return self.parse_form()
 
         elif token.type == TokenType.ATOM:
@@ -237,6 +358,14 @@ class Parser:
             # Parse list literal (parameters, etc.)
             return self.parse_list()
 
+        elif token.type == TokenType.LBRACKET:
+            # Parse vector literal [item1 item2 ...]
+            return self.parse_vector()
+
+        elif token.type == TokenType.RPAREN:
+            # This shouldn't happen - probably a parse error earlier
+            self.error(f"Unexpected closing parenthesis - may indicate parsing error in enclosing form")
+
         else:
             self.error(f"Unexpected token in expression: {token.type.name}")
 
@@ -252,6 +381,24 @@ class Parser:
             items.append(self.parse_expression())
 
         self.expect(TokenType.RPAREN)
+        return items
+
+    def parse_vector(self) -> List[Any]:
+        """Parse a vector literal [item1 item2 ...]."""
+        line = self.current_token.line
+        col = self.current_token.column
+        self.expect(TokenType.LBRACKET)
+        items = []
+
+        while self.current_token.type != TokenType.RBRACKET:
+            if self.current_token.type == TokenType.EOF:
+                self.error("Unclosed vector")
+
+            items.append(self.parse_expression())
+
+        self.expect(TokenType.RBRACKET)
+        # For now, treat vectors the same as lists
+        # In a full implementation, we'd have a VectorNode type
         return items
 
     def parse_routine(self, line: int, col: int) -> RoutineNode:
@@ -271,14 +418,41 @@ class Parser:
         if self.current_token.type == TokenType.LPAREN:
             self.advance()
             in_aux = False
+            in_optional = False
 
             while self.current_token.type != TokenType.RPAREN:
+                # Handle parameter modifiers: "OPTIONAL", "OPT", "AUX", "ARGS", "TUPLE", etc.
                 if self.current_token.type == TokenType.STRING:
-                    if self.current_token.value == "AUX":
+                    modifier = self.current_token.value
+                    if modifier == "AUX":
                         in_aux = True
-                        self.advance()
-                        continue
+                        in_optional = False
+                    elif modifier in ("OPTIONAL", "OPT"):
+                        in_optional = True
+                    elif modifier == "ARGS":
+                        # Variadic arguments - treat like normal params for now
+                        pass
+                    # Skip other modifiers like "TUPLE", "NAME", etc.
+                    self.advance()
+                    continue
 
+                # Handle parameter with default value: (name default-value)
+                if self.current_token.type == TokenType.LPAREN:
+                    self.advance()
+                    if self.current_token.type != TokenType.ATOM:
+                        self.error("Expected parameter name in default value form")
+                    param_name = self.current_token.value
+                    self.advance()
+                    # Skip the default value expression
+                    default_value = self.parse_expression()
+                    self.expect(TokenType.RPAREN)
+                    if in_aux:
+                        aux_vars.append(param_name)
+                    else:
+                        params.append(param_name)
+                    continue
+
+                # Handle simple parameter name
                 if self.current_token.type == TokenType.ATOM:
                     if in_aux:
                         aux_vars.append(self.current_token.value)
@@ -324,32 +498,97 @@ class Parser:
         return RoomNode(name, properties, line, col)
 
     def parse_properties(self) -> dict:
-        """Parse object/room properties."""
+        """Parse object/room properties.
+
+        Supports two syntaxes:
+        - (property value...)  - standard syntax
+        - <LIST property value...>  - ZILF shorthand
+        """
         properties = {}
 
-        while self.current_token.type == TokenType.LPAREN:
-            self.advance()  # (
+        while self.current_token.type in (TokenType.LPAREN, TokenType.LANGLE, TokenType.QUOTE):
+            # Handle quoted properties: '(PROP value)
+            if self.current_token.type == TokenType.QUOTE:
+                self.advance()  # Skip quote
+                # Now expect a property definition
+                if self.current_token.type != TokenType.LPAREN:
+                    self.error("Expected property after quote")
+                # Continue to parse the property normally
+                # (the quote is just for metaprogramming, we can ignore it during parsing)
 
-            # Get property name
-            if self.current_token.type != TokenType.ATOM:
-                self.error("Expected property name")
-            prop_name = self.current_token.value
-            self.advance()
+            if self.current_token.type == TokenType.LANGLE:
+                # Could be <LIST property value...> or a computed property like %<VERSION? ...>
+                # Save position before advancing, in case we need to backtrack
+                start_pos = self.pos
+                self.advance()  # <
 
-            # Get property value(s)
-            values = []
-            while self.current_token.type != TokenType.RPAREN:
-                if self.current_token.type == TokenType.EOF:
-                    self.error("Unclosed property")
-                values.append(self.parse_expression())
+                # Check for LIST
+                if self.current_token.type == TokenType.ATOM and self.current_token.value == "LIST":
+                    # <LIST property value...> syntax
+                    self.advance()  # LIST
 
-            self.expect(TokenType.RPAREN)
+                    # Get property name
+                    if self.current_token.type != TokenType.ATOM:
+                        self.error("Expected property name in LIST")
+                    prop_name = self.current_token.value
+                    self.advance()
 
-            # Store property
-            if len(values) == 1:
-                properties[prop_name] = values[0]
+                    # Get property value(s)
+                    values = []
+                    while self.current_token.type != TokenType.RANGLE:
+                        if self.current_token.type == TokenType.EOF:
+                            self.error("Unclosed LIST property")
+                        values.append(self.parse_expression())
+
+                    self.expect(TokenType.RANGLE)
+
+                    # Store property
+                    if len(values) == 1:
+                        properties[prop_name] = values[0]
+                    else:
+                        properties[prop_name] = values
+                else:
+                    # Not a LIST form - could be a computed property like %<VERSION? ...>
+                    # Parse it as a form and store it as a computed property
+                    # Reset position to reparse the form
+                    self.pos = start_pos
+                    self.current_token = self.tokens[self.pos]
+
+                    # Parse the entire form as an expression
+                    form_value = self.parse_expression()
+
+                    # Store it with a generated property name
+                    # In a real compiler, this would be evaluated at compile time
+                    prop_name = f"__computed_prop_{len(properties)}"
+                    properties[prop_name] = form_value
             else:
-                properties[prop_name] = values
+                # Standard (property value...) syntax
+                self.advance()  # (
+
+                # Get property name
+                if self.current_token.type != TokenType.ATOM:
+                    self.error("Expected property name")
+                prop_name = self.current_token.value
+                self.advance()
+
+                # Get property value(s)
+                values = []
+                while self.current_token.type != TokenType.RPAREN:
+                    if self.current_token.type == TokenType.EOF:
+                        self.error("Unclosed property")
+                    # Skip semicolons (ZILF separator syntax)
+                    if self.current_token.type == TokenType.SEMICOLON:
+                        self.advance()
+                        continue
+                    values.append(self.parse_expression())
+
+                self.expect(TokenType.RPAREN)
+
+                # Store property
+                if len(values) == 1:
+                    properties[prop_name] = values[0]
+                else:
+                    properties[prop_name] = values
 
         return properties
 
@@ -367,17 +606,38 @@ class Parser:
             if self.current_token.type == TokenType.ATOM:
                 pattern.append(self.current_token.value)
                 self.advance()
+            elif self.current_token.type == TokenType.LPAREN:
+                # Skip object specification forms like (FIND ACTORBIT) (HAVE)
+                paren_depth = 0
+                while True:
+                    if self.current_token.type == TokenType.LPAREN:
+                        paren_depth += 1
+                    elif self.current_token.type == TokenType.RPAREN:
+                        paren_depth -= 1
+                        if paren_depth == 0:
+                            self.advance()
+                            break
+                    elif self.current_token.type == TokenType.EOF:
+                        self.error("Unclosed parenthesis in SYNTAX")
+                    self.advance()
             else:
-                self.error("Expected atom in SYNTAX pattern")
+                self.error("Expected atom or form in SYNTAX pattern")
 
         # Skip =
         self.advance()
 
-        # Get routine name
+        # Get routine name(s) - can have main action and optional pre-action
+        # Example: = V-PUT PRE-PUT
         if self.current_token.type != TokenType.ATOM:
             self.error("Expected routine name after =")
         routine = self.current_token.value
         self.advance()
+
+        # Skip optional additional routines (pre-action handlers, etc.)
+        # Syntax can have multiple routines: = ACTION PRE1 PRE2 ...
+        # For now, we just ignore them
+        while self.current_token.type == TokenType.ATOM:
+            self.advance()  # Skip additional routines
 
         return SyntaxNode(pattern, routine, line, col)
 
@@ -399,11 +659,24 @@ class Parser:
     def parse_constant(self, line: int, col: int) -> ConstantNode:
         """Parse CONSTANT definition."""
         # <CONSTANT name value>
+        # Name can be an atom, or a variable reference for computed names
 
-        if self.current_token.type != TokenType.ATOM:
+        if self.current_token.type == TokenType.ATOM:
+            name = self.current_token.value
+            self.advance()
+        elif self.current_token.type in (TokenType.LOCAL_VAR, TokenType.GLOBAL_VAR):
+            # Computed constant name (compile-time metaprogramming)
+            # Store as special marker for now
+            name = f"<computed:{self.current_token.value}>"
+            self.advance()
+        elif self.current_token.type == TokenType.LANGLE:
+            # Computed constant name as a form: <PARSE ...>, etc.
+            name_expr = self.parse_expression()
+            # Store the form expression as the name
+            name = f"<computed-form>"
+            # Note: in a real compiler, we'd evaluate name_expr at compile time
+        else:
             self.error("Expected constant name")
-        name = self.current_token.value
-        self.advance()
 
         value = self.parse_expression()
 
@@ -469,12 +742,17 @@ class Parser:
                         tuple_mode = False
                         self.advance()
                         continue
-                    elif keyword == "TUPLE":
+                    elif keyword in ("OPTIONAL", "OPT"):
+                        # Optional parameters - just a marker, treat params normally
+                        self.advance()
+                        continue
+                    elif keyword in ("TUPLE", "ARGS"):
+                        # TUPLE and ARGS both mean variadic parameters
                         tuple_mode = True
                         self.advance()
                         # Next token should be the tuple variable name
                         if self.current_token.type != TokenType.ATOM:
-                            self.error("Expected variable name after \"TUPLE\"")
+                            self.error(f"Expected variable name after \"{keyword}\"")
                         param_name = self.current_token.value
                         params.append((param_name, False, True, False))
                         self.advance()
@@ -511,10 +789,62 @@ class Parser:
 
             self.expect(TokenType.RPAREN)
 
-        # Parse macro body (single expression)
-        body = self.parse_expression()
+        # Parse macro body (one or more expressions until >)
+        body = []
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            body.append(self.parse_expression())
+
+        # If only one expression, unwrap it for backwards compatibility
+        if len(body) == 1:
+            body = body[0]
 
         return MacroNode(name, params, body, line, col)
+
+    def parse_buzz(self, line: int, col: int):
+        """Parse BUZZ noise word declaration.
+
+        Syntax: <BUZZ word1 word2 word3 ...>
+
+        Example: <BUZZ A AN THE IS ARE AND OF THEN>
+        """
+        from .ast_nodes import BuzzNode
+
+        words = []
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            if self.current_token.type == TokenType.ATOM:
+                word = self.current_token.value
+                # Handle escape sequences like \. and \,
+                if word.startswith('\\'):
+                    word = word[1:]  # Remove backslash
+                words.append(word)
+                self.advance()
+            else:
+                self.error(f"Expected word in BUZZ declaration, got {self.current_token.type}")
+
+        return BuzzNode(words, line, col)
+
+    def parse_synonym_declaration(self, line: int, col: int):
+        """Parse standalone SYNONYM declaration (not in an object).
+
+        Syntax: <SYNONYM word1 word2 word3 ...>
+
+        Example: <SYNONYM NORTH N FORE FORWARD F>
+        """
+        from .ast_nodes import SynonymNode
+
+        words = []
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            if self.current_token.type == TokenType.ATOM:
+                word = self.current_token.value
+                # Handle escape sequences like \. and \,
+                if word.startswith('\\'):
+                    word = word[1:]
+                words.append(word)
+                self.advance()
+            else:
+                self.error(f"Expected word in SYNONYM declaration, got {self.current_token.type}")
+
+        return SynonymNode(words, line, col)
 
     def parse_table(self, table_type: str, line: int, col: int) -> TableNode:
         """Parse TABLE/ITABLE/LTABLE definition."""
@@ -585,26 +915,36 @@ class Parser:
         from .ast_nodes import RepeatNode
 
         # Parse bindings list (required, can be empty)
+        # Syntax: ((var init) (var init) ...) or ((var init) var var ...)
         bindings = []
         if self.current_token.type == TokenType.LPAREN:
             self.advance()  # (
 
-            # Parse variable bindings
-            while self.current_token.type == TokenType.LPAREN:
-                self.advance()  # (
+            # Parse variable bindings - can be (var init) or just var
+            while self.current_token.type != TokenType.RPAREN:
+                if self.current_token.type == TokenType.LPAREN:
+                    # (var init) form
+                    self.advance()  # (
 
-                # Expect variable name
-                if self.current_token.type != TokenType.ATOM:
-                    self.error(f"Expected variable name in REPEAT binding, got {self.current_token.type}")
+                    # Expect variable name
+                    if self.current_token.type != TokenType.ATOM:
+                        self.error(f"Expected variable name in REPEAT binding, got {self.current_token.type}")
 
-                var_name = self.current_token.value
-                self.advance()
+                    var_name = self.current_token.value
+                    self.advance()
 
-                # Parse initial value
-                init_value = self.parse_expression()
+                    # Parse initial value
+                    init_value = self.parse_expression()
 
-                self.expect(TokenType.RPAREN)
-                bindings.append((var_name, init_value))
+                    self.expect(TokenType.RPAREN)
+                    bindings.append((var_name, init_value))
+                elif self.current_token.type == TokenType.ATOM:
+                    # Plain var form (no initialization)
+                    var_name = self.current_token.value
+                    self.advance()
+                    bindings.append((var_name, None))
+                else:
+                    self.error(f"Expected variable binding in REPEAT, got {self.current_token.type}")
 
             self.expect(TokenType.RPAREN)
 

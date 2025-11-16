@@ -38,6 +38,7 @@ class TokenType(Enum):
     COMMA = auto()       # ,
     PERIOD = auto()      # .
     QUOTE = auto()       # ' (quote operator)
+    SEMICOLON = auto()   # ; (when used as separator, not comment)
 
     # End of file
     EOF = auto()
@@ -68,6 +69,7 @@ class Lexer:
         self.line = 1
         self.column = 1
         self.tokens: List[Token] = []
+        self.paren_depth = 0  # Track parenthesis depth for context-aware semicolon handling
 
     def error(self, message: str):
         """Raise a lexer error with location information."""
@@ -102,7 +104,7 @@ class Lexer:
             self.advance()
 
     def skip_comment(self):
-        """Skip ZIL comments: ;\"comment\" or ; comment to end of line"""
+        """Skip ZIL comments: ;\"comment\", ;< form>, ;(...), or ; line comment"""
         if self.peek() != ';':
             return
 
@@ -128,10 +130,64 @@ class Lexer:
                 self.advance()
             else:
                 self.error("Unterminated comment")
+        elif self.peek(pos) == '<':
+            # Form comment: ;< form > - skip entire form including nested brackets
+            self.advance()  # ;
+            # Skip whitespace
+            while self.peek() and self.peek() in ' \t':
+                self.advance()
+            # Now skip the form
+            self.skip_angle_form_comment()
+        elif self.peek(pos) == '(':
+            # Form comment: ;(...) - skip entire form including nested parens
+            self.advance()  # ;
+            # Skip whitespace
+            while self.peek() and self.peek() in ' \t':
+                self.advance()
+            # Now skip the form
+            self.skip_paren_form_comment()
         else:
             # Line comment: ; comment to end of line
             while self.peek() and self.peek() != '\n':
                 self.advance()
+
+    def skip_angle_form_comment(self):
+        """Skip an angle-bracket form comment: < ... > with nested angle brackets"""
+        if self.peek() != '<':
+            return
+
+        self.advance()  # <
+        depth = 1
+
+        while depth > 0 and self.peek():
+            ch = self.peek()
+            if ch == '<':
+                depth += 1
+            elif ch == '>':
+                depth -= 1
+            self.advance()
+
+        if depth != 0:
+            self.error("Unterminated form comment")
+
+    def skip_paren_form_comment(self):
+        """Skip a parenthesis form comment: (...) with nested parentheses"""
+        if self.peek() != '(':
+            return
+
+        self.advance()  # (
+        depth = 1
+
+        while depth > 0 and self.peek():
+            ch = self.peek()
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            self.advance()
+
+        if depth != 0:
+            self.error("Unterminated form comment")
 
     def read_string(self) -> str:
         """Read a string literal."""
@@ -218,7 +274,7 @@ class Lexer:
     def is_atom_char(self, ch: str) -> bool:
         """Check if character is valid in an atom."""
         return (ch.isalnum() or
-                ch in '-_?+*/=$#')
+                ch in '-_?+*/=$#;.')
 
     def tokenize(self) -> List[Token]:
         """Tokenize the entire source code."""
@@ -229,21 +285,52 @@ class Lexer:
                 break
 
             # Check for comment (both ;" and ; styles)
+            # Special case: ;= is an atom (used in BUZZ words)
+            # Special case: ; inside parentheses followed by non-comment char is a separator (ZILF SYNONYM/ADJECTIVE)
+            # But ;" ;< ;( are always comments
             if self.peek() == ';':
-                self.skip_comment()
-                continue
+                next_ch = self.peek(1)
+                # Only treat as atom if followed by = (for ;=)
+                if next_ch == '=':
+                    # Fall through to atom handling below
+                    pass
+                # Check if this could be a ZILF separator:
+                # Inside parentheses AND not followed by comment indicators (" < ()
+                # Skip whitespace to check what comes after
+                elif self.paren_depth > 0:
+                    pos = 1
+                    while self.peek(pos) and self.peek(pos) in ' \t':
+                        pos += 1
+                    peek_after = self.peek(pos)
+                    # If followed by comment indicators, treat as comment
+                    if peek_after in ('"', '<', '(', None, '\n'):
+                        self.skip_comment()
+                        continue
+                    # Otherwise, it's a ZILF separator
+                    else:
+                        line = self.line
+                        col = self.column
+                        self.advance()  # Skip the semicolon
+                        self.tokens.append(Token(TokenType.SEMICOLON, ';', line, col))
+                        continue
+                # Otherwise it's a comment
+                else:
+                    self.skip_comment()
+                    continue
 
             ch = self.peek()
             line = self.line
             col = self.column
 
-            # Conditional compilation: %<...> - skip the %
-            if ch == '%' and self.peek(1) == '<':
-                self.advance()  # Skip %
-                # Fall through to handle <
-                ch = self.peek()
-                line = self.line
-                col = self.column
+            # Compile-time evaluation: %<...>, %,VAR, %.VAR - skip the %
+            if ch == '%':
+                next_ch = self.peek(1)
+                if next_ch in ('<', ',', '.'):
+                    self.advance()  # Skip %
+                    # Fall through to handle the next character
+                    ch = self.peek()
+                    line = self.line
+                    col = self.column
 
             # Delimiters
             if ch == '<':
@@ -254,9 +341,11 @@ class Lexer:
                 self.tokens.append(Token(TokenType.RANGLE, '>', line, col))
             elif ch == '(':
                 self.advance()
+                self.paren_depth += 1
                 self.tokens.append(Token(TokenType.LPAREN, '(', line, col))
             elif ch == ')':
                 self.advance()
+                self.paren_depth -= 1
                 self.tokens.append(Token(TokenType.RPAREN, ')', line, col))
             elif ch == '[':
                 self.advance()
@@ -270,20 +359,69 @@ class Lexer:
                 value = self.read_string()
                 self.tokens.append(Token(TokenType.STRING, value, line, col))
 
-            # Local variable reference
-            elif ch == '.' and self.peek(1) and self.peek(1).isalpha():
-                self.advance()  # .
-                name = self.read_atom()
-                self.tokens.append(Token(TokenType.LOCAL_VAR, name, line, col))
+            # Local variable reference (allow whitespace after period)
+            elif ch == '.':
+                # Look ahead to see if this is a local var or just a period
+                pos = 1
+                while self.peek(pos) and self.peek(pos) in ' \t':
+                    pos += 1
+                # If followed by alphanumeric (after optional whitespace), it's a local var
+                # Allow digits too, for vars like .1ST?
+                # Allow ? for vars like .?RESULT
+                next_ch = self.peek(pos)
+                if next_ch and (next_ch.isalnum() or next_ch in '-_?'):
+                    self.advance()  # .
+                    # Skip whitespace
+                    while self.peek() and self.peek() in ' \t':
+                        self.advance()
+                    name = self.read_atom()
+                    self.tokens.append(Token(TokenType.LOCAL_VAR, name, line, col))
+                else:
+                    # Just a period token
+                    self.advance()
+                    self.tokens.append(Token(TokenType.PERIOD, '.', line, col))
 
-            # Global variable reference
-            elif ch == ',' and self.peek(1) and self.peek(1).isalpha():
-                self.advance()  # ,
-                name = self.read_atom()
-                self.tokens.append(Token(TokenType.GLOBAL_VAR, name, line, col))
+            # Global variable reference (allow whitespace after comma)
+            elif ch == ',':
+                # Look ahead to see if this is a global var or just a comma
+                pos = 1
+                while self.peek(pos) and self.peek(pos) in ' \t':
+                    pos += 1
+                # If followed by alphanumeric (after optional whitespace), it's a global var
+                # Allow digits too for consistency
+                # Allow ? for vars like ,?RESULT
+                next_ch = self.peek(pos)
+                if next_ch and (next_ch.isalnum() or next_ch in '-_?'):
+                    self.advance()  # ,
+                    # Skip whitespace
+                    while self.peek() and self.peek() in ' \t':
+                        self.advance()
+                    name = self.read_atom()
+                    self.tokens.append(Token(TokenType.GLOBAL_VAR, name, line, col))
+                else:
+                    # Just a comma token
+                    self.advance()
+                    self.tokens.append(Token(TokenType.COMMA, ',', line, col))
 
-            # Number
-            elif ch.isdigit() or (ch == '-' and self.peek(1) and self.peek(1).isdigit()):
+            # Number (but not if it's part of an atom like 1ST?)
+            elif ch.isdigit():
+                # Look ahead to see if this is a pure number or starts an atom
+                # Atoms can start with digits: 1ST?, 2ND, etc.
+                pos = 1
+                while self.peek(pos) and (self.peek(pos).isdigit() or self.peek(pos) in 'ABCDEFabcdef'):
+                    pos += 1
+                # If followed by atom characters after the digits, it's an atom
+                next_ch = self.peek(pos)
+                if next_ch and self.is_atom_char(next_ch) and not next_ch.isdigit():
+                    # It's an atom like 1ST?
+                    value = self.read_atom()
+                    self.tokens.append(Token(TokenType.ATOM, value, line, col))
+                else:
+                    # It's a number
+                    value = self.read_number()
+                    self.tokens.append(Token(TokenType.NUMBER, value, line, col))
+            # Negative number
+            elif ch == '-' and self.peek(1) and self.peek(1).isdigit():
                 value = self.read_number()
                 self.tokens.append(Token(TokenType.NUMBER, value, line, col))
 
@@ -292,14 +430,16 @@ class Lexer:
                 value = self.read_number()
                 self.tokens.append(Token(TokenType.NUMBER, value, line, col))
 
-            # Special case: ! escapes for STRING form (!\", !\\, !=, etc.)
+            # Special case: ! escapes for STRING form (!\", !\\, !=, !\`, etc.)
             elif ch == '!':
                 chars = [self.advance()]  # Read !
-                # Check for common escape patterns: !\" !\\ !\=
-                if self.peek() == '\\' and self.peek(1) in '"=':
-                    # Read backslash and next char (for !\" and !\=)
+                # Check for escape patterns: !\X where X is any char
+                if self.peek() == '\\':
+                    # Read backslash
                     chars.append(self.advance())
-                    chars.append(self.advance())
+                    # Read the escaped character (could be anything)
+                    if self.peek():
+                        chars.append(self.advance())
                 elif self.peek() == ',':
                     # !,VAR pattern - just the ! (VAR will be read separately)
                     pass
@@ -311,23 +451,18 @@ class Lexer:
 
             # Backslash (character constant or escape)
             elif ch == '\\':
-                self.advance()
-                self.tokens.append(Token(TokenType.ATOM, '\\', line, col))
-
-            # Atom/Identifier
-            elif ch.isalpha() or ch in '-_?+*/<>=$#':
-                value = self.read_atom()
+                chars = [self.advance()]  # Read \
+                # If followed by another character, include it as part of the atom
+                # This handles \. \, \" \\ etc. as complete atoms
+                if self.peek() and self.peek() not in ' \t\n\r\f':
+                    chars.append(self.advance())
+                value = ''.join(chars)
                 self.tokens.append(Token(TokenType.ATOM, value, line, col))
 
-            # Period (when not followed by alpha)
-            elif ch == '.':
-                self.advance()
-                self.tokens.append(Token(TokenType.PERIOD, '.', line, col))
-
-            # Comma (when not followed by alpha)
-            elif ch == ',':
-                self.advance()
-                self.tokens.append(Token(TokenType.COMMA, ',', line, col))
+            # Atom/Identifier
+            elif ch.isalpha() or ch in '-_?+*/<>=$#;':
+                value = self.read_atom()
+                self.tokens.append(Token(TokenType.ATOM, value, line, col))
 
             # Quote operator
             elif ch == "'":

@@ -28,6 +28,8 @@ class NodeType(Enum):
     GLOBAL = auto()        # <GLOBAL ...>
     CONSTANT = auto()      # <CONSTANT ...>
     PROPDEF = auto()       # <PROPDEF name default>
+    BUZZ = auto()          # <BUZZ word1 word2 ...>
+    SYNONYM = auto()       # <SYNONYM word1 word2 ...> (standalone)
 
     # Table/Array
     TABLE = auto()         # <TABLE ...>
@@ -271,6 +273,26 @@ class MacroNode(ASTNode):
         return f"Macro({self.name}, {len(self.params)} params)"
 
 
+class BuzzNode(ASTNode):
+    """BUZZ noise word declaration."""
+    def __init__(self, words: List[str], line: int = 0, column: int = 0):
+        super().__init__(NodeType.BUZZ, line, column)
+        self.words = words  # List of noise words
+
+    def __repr__(self):
+        return f"Buzz({len(self.words)} words)"
+
+
+class SynonymNode(ASTNode):
+    """Standalone SYNONYM declaration (not in an object)."""
+    def __init__(self, words: List[str], line: int = 0, column: int = 0):
+        super().__init__(NodeType.SYNONYM, line, column)
+        self.words = words  # List of synonym words
+
+    def __repr__(self):
+        return f"Synonym({len(self.words)} words)"
+
+
 @dataclass
 class Program:
     """Top-level program node containing all definitions."""
@@ -284,6 +306,8 @@ class Program:
     syntax: List[SyntaxNode] = field(default_factory=list)
     tables: List[TableNode] = field(default_factory=list)
     macros: List[MacroNode] = field(default_factory=list)
+    buzz_words: List[str] = field(default_factory=list)
+    synonym_words: List[str] = field(default_factory=list)
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "

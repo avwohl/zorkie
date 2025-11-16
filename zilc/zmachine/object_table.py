@@ -31,7 +31,11 @@ class ObjectTable:
         })
 
     def build(self) -> bytes:
-        """Build object table bytes with property tables."""
+        """Build object table bytes with property tables.
+
+        Note: Property table addresses are initially relative to start of this data.
+        The assembler will fix them up to absolute addresses when placing in story file.
+        """
         result = bytearray()
 
         # Property defaults table (31 words for V1-3, 63 for V4+)
@@ -58,6 +62,7 @@ class ObjectTable:
 
         # Now build object entries with correct property table addresses
         # Property tables start after all object entries
+        # Addresses are relative to start of object table data (will be fixed up by assembler)
         prop_table_base_addr = object_table_start + object_entries_size
 
         object_entries = bytearray()
@@ -111,11 +116,20 @@ class ObjectTable:
         """
         prop_table = bytearray()
 
-        # Encode object name
-        obj_name = obj.get('name', '')
+        # Encode object description (from DESC property #1)
+        # The property table header contains the short description shown in listings
+        properties = obj.get('properties', {})
+        obj_desc = properties.get(1, '')  # Property #1 is DESC
+
+        # If DESC is not a string (e.g., it's an AST node), try to extract value
+        if hasattr(obj_desc, 'value'):
+            obj_desc = obj_desc.value
+        if not isinstance(obj_desc, str):
+            obj_desc = ''
+
         if self.text_encoder:
-            # Encode the name
-            encoded_words = self.text_encoder.encode_string(obj_name)
+            # Encode the description
+            encoded_words = self.text_encoder.encode_string(obj_desc)
             # Text length is number of words
             prop_table.append(len(encoded_words))
             # Add encoded text

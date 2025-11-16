@@ -79,12 +79,20 @@ class Dictionary:
         entry_length = 4 if self.version <= 3 else 6
         result.append(entry_length)
 
-        # Number of entries
-        word_list = sorted(self.words)
-        result.extend(struct.pack('>H', len(word_list)))
+        # Deduplicate by encoded form (not just string form)
+        # In V3, "bench" and "bench-pseudo" encode to same 6 z-characters
+        seen_encoded = {}
+        unique_words = []
+        for word in sorted(self.words):
+            encoded = tuple(self.encoder.encode_dictionary_word(word))
+            if encoded not in seen_encoded:
+                seen_encoded[encoded] = word
+                unique_words.append(word)
+
+        result.extend(struct.pack('>H', len(unique_words)))
 
         # Encode and add words
-        for word in word_list:
+        for word in unique_words:
             encoded = self.encoder.encode_dictionary_word(word)
             for w in encoded:
                 result.extend(struct.pack('>H', w))

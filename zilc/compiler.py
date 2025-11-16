@@ -21,6 +21,7 @@ class ZILCompiler:
     def __init__(self, version: int = 3, verbose: bool = False):
         self.version = version
         self.verbose = verbose
+        self.compilation_flags = {}  # ZILF compilation flags
 
     def log(self, message: str):
         """Print log message if verbose mode is enabled."""
@@ -116,8 +117,8 @@ class ZILCompiler:
         """
         import re
 
-        # Pattern to match <IFILE "filename"> or <IFILE 'filename'>
-        ifile_pattern = r'<\s*IFILE\s+"([^"]+)"\s*>'
+        # Pattern to match <IFILE "filename"> or <INSERT-FILE "filename">
+        ifile_pattern = r'<\s*(?:IFILE|INSERT-FILE)\s+"([^"]+)"\s*>'
 
         def replace_ifile(match):
             filename = match.group(1)
@@ -139,6 +140,224 @@ class ZILCompiler:
 
         return re.sub(ifile_pattern, replace_ifile, source, flags=re.IGNORECASE)
 
+    def preprocess_zilf_directives(self, source: str) -> str:
+        """
+        Preprocess ZILF-specific directives:
+        - COMPILATION-FLAG: Set compile-time flags
+        - IFFLAG: Conditional compilation based on flags
+        - VERSION?: Conditional compilation based on Z-machine version
+
+        Args:
+            source: Source code with potential ZILF directives
+
+        Returns:
+            Source code with directives evaluated and conditionals resolved
+        """
+        import re
+
+        # First pass: Extract COMPILATION-FLAG directives
+        # <COMPILATION-FLAG FLAGNAME <T>> or <COMPILATION-FLAG FLAGNAME <>>
+        flag_pattern = r'<\s*COMPILATION-FLAG\s+(\w+)\s+<([^>]*)>\s*>'
+
+        def extract_flag(match):
+            flag_name = match.group(1)
+            flag_value = match.group(2).strip()
+            # <T> or <TRUE> means true, <> or <FALSE> means false
+            self.compilation_flags[flag_name] = flag_value.upper() in ('T', 'TRUE')
+            self.log(f"  Flag: {flag_name} = {self.compilation_flags[flag_name]}")
+            return ''  # Remove the directive from source
+
+        source = re.sub(flag_pattern, extract_flag, source, flags=re.IGNORECASE)
+
+        # Second pass: Evaluate IFFLAG conditionals
+        # Process manually to handle nested brackets properly
+        source = self._process_ifflag(source)
+
+        # Third pass: Evaluate VERSION? conditionals
+        # Process manually to handle nested brackets properly
+        source = self._process_version(source)
+
+        return source
+
+    def _process_ifflag(self, source: str) -> str:
+        """Process IFFLAG directives with proper bracket balancing."""
+        import re
+        result = []
+        pos = 0
+
+        while pos < len(source):
+            # Look for <IFFLAG
+            match = re.search(r'<\s*IFFLAG\s+', source[pos:], re.IGNORECASE)
+            if not match:
+                result.append(source[pos:])
+                break
+
+            # Add text before match
+            result.append(source[pos:pos + match.start()])
+
+            # Find the matching > for this <IFFLAG
+            start = pos + match.start()  # Start of <IFFLAG
+            content, end = self._extract_balanced_content(source, start)
+
+            if content:
+                # Extract just the part after <IFFLAG and before >
+                # content is like: <IFFLAG (BETA "...") (ELSE "...")>
+                # Find where IFFLAG ends within content
+                ifflag_match = re.match(r'<\s*IFFLAG\s+', content, re.IGNORECASE)
+                if ifflag_match:
+                    ifflag_content = content[ifflag_match.end():-1].strip()
+                else:
+                    ifflag_content = content[1:-1].strip()  # Fallback
+
+                # Parse and evaluate
+                parts = self._parse_conditional_parts(ifflag_content)
+                if parts and 'condition' in parts:
+                    flag_name = parts['condition']
+                    if flag_name in self.compilation_flags and self.compilation_flags[flag_name]:
+                        result.append(parts.get('true_expr', ''))
+                    else:
+                        result.append(parts.get('false_expr', ''))
+                else:
+                    # Can't parse, keep original
+                    result.append(content)
+
+                pos = end
+            else:
+                # Can't find matching bracket, skip
+                result.append(match.group(0))
+                pos += match.end()
+
+        return ''.join(result)
+
+    def _process_version(self, source: str) -> str:
+        """Process VERSION? directives with proper bracket balancing."""
+        import re
+        result = []
+        pos = 0
+
+        while pos < len(source):
+            # Look for %<VERSION? or <VERSION? (% is optional)
+            match = re.search(r'%?<\s*VERSION\?\s+', source[pos:], re.IGNORECASE)
+            if not match:
+                result.append(source[pos:])
+                break
+
+            # Add text before match
+            result.append(source[pos:pos + match.start()])
+
+            # Find the matching > for this VERSION?
+            # Check if % prefix was present
+            has_percent = source[pos + match.start()] == '%'
+            start = pos + match.start() + (1 if has_percent else 0)  # +1 to skip % if present
+            content, end = self._extract_balanced_content(source, start)
+
+            if content:
+                # Extract just the part after <VERSION?
+                version_content = content[len('<VERSION?'):-1].strip()  # Remove <VERSION? prefix and >
+
+                # Parse and evaluate
+                parts = self._parse_conditional_parts(version_content)
+                if parts and 'condition' in parts:
+                    target_version = parts['condition']
+                    version_matches = False
+                    if target_version == 'ZIP':
+                        version_matches = (self.version == 3)
+                    elif target_version == 'EZIP':
+                        version_matches = (self.version == 4)
+                    elif target_version == 'XZIP':
+                        version_matches = (self.version == 5)
+
+                    if version_matches:
+                        result.append(parts.get('true_expr', ''))
+                    else:
+                        result.append(parts.get('false_expr', ''))
+                else:
+                    # Can't parse, keep original
+                    result.append(('%' if has_percent else '') + content)
+
+                pos = end
+            else:
+                # Can't find matching bracket, skip
+                result.append(match.group(0))
+                pos += match.end()
+
+        return ''.join(result)
+
+    def _extract_balanced_content(self, source: str, start_pos: int) -> tuple:
+        """
+        Extract content with balanced angle brackets.
+        Returns (content, end_position) or (None, start_pos) if not balanced.
+        """
+        if start_pos >= len(source) or source[start_pos] != '<':
+            return None, start_pos
+
+        depth = 1
+        pos = start_pos + 1
+
+        while pos < len(source) and depth > 0:
+            if source[pos] == '<':
+                depth += 1
+            elif source[pos] == '>':
+                depth -= 1
+            pos += 1
+
+        if depth == 0:
+            return source[start_pos:pos], pos
+        else:
+            return None, start_pos
+
+    def _parse_conditional_parts(self, content: str) -> dict:
+        """
+        Parse conditional content: (CONDITION expr) (ELSE expr)
+        Returns dict with 'condition', 'true_expr', 'false_expr'
+        """
+        content = content.strip()
+
+        # Find first balanced parenthesis group
+        if not content.startswith('('):
+            return {}
+
+        # Extract first group (CONDITION expr)
+        depth = 0
+        pos = 0
+        for i, ch in enumerate(content):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    pos = i + 1
+                    break
+
+        if depth != 0:
+            return {}
+
+        first_group = content[1:pos-1].strip()  # Remove outer parens
+
+        # Split on first whitespace to get condition name
+        parts = first_group.split(None, 1)
+        if not parts:
+            return {}
+
+        condition = parts[0]
+        true_expr = parts[1] if len(parts) > 1 else ''
+
+        # Look for (ELSE ...) group
+        false_expr = ''
+        remaining = content[pos:].strip()
+        if remaining.startswith('('):
+            # Check if it's an ELSE clause
+            import re
+            else_match = re.match(r'\(\s*ELSE\s+(.*)\)\s*$', remaining, re.IGNORECASE | re.DOTALL)
+            if else_match:
+                false_expr = else_match.group(1).strip()
+
+        return {
+            'condition': condition,
+            'true_expr': true_expr,
+            'false_expr': false_expr
+        }
+
     def compile_string(self, source: str, filename: str = "<input>") -> bytes:
         """
         Compile ZIL source code to Z-machine bytecode.
@@ -154,6 +373,10 @@ class ZILCompiler:
         base_path = Path(filename).parent if filename != "<input>" else Path.cwd()
         self.log("Preprocessing IFILE directives...")
         source = self.preprocess_ifiles(source, base_path)
+
+        # Preprocess ZILF directives (COMPILATION-FLAG, IFFLAG, VERSION?)
+        self.log("Preprocessing ZILF directives...")
+        source = self.preprocess_zilf_directives(source)
 
         # Lexical analysis
         self.log("Lexing...")
@@ -294,19 +517,23 @@ class ZILCompiler:
         self.log("Building dictionary...")
         dictionary = Dictionary(self.version)
 
-        # Add standard verb vocabulary
-        standard_verbs = [
-            'take', 'drop', 'put', 'examine', 'look', 'inventory',
-            'quit', 'open', 'close', 'read', 'eat', 'drink',
-            'attack', 'kill', 'wait', 'push', 'pull', 'turn',
-            'move', 'climb', 'board', 'pour', 'taste', 'rub',
-            'get', 'pick', 'throw', 'give', 'show', 'tell',
-            'ask', 'go', 'walk', 'run', 'n', 'north', 's', 'south',
-            'e', 'east', 'w', 'west', 'ne', 'nw', 'se', 'sw',
-            'up', 'down', 'in', 'out', 'enter', 'exit',
-            'on', 'off', 'light', 'extinguish', 'unlock', 'lock'
-        ]
-        dictionary.add_words(standard_verbs, 'verb')
+        # Add BUZZ words (noise words that parser recognizes but ignores)
+        if program.buzz_words:
+            self.log(f"  Adding {len(program.buzz_words)} BUZZ words")
+            dictionary.add_words(program.buzz_words, 'buzz')
+
+        # Add standalone SYNONYM words (directions, verb synonyms, etc.)
+        if program.synonym_words:
+            self.log(f"  Adding {len(program.synonym_words)} SYNONYM words")
+            dictionary.add_words(program.synonym_words, 'synonym')
+
+        # Don't add hardcoded standard verbs - only add words from source
+        # The official compiler only includes words that appear in:
+        #   - SYNTAX declarations
+        #   - BUZZ words
+        #   - Standalone SYNONYM declarations
+        #   - Object/Room SYNONYM and ADJECTIVE properties
+        #   - PSEUDO properties
 
         # Extract SYNONYM and ADJECTIVE from objects
         obj_num = 1
@@ -336,6 +563,17 @@ class ZILCompiler:
                 elif hasattr(adjectives, 'value'):
                     dictionary.add_adjective(adjectives.value, obj_num)
 
+            # DISABLED: Don't add PSEUDO words to dictionary
+            # PSEUDO strings are handled internally by the game, not via dictionary lookup
+            # if 'PSEUDO' in obj.properties:
+            #     pseudo = obj.properties['PSEUDO']
+            #     if hasattr(pseudo, '__iter__') and not isinstance(pseudo, str):
+            #         # PSEUDO is list of string/routine pairs: "WORD" HANDLER "WORD2" HANDLER2
+            #         for i, item in enumerate(pseudo):
+            #             # Only take strings (odd indices are routines)
+            #             if hasattr(item, 'value') and isinstance(item.value, str):
+            #                 dictionary.add_word(item.value.lower(), 'pseudo')
+
             obj_num += 1
 
         # Extract from rooms too
@@ -351,19 +589,36 @@ class ZILCompiler:
                 elif hasattr(synonyms, 'value'):
                     dictionary.add_synonym(synonyms.value, obj_num)
 
+            # DISABLED: Don't add PSEUDO words from rooms
+            # if 'PSEUDO' in room.properties:
+            #     pseudo = room.properties['PSEUDO']
+            #     if hasattr(pseudo, '__iter__') and not isinstance(pseudo, str):
+            #         for i, item in enumerate(pseudo):
+            #             if hasattr(item, 'value') and isinstance(item.value, str):
+            #                 dictionary.add_word(item.value.lower(), 'pseudo')
+
             obj_num += 1
 
-        # Extract verbs from SYNTAX definitions
-        syntax_verbs = set()
+        # Extract verbs and prepositions from SYNTAX definitions
+        syntax_words = set()
         for syntax_def in program.syntax:
-            # First word in pattern is the verb
-            if syntax_def.pattern and len(syntax_def.pattern) > 0:
-                verb = syntax_def.pattern[0].lower()
-                syntax_verbs.add(verb)
-                dictionary.add_word(verb, 'verb')
+            if syntax_def.pattern:
+                for word in syntax_def.pattern:
+                    # Skip OBJECT and other placeholders
+                    if word.upper() not in ('OBJECT', 'FIND', 'HAVE', 'HELD',
+                                             'ON-GROUND', 'IN-ROOM', 'TAKE',
+                                             'MANY', 'SEARCH'):
+                        # Skip special markers like flags in parens
+                        if not (isinstance(word, str) and
+                                (word.startswith('(') or word.endswith('BIT'))):
+                            word_lower = word.lower() if isinstance(word, str) else str(word).lower()
+                            syntax_words.add(word_lower)
+                            # First word is verb, others are prepositions
+                            word_type = 'verb' if syntax_def.pattern.index(word) == 0 else 'prep'
+                            dictionary.add_word(word_lower, word_type)
 
-        if syntax_verbs:
-            self.log(f"  Added {len(syntax_verbs)} verbs from SYNTAX definitions")
+        if syntax_words:
+            self.log(f"  Added {len(syntax_words)} words from SYNTAX definitions")
 
         self.log(f"  Dictionary contains {len(dictionary.words)} words")
         dict_data = dictionary.build()

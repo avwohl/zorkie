@@ -9,9 +9,12 @@ from typing import List, Tuple
 
 
 # Default alphabet tables for versions 1-4
-ALPHABET_A0 = " abcdefghijklmnopqrstuvwxyz"
-ALPHABET_A1 = " ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-ALPHABET_A2 = " \n0123456789.,!?_#'\"/\\-:()"
+# Z-chars 0-5 are special (0=space, 1-3=abbrevs, 4-5=shifts)
+# Z-chars 6-31 map to alphabet characters
+# Padding with null chars for indices 1-5
+ALPHABET_A0 = " \x00\x00\x00\x00\x00abcdefghijklmnopqrstuvwxyz"
+ALPHABET_A1 = " \x00\x00\x00\x00\x00ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+ALPHABET_A2 = " \x00\x00\x00\x00\x00\n0123456789.,!?_#'\"/\\-:()"
 
 
 class ZTextEncoder:
@@ -38,27 +41,32 @@ class ZTextEncoder:
             return ([self.alphabet_a2.index(ch)], 2)
 
         # Try other alphabets with shift
+        # V3+ shift codes: z-char 4 = shift to A1, z-char 5 = shift to A2
+        # Characters in A0 don't need shift from A0 (already handled above)
         if ch in self.alphabet_a0:
             if self.version <= 2:
                 # Permanent shift
                 return ([4], 0)  # Shift to A0
             else:
-                # Temporary shift (V3+)
-                return ([4, self.alphabet_a0.index(ch)], current_alphabet)
+                # If we're not in A0 but char is in A0, we need to shift back
+                # But there's no "shift to A0" in V3+ - it's automatic after any char
+                # This shouldn't happen if we're tracking alphabet correctly
+                return ([self.alphabet_a0.index(ch)], 0)
 
         if ch in self.alphabet_a1:
             if self.version <= 2:
                 return ([5], 1)  # Shift to A1
             else:
-                return ([5, self.alphabet_a1.index(ch)], current_alphabet)
+                # V3+: z-char 4 is temporary shift to A1
+                return ([4, self.alphabet_a1.index(ch)], current_alphabet)
 
         if ch in self.alphabet_a2:
             if self.version <= 2:
                 return ([4, 5], 2)  # Double shift to A2
             else:
-                # For V3+, use alphabet 2 shift
+                # For V3+, z-char 5 is temporary shift to A2
                 idx = self.alphabet_a2.index(ch)
-                return ([4, 4 if current_alphabet == 0 else 5, idx], current_alphabet)
+                return ([5, idx], current_alphabet)
 
         # Character not in alphabets - use ZSCII escape
         zscii_code = ord(ch)
@@ -176,6 +184,7 @@ def decode_string(words: List[int], version: int = 3) -> str:
     result = []
     current_alphabet = 0
     i = 0
+    shift_lock = False  # For V1-2 permanent shifts
 
     while i < len(zchars):
         zc = zchars[i]
@@ -184,38 +193,53 @@ def decode_string(words: List[int], version: int = 3) -> str:
             result.append(' ')
             i += 1
         elif zc == 4:
-            # Shift to next alphabet (or A0)
+            # V3+: temporary shift to A1 for next char only
+            # V1-2: permanent shift to A0
             if version <= 2:
                 current_alphabet = 0
+                shift_lock = True
+                i += 1
             else:
-                # Temporary shift - will be handled by next character
-                pass
-            i += 1
+                # Next character uses A1
+                i += 1
+                if i < len(zchars):
+                    next_zc = zchars[i]
+                    if next_zc < len(encoder.alphabet_a1):
+                        result.append(encoder.alphabet_a1[next_zc])
+                    i += 1
         elif zc == 5:
-            # Shift to alphabet 1 (permanent in V1-2, temp in V3+)
+            # V3+: temporary shift to A2 for next char only
+            # V1-2: permanent shift to A1
             if version <= 2:
                 current_alphabet = 1
-            i += 1
-        elif zc == 6 and current_alphabet == 2:
-            # ZSCII escape
-            if i + 2 < len(zchars):
-                high = zchars[i+1]
-                low = zchars[i+2]
-                zscii = (high << 5) | low
-                if 32 <= zscii < 127:
-                    result.append(chr(zscii))
-                i += 3
-            else:
+                shift_lock = True
                 i += 1
+            else:
+                # Next character uses A2
+                i += 1
+                if i < len(zchars):
+                    next_zc = zchars[i]
+                    if next_zc == 6:
+                        # ZSCII escape in A2
+                        if i + 2 < len(zchars):
+                            high = zchars[i+1]
+                            low = zchars[i+2]
+                            zscii = (high << 5) | low
+                            if 32 <= zscii < 127:
+                                result.append(chr(zscii))
+                            i += 3
+                        else:
+                            i += 1
+                    elif next_zc < len(encoder.alphabet_a2):
+                        result.append(encoder.alphabet_a2[next_zc])
+                        i += 1
+                    else:
+                        i += 1
         else:
-            # Regular character lookup
+            # Regular character lookup in current alphabet
             alphabet = [encoder.alphabet_a0, encoder.alphabet_a1, encoder.alphabet_a2][current_alphabet]
             if zc < len(alphabet):
                 result.append(alphabet[zc])
             i += 1
-
-            # Reset to A0 for V3+ after temporary shift
-            if version >= 3:
-                current_alphabet = 0
 
     return ''.join(result).rstrip('\x05 ')  # Remove padding
