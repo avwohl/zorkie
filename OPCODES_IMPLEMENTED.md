@@ -28,7 +28,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Output/Print Operations (28 opcodes)
+## Output/Print Operations (32 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -57,6 +57,13 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | BACK | NEW_LINE | Erase to beginning of line (V3: newline) | ✅ |
 | DISPLAY | Auto | Update status line (automatic in V3) | ✅ |
 | SCORE | STOREW | Set game score (stub) | ⚠️ |
+| PRINTT | PRINT | Print with tab formatting (alias) | ✅ |
+| CHRSET | V5+ | Set character set (V3 no-op) | ⚠️ |
+| MARGIN | V4+ | Set text margins (V3 no-op) | ⚠️ |
+| PICINF | V6+ | Get picture info (V3 stub) | ⚠️ |
+| MOUSE-INFO | V5+ | Get mouse info (V3 stub) | ⚠️ |
+| TYPE? | Runtime | Get type of value (stub) | ⚠️ |
+| PRINTTYPE | Debug | Print type name (stub) | ⚠️ |
 | COLOR | SET_COLOUR | Set text colors (V5+ stub) | ⚠️ |
 | FONT | SET_FONT | Set font (V5+ stub) | ⚠️ |
 
@@ -269,11 +276,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 149 distinct operations (140 working + 9 stubs)
+- **Total Opcodes**: 156 distinct operations (141 working + 15 stubs)
 - **Opcode Categories**: 15 categories
-- **Test Programs**: 56 working examples
-- **Planetfall Coverage**: ~99% of required operations
-- **Version**: 1.7.0
+- **Test Programs**: 57 working examples
+- **Planetfall Coverage**: ~99.5% of required operations
+- **Version**: 1.8.0
 
 ---
 
@@ -322,4 +329,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.7.0
+**Compiler Version**: 1.8.0

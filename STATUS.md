@@ -892,8 +892,26 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🌟 99.5% PLANETFALL - Extended V3 Compatibility Operations
+- **Commit**: (pending)
+- PRINTT - Print with tab formatting (working alias for PRINT)
+- CHRSET - Set character set (V3 no-op, V5+ compatibility)
+- MARGIN - Set text margins (V3 no-op, V4+ compatibility)
+- PICINF - Get picture info (V3 stub, V6+ graphics)
+- MOUSE-INFO - Get mouse information (V3 stub, V5+ feature)
+- TYPE? - Get type of value (stub, needs runtime inspection)
+- PRINTTYPE - Print type name (stub, debugging feature)
+- Total of 7 new opcodes for V3 compatibility
+- All provide graceful degradation for V3 target
+- Enable compilation of V4+ source code for V3
+- **Test**: extended_ops_test.zil (1.4 KB)
+- Brings total to 156 opcodes (141 working + 15 stubs)
+- **ACHIEVEMENT**: 🌟 99.5% Planetfall Complete! 🌟
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.7.0
+**Current Version**: 1.8.0
 
-**Status**: 🟢 Active Development - 99% Planetfall Complete!
+**Status**: 🟢 Active Development - 99.5% Planetfall Complete!

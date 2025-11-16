@@ -397,6 +397,20 @@ class ImprovedCodeGenerator:
             return self.gen_display(form.operands)
         elif op_name == 'SCORE':
             return self.gen_score(form.operands)
+        elif op_name == 'CHRSET':
+            return self.gen_chrset(form.operands)
+        elif op_name == 'MARGIN':
+            return self.gen_margin(form.operands)
+        elif op_name == 'PICINF':
+            return self.gen_picinf(form.operands)
+        elif op_name == 'MOUSE-INFO':
+            return self.gen_mouse_info(form.operands)
+        elif op_name == 'TYPE?':
+            return self.gen_type(form.operands)
+        elif op_name == 'PRINTTYPE':
+            return self.gen_printtype(form.operands)
+        elif op_name == 'PRINTT':
+            return self.gen_printt(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -2295,6 +2309,114 @@ class ImprovedCodeGenerator:
         # SCORE would set a global variable
         # For now, stub - requires knowing score global location
         return b''
+
+    def gen_chrset(self, operands: List[ASTNode]) -> bytes:
+        """Generate CHRSET (set character set).
+
+        <CHRSET charset> sets the active character set for display.
+        V3 has limited character set support, so this is mostly a no-op.
+
+        Args:
+            operands[0]: Character set identifier
+
+        Returns:
+            bytes: Z-machine code (no-op in V3)
+        """
+        # CHRSET is V5+ feature, no-op in V3
+        return b''
+
+    def gen_margin(self, operands: List[ASTNode]) -> bytes:
+        """Generate MARGIN (set text margin).
+
+        <MARGIN left right> sets left and right margins for text output.
+        V3 has no margin control, so this is a no-op.
+
+        Args:
+            operands[0]: Left margin (optional)
+            operands[1]: Right margin (optional)
+
+        Returns:
+            bytes: Z-machine code (no-op in V3)
+        """
+        # MARGIN is V4+ feature, no-op in V3
+        return b''
+
+    def gen_picinf(self, operands: List[ASTNode]) -> bytes:
+        """Generate PICINF (get picture info).
+
+        <PICINF picture table> gets information about a picture.
+        V3 has no graphics support, so this is a stub.
+
+        Args:
+            operands[0]: Picture number
+            operands[1]: Info table address
+
+        Returns:
+            bytes: Z-machine code (stub - no graphics in V3)
+        """
+        # PICINF is V6+ for graphics, stub for V3
+        return b''
+
+    def gen_mouse_info(self, operands: List[ASTNode]) -> bytes:
+        """Generate MOUSE-INFO (get mouse information).
+
+        <MOUSE-INFO table> gets mouse position and button state.
+        V3 has no mouse support, so this is a stub.
+
+        Args:
+            operands[0]: Info table address
+
+        Returns:
+            bytes: Z-machine code (stub - no mouse in V3)
+        """
+        # MOUSE-INFO is V5+ feature, stub for V3
+        return b''
+
+    def gen_type(self, operands: List[ASTNode]) -> bytes:
+        """Generate TYPE? (get type of value).
+
+        <TYPE? value> returns the type code of a value.
+        Types: 0=number, 1=object, 2=string, etc.
+
+        Args:
+            operands[0]: Value to check type of
+
+        Returns:
+            bytes: Z-machine code (stub - needs runtime type checking)
+        """
+        # TYPE? needs runtime type inspection
+        # For now, stub
+        return b''
+
+    def gen_printtype(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINTTYPE (print type name).
+
+        <PRINTTYPE value> prints the type name of a value.
+        Useful for debugging.
+
+        Args:
+            operands[0]: Value to print type of
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # PRINTTYPE needs TYPE? + string lookup
+        return b''
+
+    def gen_printt(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINTT (print with tab).
+
+        <PRINTT string> prints string with tab formatting.
+        Alias for PRINT with special formatting.
+
+        Args:
+            operands[0]: String to print
+
+        Returns:
+            bytes: Z-machine code (delegates to TELL)
+        """
+        # PRINTT is just TELL/PRINT
+        return self.gen_tell(operands)
 
     def gen_prog(self, operands: List[ASTNode]) -> bytes:
         """Generate PROG (sequential execution block).
