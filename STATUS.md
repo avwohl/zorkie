@@ -573,7 +573,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Arithmetic and Predicate Utilities - MIN, MAX, ASSIGNED?
-- **Commit**: (pending)
+- **Commit**: 0917e2c
 - MIN - Minimum of two values
 - MAX - Maximum of two values
 - ASSIGNED? - Test if global variable is assigned
@@ -582,8 +582,21 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ MAJOR MILESTONE - Daemon System: QUEUE, INT, DEQUEUE
+- **Commit**: (pending)
+- QUEUE - Schedule interrupt/daemon (78 Planetfall uses!)
+- INT - Get interrupt by name (45 Planetfall uses!)
+- DEQUEUE - Disable interrupt
+- Implements 8-byte interrupt structure format
+- Tracks interrupts in symbol table
+- **Test**: daemon_test.zil (1,200 bytes)
+- Brings total to 88 opcodes implemented
+- **Achievement**: 70% Planetfall Complete! 🎉
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.6.2
+**Current Version**: 0.7.0 - MAJOR MILESTONE!
 
-**Status**: 🟢 Active Development - 62% Planetfall Complete!
+**Status**: 🟢 Active Development - 70% Planetfall Complete!

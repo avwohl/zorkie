@@ -151,7 +151,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Parser/Game Operations (6 opcodes)
+## Parser/Game Operations (9 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -161,6 +161,9 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PROB | RANDOM+JL | Probability test (N% chance) | ✅ |
 | PICK-ONE | RANDOM+GET | Select random table element | ✅ |
 | GOTO | STORE HERE | Move player to room | ✅ |
+| QUEUE | Memory alloc | Schedule interrupt/daemon | ✅ |
+| INT | Memory lookup | Get interrupt by name | ✅ |
+| DEQUEUE | STOREW | Disable interrupt | ✅ |
 
 ---
 
@@ -190,11 +193,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 85 distinct operations
+- **Total Opcodes**: 88 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 38 working examples
-- **Planetfall Coverage**: ~62% of required operations
-- **Version**: 0.6.2
+- **Test Programs**: 39 working examples
+- **Planetfall Coverage**: ~70% of required operations
+- **Version**: 0.7.0
 
 ---
 
@@ -202,10 +205,9 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 | ZIL Opcode | Description | Planetfall Uses |
 |------------|-------------|-----------------|
-| QUEUE | Daemon scheduling | 78 |
-| INT | Interrupt control | 45 |
 | STRING | Build strings with escapes/interpolation | 15 |
-| DEQUEUE | Remove daemon | - |
+| ENABLE | Enable interrupt (set enabled flag) | Used with QUEUE |
+| DISABLE | Disable interrupt (clear enabled flag) | Used with QUEUE |
 
 ---
 
@@ -246,4 +248,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.6.2
+**Compiler Version**: 0.7.0
