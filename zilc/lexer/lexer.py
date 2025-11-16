@@ -98,7 +98,7 @@ class Lexer:
 
     def skip_whitespace(self):
         """Skip whitespace characters."""
-        while self.peek() and self.peek() in ' \t\n\r':
+        while self.peek() and self.peek() in ' \t\n\r\f':
             self.advance()
 
     def skip_comment(self):
@@ -218,7 +218,7 @@ class Lexer:
     def is_atom_char(self, ch: str) -> bool:
         """Check if character is valid in an atom."""
         return (ch.isalnum() or
-                ch in '-_?!+*/=\\')
+                ch in '-_?+*/=$#')
 
     def tokenize(self) -> List[Token]:
         """Tokenize the entire source code."""
@@ -279,13 +279,35 @@ class Lexer:
                 value = self.read_number()
                 self.tokens.append(Token(TokenType.NUMBER, value, line, col))
 
-            # Hex number
-            elif ch == '$':
+            # Hex number ($1A3F) - only if $ is followed by hex digit
+            elif ch == '$' and self.peek(1) and self.peek(1) in '0123456789ABCDEFabcdef':
                 value = self.read_number()
                 self.tokens.append(Token(TokenType.NUMBER, value, line, col))
 
+            # Special case: ! escapes for STRING form (!\", !\\, !=, etc.)
+            elif ch == '!':
+                chars = [self.advance()]  # Read !
+                # Check for common escape patterns: !\" !\\ !\=
+                if self.peek() == '\\' and self.peek(1) in '"=':
+                    # Read backslash and next char (for !\" and !\=)
+                    chars.append(self.advance())
+                    chars.append(self.advance())
+                elif self.peek() == ',':
+                    # !,VAR pattern - just the ! (VAR will be read separately)
+                    pass
+                elif self.peek():
+                    # Any other character after !
+                    chars.append(self.advance())
+                value = ''.join(chars)
+                self.tokens.append(Token(TokenType.ATOM, value, line, col))
+
+            # Backslash (character constant or escape)
+            elif ch == '\\':
+                self.advance()
+                self.tokens.append(Token(TokenType.ATOM, '\\', line, col))
+
             # Atom/Identifier
-            elif ch.isalpha() or ch in '-_?!+*/<>=':
+            elif ch.isalpha() or ch in '-_?+*/<>=$#':
                 value = self.read_atom()
                 self.tokens.append(Token(TokenType.ATOM, value, line, col))
 
