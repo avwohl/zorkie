@@ -225,8 +225,14 @@ class ImprovedCodeGenerator:
             return self.gen_newline()
         elif op_name == 'PRINTN' or op_name == 'PRINT-NUM':
             return self.gen_print_num(form.operands)
+        elif op_name == 'PRINTD':
+            return self.gen_print_num(form.operands)  # PRINTD is same as PRINTN
         elif op_name == 'PRINTC' or op_name == 'PRINT-CHAR':
             return self.gen_print_char(form.operands)
+        elif op_name == 'PRINTB':
+            return self.gen_printb(form.operands)
+        elif op_name == 'PRINTI':
+            return self.gen_printi(form.operands)
 
         # Variables
         elif op_name == 'SET':
@@ -449,6 +455,40 @@ class ImprovedCodeGenerator:
             code.append(value & 0xFF)
 
         return bytes(code)
+
+    def gen_printb(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINT_PADDR (print from byte array).
+
+        <PRINTB addr> prints text from a byte array at the given address.
+        This uses the PRINT_PADDR opcode (packed address in V3).
+
+        In Z-machine V3, PRINT_PADDR is VAR opcode 0x0D.
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        addr = self.get_operand_value(operands[0])
+
+        # PRINT_PADDR is VAR opcode 0x0D
+        code.append(0xED)  # VAR form, opcode 0x0D
+        code.append(0x01)  # Type byte: small constant
+
+        if isinstance(addr, int):
+            code.append(addr & 0xFF)
+
+        return bytes(code)
+
+    def gen_printi(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINTI (print inline string).
+
+        <PRINTI "text"> prints an inline string.
+        This is typically used in property values.
+
+        For now, we'll treat it like TELL.
+        """
+        # Delegate to TELL implementation
+        return self.gen_tell(operands)
 
     # ===== Variable Operations =====
 
