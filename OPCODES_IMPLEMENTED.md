@@ -67,8 +67,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PRINTTYPE | Debug | Print type name (stub) | ⚠️ |
 | MUSIC | SOUND_EFFECT | Play music track (alias for SOUND) | ✅ |
 | VOLUME | SOUND params | Set sound volume (V3 stub) | ⚠️ |
-| COLOR | SET_COLOUR | Set text colors (V5+ stub) | ⚠️ |
-| FONT | SET_FONT | Set font (V5+ stub) | ⚠️ |
+| COLOR | SET_COLOUR | Set text colors (V5+ working, V3 no-op) | ✅ |
+| FONT | SET_FONT | Set font (V5+ working, V3 no-op) | ✅ |
 
 ---
 
@@ -286,10 +286,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 166 distinct operations (145 working + 21 stubs)
+- **Total Opcodes**: 166 distinct operations (147 working + 19 stubs)
 - **Opcode Categories**: 15 categories
-- **Test Programs**: 59 working examples
+- **Test Programs**: 60 working examples (59 V3 + 1 V5)
 - **Planetfall Coverage**: 🎉 **100% COMPLETE!** 🎉
+- **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
 - **Version**: 2.0.0
 
 ---

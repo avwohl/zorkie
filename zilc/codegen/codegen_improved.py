@@ -29,6 +29,9 @@ class ImprovedCodeGenerator:
         self.objects: Dict[str, int] = {}  # Object name -> number
         self.interrupts: Dict[str, int] = {}  # Interrupt name -> structure address
 
+        # Version capabilities
+        self._init_version_features()
+
         # Code generation
         self.code = bytearray()
         self.next_global = 0x10
@@ -102,6 +105,21 @@ class ImprovedCodeGenerator:
         # Add verb constants to constant table
         for verb, num in self.verb_actions.items():
             self.constants[verb] = num
+
+    def _init_version_features(self):
+        """Initialize version-specific feature flags."""
+        self.has_colors = self.version >= 5
+        self.has_sound = self.version >= 3
+        self.has_mouse = self.version >= 5
+        self.has_graphics = self.version >= 6
+        self.has_extended_opcodes = self.version >= 5
+        self.max_objects = 255 if self.version <= 3 else 65535
+        self.max_properties = 31 if self.version <= 3 else 63
+
+        # Version-specific opcodes availability
+        self.v4_opcodes = self.version >= 4
+        self.v5_opcodes = self.version >= 5
+        self.v6_opcodes = self.version >= 6
 
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
@@ -1882,10 +1900,23 @@ class ImprovedCodeGenerator:
             operands[1]: Background color (optional)
 
         Returns:
-            bytes: Z-machine code (stub for V3)
+            bytes: Z-machine code (working in V5+, stub for V3)
         """
-        # SET_COLOUR is V5+, V3 doesn't support it
-        return b''
+        if not self.has_colors:
+            # V3/V4 don't support colors
+            return b''
+
+        # V5+: SET_COLOUR opcode
+        code = bytearray()
+        if len(operands) >= 2:
+            fg = self.get_operand_value(operands[0])
+            bg = self.get_operand_value(operands[1])
+            if isinstance(fg, int) and isinstance(bg, int):
+                code.append(0xEB)  # SET_COLOUR (VAR opcode 0x1B)
+                code.append(0x15)  # Type byte: 2 small constants
+                code.append(fg & 0xFF)
+                code.append(bg & 0xFF)
+        return bytes(code)
 
     def gen_font(self, operands: List[ASTNode]) -> bytes:
         """Generate FONT (set font).
@@ -1897,10 +1928,21 @@ class ImprovedCodeGenerator:
             operands[0]: Font number
 
         Returns:
-            bytes: Z-machine code (stub for V3)
+            bytes: Z-machine code (working in V5+, stub for V3)
         """
-        # SET_FONT is V5+
-        return b''
+        if self.version < 5:
+            # V3/V4 don't support SET_FONT
+            return b''
+
+        # V5+: SET_FONT opcode
+        code = bytearray()
+        if operands:
+            font_num = self.get_operand_value(operands[0])
+            if isinstance(font_num, int):
+                code.append(0x9C)  # SET_FONT (1OP opcode 0x0C with mode 10)
+                code.append(font_num & 0xFF)
+                code.append(0x00)  # Store result to stack
+        return bytes(code)
 
     def gen_mouse_info(self, operands: List[ASTNode]) -> bytes:
         """Generate MOUSE-INFO (get mouse information).

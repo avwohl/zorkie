@@ -949,8 +949,32 @@ the ZIL operations required to compile Planetfall and other Infocom games!
 
 ---
 
+### 🚀 MULTI-VERSION SUPPORT - V3/V4/V5/V6 Targeting
+- **Commit**: (pending)
+- **Feature**: Multi-version Z-machine targeting
+- Added version detection system with feature flags
+- Implemented version-specific opcode behavior
+- COLOR opcode now works in V5+ (SET_COLOUR)
+- FONT opcode now works in V5+ (SET_FONT)
+- Graceful degradation for V3/V4 (no-ops for unsupported features)
+- Version feature flags:
+  - has_colors (V5+)
+  - has_sound (V3+)
+  - has_mouse (V5+)
+  - has_graphics (V6+)
+  - max_objects: 255 (V3) or 65535 (V4+)
+  - max_properties: 31 (V3) or 63 (V5+)
+- **Documentation**: MULTIVERSION_SUPPORT.md created
+- **Test**: multiversion_test_v5.zil for V5 features
+- Allows single source to target multiple versions
+- Forward compatibility: V3 code works in V5+
+- Backward compatibility: V5 code compiles for V3 (features disabled)
+- 🚀 **Multi-Version Architecture Complete!** 🚀
+
+---
+
 **Last Updated**: 2025-11-16
 
 **Current Version**: 2.0.0 🎉
 
-**Status**: ✅ COMPLETE - 100% Planetfall Coverage Achieved!
+**Status**: ✅ COMPLETE - 100% Planetfall Coverage + Multi-Version Support!
