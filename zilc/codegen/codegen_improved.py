@@ -421,6 +421,16 @@ class ImprovedCodeGenerator:
             return self.gen_log_shift(form.operands)
         elif op_name == 'XOR':
             return self.gen_xor(form.operands)
+        elif op_name == 'MUSIC':
+            return self.gen_music(form.operands)
+        elif op_name == 'VOLUME':
+            return self.gen_volume(form.operands)
+        elif op_name == 'COPYT':
+            return self.gen_copyt(form.operands)
+        elif op_name == 'ZERO':
+            return self.gen_zero(form.operands)
+        elif op_name == 'SHIFT':
+            return self.gen_shift(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -2505,6 +2515,85 @@ class ImprovedCodeGenerator:
         # XOR in V3 needs emulation or compile-time evaluation
         # Stub for now
         return b''
+
+    def gen_music(self, operands: List[ASTNode]) -> bytes:
+        """Generate MUSIC (play music).
+
+        <MUSIC track> plays a music track.
+        V3 uses SOUND for this purpose.
+
+        Args:
+            operands[0]: Music track number
+
+        Returns:
+            bytes: Z-machine code (delegates to SOUND)
+        """
+        # MUSIC is an alias for SOUND
+        return self.gen_sound(operands)
+
+    def gen_volume(self, operands: List[ASTNode]) -> bytes:
+        """Generate VOLUME (set sound volume).
+
+        <VOLUME level> sets the sound volume level.
+        V3 has limited volume control via SOUND parameters.
+
+        Args:
+            operands[0]: Volume level
+
+        Returns:
+            bytes: Z-machine code (V3 stub)
+        """
+        # VOLUME control is limited in V3
+        return b''
+
+    def gen_copyt(self, operands: List[ASTNode]) -> bytes:
+        """Generate COPYT (copy table).
+
+        <COPYT source dest length> copies bytes from source to dest table.
+        Uses repeated LOADB/STOREB operations.
+
+        Args:
+            operands[0]: Source table address
+            operands[1]: Destination table address
+            operands[2]: Number of bytes to copy
+
+        Returns:
+            bytes: Z-machine code (stub - needs loop generation)
+        """
+        # COPYT needs loop generation for byte copying
+        return b''
+
+    def gen_zero(self, operands: List[ASTNode]) -> bytes:
+        """Generate ZERO (zero out table).
+
+        <ZERO table length> sets all bytes in table to zero.
+        Uses repeated STOREB operations.
+
+        Args:
+            operands[0]: Table address
+            operands[1]: Number of bytes to zero
+
+        Returns:
+            bytes: Z-machine code (stub - needs loop generation)
+        """
+        # ZERO needs loop generation
+        return b''
+
+    def gen_shift(self, operands: List[ASTNode]) -> bytes:
+        """Generate SHIFT (general shift operation).
+
+        <SHIFT value amount> shifts value by amount.
+        Positive = left, negative = right.
+
+        Args:
+            operands[0]: Value to shift
+            operands[1]: Shift amount
+
+        Returns:
+            bytes: Z-machine code (delegates to LSH)
+        """
+        # SHIFT is an alias for LOG-SHIFT
+        return self.gen_log_shift(operands)
 
     def gen_prog(self, operands: List[ASTNode]) -> bytes:
         """Generate PROG (sequential execution block).
