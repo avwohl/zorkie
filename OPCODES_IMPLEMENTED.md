@@ -182,6 +182,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | ZIL Opcode | Description | Planetfall Uses |
 |------------|-------------|-----------------|
 | QUEUE | Daemon scheduling | 78 |
+| STRING | Build strings with escapes/interpolation | 15 |
 | DEQUEUE | Remove daemon | - |
 | INT | Interrupt control | 45 |
 | JIGS-UP | Game over routine | 42 |
@@ -191,11 +192,37 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Not Yet Implemented (Medium Priority)
 
-- Advanced string operations (escape sequences)
-- BUZZ words (abbreviations)
-- Advanced compile-time operations (GASSIGNED?, etc.)
-- More sophisticated routine calling
-- Property table optimization
+| Feature | Description | Notes |
+|---------|-------------|-------|
+| STRING form | String construction with `!` escapes | Used in Planetfall WBREAKS |
+| BUZZ words | Abbreviations table | Optimization feature |
+| GASSIGNED? | Check if global defined | Compile-time predicate |
+| INSERT-FILE | Include file during compilation | Multi-file build system |
+| Routine calling improvements | Better parameter handling | Current implementation basic |
+| Property table optimization | Efficient property storage | Works but not optimal |
+
+---
+
+## String Escape Support
+
+### ✅ Regular String Literals (in `"..."`)
+- `\n` - newline
+- `\t` - tab
+- `\\` - literal backslash
+- `\"` - literal quote
+
+### ⚠️ STRING Form Escapes (NOT yet implemented)
+The STRING opcode uses `!` for escapes:
+- `!\"` - literal quote character
+- `!\\` - literal backslash
+- `!,VAR` - interpolate variable value
+
+Example from Planetfall:
+```zil
+<SETG WBREAKS <STRING !\" !\\ !,WBREAKS>>
+```
+
+This requires implementing the STRING opcode, which is deferred for now
 
 ---
 

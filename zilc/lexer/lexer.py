@@ -201,7 +201,7 @@ class Lexer:
     def is_atom_char(self, ch: str) -> bool:
         """Check if character is valid in an atom."""
         return (ch.isalnum() or
-                ch in '-_?!+*/=')
+                ch in '-_?!+*/=\\')
 
     def tokenize(self) -> List[Token]:
         """Tokenize the entire source code."""
