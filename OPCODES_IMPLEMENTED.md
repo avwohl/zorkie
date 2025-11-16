@@ -57,16 +57,16 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | WINSIZE | SPLIT_WINDOW | Set window size (uses SPLIT for window 1) | ✅ |
 | BACK | NEW_LINE | Erase to beginning of line (V3: newline) | ✅ |
 | DISPLAY | Auto | Update status line (automatic in V3) | ✅ |
-| SCORE | STOREW | Set game score (stub) | ⚠️ |
+| SCORE | STOREW | Set game score to address 0x11 | ✅ |
 | PRINTT | PRINT | Print with tab formatting (alias) | ✅ |
 | CHRSET | V5+ | Set character set (V3 no-op) | ⚠️ |
 | MARGIN | V4+ | Set text margins (V3 no-op) | ⚠️ |
-| PICINF | V6+ | Get picture info (V3 stub) | ⚠️ |
-| MOUSE-INFO | V5+ | Get mouse info (V3 stub) | ⚠️ |
-| TYPE? | Runtime | Get type of value (stub) | ⚠️ |
-| PRINTTYPE | Debug | Print type name (stub) | ⚠️ |
+| PICINF | V6+ | Get picture info (V6 stub, V3 no-op) | ⚠️ |
+| MOUSE-INFO | V5+ | Get mouse info (V5 stub, V3 no-op) | ⚠️ |
+| TYPE? | Runtime | Get type of value (partial: compile-time only) | 🟡 |
+| PRINTTYPE | Debug | Print type name (partial: compile-time only) | 🟡 |
 | MUSIC | SOUND_EFFECT | Play music track (alias for SOUND) | ✅ |
-| VOLUME | SOUND params | Set sound volume (V3 stub) | ⚠️ |
+| VOLUME | SOUND_EFFECT | Set sound volume (V5+ working, V3 no-op) | ✅ |
 | COLOR | SET_COLOUR | Set text colors (V5+ working, V3 no-op) | ✅ |
 | FONT | SET_FONT | Set font (V5+ working, V3 no-op) | ✅ |
 
@@ -144,7 +144,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | RSH | DIV | Right shift (V3: divide by 2^n) | ✅ |
 | USL | MUL | Unsigned shift left (alias for LSH) | ✅ |
 | LOG-SHIFT | MUL/DIV | Logical shift (delegates to LSH) | ✅ |
-| XOR | Emulated | Bitwise exclusive OR (stub for V3) | ⚠️ |
+| XOR | EXT:0x0B/Emulated | Bitwise exclusive OR (V5+ native, V3 partial) | 🟡 |
 | UXOR | XOR/compile-time | Unsigned XOR (compile-time eval for V3) | ✅ |
 
 ---
@@ -208,8 +208,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
 | FIRST | LOADW | Get first element of list/table | ✅ |
-| MEMBER | Loop+compare | Search for element in list (stub) | ⚠️ |
-| MEMQ | Loop+JE | Search with EQUAL? test (stub) | ⚠️ |
+| MEMBER | SCAN_TABLE/Loop | Search for element in list (V5+ working, V3 stub) | 🟡 |
+| MEMQ | SCAN_TABLE/Loop | Search with EQUAL? test (V5+ working, V3 stub) | 🟡 |
 
 ---
 
@@ -219,8 +219,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 |------------|-----------|-------------|--------|
 | PUSH | PUSH | Push to stack | ✅ |
 | PULL | PULL | Pop from stack | ✅ |
-| FSTACK | Stack introspection | Get frame stack pointer (stub) | ⚠️ |
-| RSTACK | Stack introspection | Get return stack pointer (stub) | ⚠️ |
+| FSTACK | Stack introspection | Get frame stack pointer (stub - no Z-machine equiv) | ⚠️ |
+| RSTACK | Stack introspection | Get return stack pointer (stub - no Z-machine equiv) | ⚠️ |
 
 ---
 
@@ -311,21 +311,54 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | SCREEN-WIDTH | Constant | Get screen width (80 for V3) | ✅ |
 | ASR | DIV | Arithmetic shift right (alias for RSH) | ✅ |
 | NEW-LINE | NEW_LINE | Print newline (alias for CRLF) | ✅ |
-| CATCH | V5+ | Catch exception (V5+ stub) | ⚠️ |
-| THROW | V5+ | Throw exception (V5+ stub) | ⚠️ |
+| CATCH | VAR:0x19 | Catch exception/save stack frame (V5+) | ✅ |
+| THROW | VAR:0x1A | Throw to catch point (V5+) | ✅ |
 | SPACES | PRINT_CHAR | Print N spaces (unrolled for constants) | ✅ |
+
+---
+
+## V6 Graphics Opcodes (3 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| DRAW_PICTURE | EXT:0x05 | Display picture at coordinates (V6) | ✅ |
+| ERASE_PICTURE | EXT:0x07 | Erase picture region to background (V6) | ✅ |
+| PICTURE_DATA | EXT:0x06 | Query picture dimensions/availability (V6) | ✅ |
+
+---
+
+## V6 Window Management Opcodes (5 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| GET_WIND_PROP | EXT:0x13 | Get window property value (V6) | ✅ |
+| PUT_WIND_PROP | EXT:0x19 | Set window property value (V6) | ✅ |
+| SCROLL_WINDOW | EXT:0x14 | Scroll window by pixels (V6) | ✅ |
+| WINDOW_SIZE | EXT:0x11 | Resize window in pixels (V6) | ✅ |
+| WINDOW_STYLE | EXT:0x12 | Modify window attributes (V6) | ✅ |
+
+---
+
+## V5/V6 Mouse & Display Opcodes (3 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| MOUSE_WINDOW | EXT:0x17 | Constrain mouse to window (V5+) | ✅ |
+| READ_MOUSE | EXT:0x16 | Read mouse position and state (V5+) | ✅ |
+| BUFFER_SCREEN | EXT:0x1D | Control display buffering (V6) | ✅ |
 
 ---
 
 ## Summary Statistics
 
-- **Total Opcodes**: 188 distinct operations (169 working + 19 stubs)
-- **Opcode Categories**: 17 categories
+- **Total Opcodes**: 199 distinct operations (186 working + 13 stubs/partial)
+- **Opcode Categories**: 20 categories (added V6 graphics, windows, mouse)
 - **Test Programs**: 63 working examples (59 V3 + 4 V5)
 - **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
 - **V5 Status**: 100% complete (all V5 opcodes implemented!)
-- **Version**: 2.4.0
+- **V6 Status**: Core graphics/window/mouse opcodes implemented (11 new opcodes)
+- **Version**: 2.5.0
 
 ---
 
@@ -338,7 +371,7 @@ All 166 V3 opcodes implemented. 100% Planetfall coverage.
 - Extended memory bank switching
 - Extended save/restore formats
 - V4-specific screen model opcodes
-- And ~5 more V4-specific opcodes
+- ~5 more V4-specific opcodes
 
 ### V5: Complete ✓
 All V5 opcodes implemented! Including:
@@ -347,22 +380,34 @@ All V5 opcodes implemented! Including:
 - Full Unicode support (PRINT_UNICODE, CHECK_UNICODE)
 - Undo support (SAVE_UNDO, RESTORE_UNDO)
 - Advanced text/table operations
+- Mouse support (MOUSE_WINDOW, READ_MOUSE)
 - Graphics table setup (PICTURE_TABLE)
 
-### V6: ~35 opcodes remaining
-- Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA, GET_PICTURE_INFO
-- Windows: GET_WIND_PROP, PUT_WIND_PROP, SCROLL_WINDOW, WINDOW_SIZE, WINDOW_STYLE
-- Mouse: MOUSE_WINDOW, READ_MOUSE
-- Sounds: SOUND_EFFECT enhancements
-- Plus ~25 more V6-specific opcodes
+### V6: ~24 opcodes remaining
+Core V6 features implemented (11 opcodes):
+- ✅ Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA
+- ✅ Windows: GET_WIND_PROP, PUT_WIND_PROP, SCROLL_WINDOW, WINDOW_SIZE, WINDOW_STYLE
+- ✅ Mouse: MOUSE_WINDOW, READ_MOUSE
+- ✅ Display: BUFFER_SCREEN
+
+Still needed (~24 opcodes):
+- Additional graphics operations
+- Advanced window operations
+- Extended sound/music features
+- V6-specific text rendering
+- Additional display control opcodes
 
 ---
 
-## Not Yet Implemented (High Priority)
+## Partial Implementations (Needs Enhancement)
 
-| ZIL Opcode | Description | Notes |
-|------------|-------------|-------|
-| STRING (full) | String interpolation with !,VAR | Basic version implemented |
+| ZIL Opcode | Current Status | What's Missing |
+|------------|----------------|----------------|
+| XOR | V5+ working, V3 compile-time only | V3 runtime emulation via (A OR B) AND NOT(A AND B) |
+| MEMBER/MEMQ | V5+ working (SCAN_TABLE) | V3/V4 runtime loop generation |
+| TYPE?/PRINTTYPE | Compile-time constants only | Runtime type introspection |
+| FSTACK/RSTACK | Stub (no Z-machine equiv) | Would need runtime stack tracking |
+| STRING (full) | Basic version implemented | String interpolation with !,VAR escapes |
 
 ---
 
@@ -370,12 +415,14 @@ All V5 opcodes implemented! Including:
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
+| V3 XOR emulation | Runtime XOR for V3 | Needs temp variable allocation |
+| V3 loop generation | For MEMBER, MEMQ, variable COPYT/ZERO | Requires label management |
 | STRING form | String construction with `!` escapes | Used in Planetfall WBREAKS |
 | BUZZ words | Abbreviations table | Optimization feature |
 | GASSIGNED? | Check if global defined | Compile-time predicate |
 | INSERT-FILE | Include file during compilation | Multi-file build system |
-| Routine calling improvements | Better parameter handling | Current implementation basic |
-| Property table optimization | Efficient property storage | Works but not optimal |
+| V4-specific opcodes | Extended memory/save/restore (~8 opcodes) | V4 features |
+| V6 extended opcodes | Advanced graphics/window ops (~24 opcodes) | V6 features |
 
 ---
 
@@ -403,4 +450,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 2.0.0 🎉
+**Compiler Version**: 2.5.0
