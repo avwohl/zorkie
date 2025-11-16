@@ -371,16 +371,31 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
+## Opcode Aliases
+
+Many Z-machine opcodes have multiple names in ZIL. The following aliases are supported:
+
+| Alias | Primary Implementation | Notes |
+|-------|----------------------|-------|
+| OUTPUT_STREAM | DIROUT | Stream control (VAR:0x13) |
+| INPUT_STREAM | - | Input source selection (VAR:0x14) |
+| COPY_TABLE | COPYT | Table copy/zero (V5+ EXT:0x1D) |
+| SET_COLOUR | COLOR | Text colors (V5+ 2OP:0x1B) |
+| BUFFER_MODE | BUFOUT | Text buffering (V4+ VAR:0x12) |
+
+---
+
 ## Summary Statistics
 
-- **Total Opcodes**: 207 distinct operations (194 working + 13 stubs/partial)
+- **Total Opcodes**: 211 distinct operations (198 working + 13 stubs/partial)
 - **Opcode Categories**: 23 categories
+- **Aliases**: 5 additional opcode aliases
 - **Test Programs**: 63 working examples (59 V3 + 4 V5)
 - **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
 - **V5 Status**: 100% complete (all standard V5 opcodes + extended set)
 - **V6 Status**: Major features implemented (19 V6-specific opcodes)
-- **Version**: 2.6.0
+- **Version**: 2.7.0
 
 ---
 
@@ -473,4 +488,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 2.6.0
+**Compiler Version**: 2.7.0

@@ -1785,6 +1785,67 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_output_stream(self, operands: List[ASTNode]) -> bytes:
+        """Generate OUTPUT_STREAM (redirect output - V3+).
+
+        <OUTPUT_STREAM stream table> redirects text output.
+        Alias for DIROUT. Stream 3 redirects to memory table.
+
+        Args:
+            operands[0]: Stream number (1=screen, 2=transcript, 3=memory, 4=commands)
+            operands[1]: Table address (for stream 3 only, optional)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to DIROUT implementation
+        return self.gen_dirout(operands)
+
+    def gen_input_stream(self, operands: List[ASTNode]) -> bytes:
+        """Generate INPUT_STREAM (select input source - V3+).
+
+        <INPUT_STREAM stream> selects input source.
+        0=keyboard, 1=file (playback).
+
+        Args:
+            operands[0]: Stream number
+
+        Returns:
+            bytes: Z-machine code (INPUT_STREAM VAR opcode)
+        """
+        if not operands or self.version < 3:
+            return b''
+
+        code = bytearray()
+
+        # INPUT_STREAM is VAR opcode 0x14
+        code.append(0xF4)  # VAR opcode 0x14
+
+        stream = self.get_operand_value(operands[0])
+
+        if isinstance(stream, int):
+            code.append(0x2F)  # Type byte: 1 small constant
+            code.append(stream & 0xFF)
+
+        return bytes(code)
+
+    def gen_copy_table(self, operands: List[ASTNode]) -> bytes:
+        """Generate COPY_TABLE (V5+ table copy/zero).
+
+        <COPY_TABLE first second size> copies or zeros table.
+        Alias for COPYT. V5+ only.
+
+        Args:
+            operands[0]: Source address (0 to zero out dest)
+            operands[1]: Destination address
+            operands[2]: Size in bytes (negative = preserve first during copy)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to COPYT implementation
+        return self.gen_copyt(operands)
+
     def gen_mapf(self, operands: List[ASTNode]) -> bytes:
         """Generate MAPF (map first/apply to each).
 
@@ -2224,6 +2285,22 @@ class ImprovedCodeGenerator:
                 code.append(fg & 0xFF)
                 code.append(bg & 0xFF)
         return bytes(code)
+
+    def gen_set_colour(self, operands: List[ASTNode]) -> bytes:
+        """Generate SET_COLOUR (V5+ - set text colors).
+
+        <SET_COLOUR foreground background> sets display colors.
+        Alias for COLOR. V5+ only (2OP:0x1B).
+
+        Args:
+            operands[0]: Foreground color
+            operands[1]: Background color
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # Delegate to COLOR implementation
+        return self.gen_color(operands)
 
     def gen_font(self, operands: List[ASTNode]) -> bytes:
         """Generate FONT (set font).
