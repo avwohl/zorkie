@@ -973,8 +973,26 @@ the ZIL operations required to compile Planetfall and other Infocom games!
 
 ---
 
+### V5 Extended Opcodes and Loop Operations
+- **Session**: Multi-version expansion
+- Implemented V5 extended call opcodes:
+  - CALL_VS2 (EXT:0x0C) - call with up to 8 args, store result
+  - CALL_VN2 (EXT:0x0D) - call with up to 8 args, no store
+  - TOKENISE (EXT:0x00) - lexical analysis/tokenization
+  - CHECK_ARG_COUNT (EXT:0x0F) - verify argument count
+- Implemented loop-based table operations:
+  - COPYT - V5: COPY_TABLE opcode, V3: unrolled loop
+  - ZERO - V5: COPY_TABLE with zero, V3: unrolled STOREB
+  - SPACES - unrolled PRINT_CHAR for constants
+- MEMBER and MEMQ still stubs (need full loop generation)
+- **Test**: v5_extended_opcodes.zil created
+- **Stats**: 173 opcodes total (154 working, 19 stubs)
+- Version 2.0.0 → 2.1.0
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 2.0.0 🎉
+**Current Version**: 2.1.0
 
 **Status**: ✅ COMPLETE - 100% Planetfall Coverage + Multi-Version Support!

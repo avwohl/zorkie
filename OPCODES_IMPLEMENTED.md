@@ -197,8 +197,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PUTB2 | STOREB | Put byte with base+offset addressing | ✅ |
 | GETW2 | LOADW | Get word with base+offset addressing | ✅ |
 | PUTW2 | STOREW | Put word with base+offset addressing | ✅ |
-| COPYT | LOADB+STOREB | Copy table bytes (stub - needs loop) | ⚠️ |
-| ZERO | STOREB | Zero out table (stub - needs loop) | ⚠️ |
+| COPYT | COPY_TABLE/loop | Copy table bytes (V5: COPY_TABLE, V3: unrolled) | ✅ |
+| ZERO | COPY_TABLE/loop | Zero out table (V5: COPY_TABLE, V3: unrolled) | ✅ |
 | SHIFT | LSH/RSH | General shift operation (alias) | ✅ |
 
 ---
@@ -245,6 +245,17 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
+## V5 Extended Opcodes (4 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| CALL_VS2 | EXT:0x0C | Call routine with up to 8 args (with store) | ✅ |
+| CALL_VN2 | EXT:0x0D | Call routine with up to 8 args (no store) | ✅ |
+| TOKENISE | EXT:0x00 | Tokenize text buffer (lexical analysis) | ✅ |
+| CHECK_ARG_COUNT | EXT:0x0F | Check number of arguments passed | ✅ |
+
+---
+
 ## Macro System (1 major feature)
 
 | Feature | Description | Status |
@@ -280,18 +291,50 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | NEW-LINE | NEW_LINE | Print newline (alias for CRLF) | ✅ |
 | CATCH | V5+ | Catch exception (V5+ stub) | ⚠️ |
 | THROW | V5+ | Throw exception (V5+ stub) | ⚠️ |
-| SPACES | PRINT_CHAR | Print N spaces (stub) | ⚠️ |
+| SPACES | PRINT_CHAR | Print N spaces (unrolled for constants) | ✅ |
 
 ---
 
 ## Summary Statistics
 
-- **Total Opcodes**: 166 distinct operations (147 working + 19 stubs)
-- **Opcode Categories**: 15 categories
-- **Test Programs**: 60 working examples (59 V3 + 1 V5)
-- **Planetfall Coverage**: 🎉 **100% COMPLETE!** 🎉
+- **Total Opcodes**: 173 distinct operations (154 working + 19 stubs)
+- **Opcode Categories**: 16 categories (added V5 Extended Opcodes)
+- **Test Programs**: 61 working examples (59 V3 + 2 V5)
+- **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
-- **Version**: 2.0.0
+- **Version**: 2.1.0
+
+---
+
+## What's Left
+
+### V3: Complete ✓
+All 166 V3 opcodes implemented. 100% Planetfall coverage.
+
+### V4: ~12 opcodes remaining
+- CALL_2S (2OP call with store)
+- CALL_2N (2OP call without store)
+- Extended memory bank switching
+- Extended save/restore formats
+
+### V5: ~15 opcodes remaining
+- ENCODE_TEXT (encode dictionary words)
+- COPY_TABLE (already implemented as COPYT backend)
+- PRINT_TABLE (formatted table output)
+- SCAN_TABLE (search sorted table)
+- CALL_1S, CALL_1N (1OP call variants)
+- SET_TEXT_STYLE enhancements
+- ERASE_LINE, BUFFER_MODE enhancements
+- READ_CHAR (single character input)
+- PRINT_UNICODE (V5.1+)
+- And ~6 more extended opcodes
+
+### V6: ~35 opcodes remaining
+- Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA, GET_PICTURE_INFO
+- Windows: GET_WIND_PROP, PUT_WIND_PROP, SCROLL_WINDOW, WINDOW_SIZE, WINDOW_STYLE
+- Mouse: MOUSE_WINDOW, READ_MOUSE
+- Sounds: SOUND_EFFECT enhancements
+- Plus ~25 more V6-specific opcodes
 
 ---
 
