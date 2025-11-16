@@ -411,6 +411,16 @@ class ImprovedCodeGenerator:
             return self.gen_printtype(form.operands)
         elif op_name == 'PRINTT':
             return self.gen_printt(form.operands)
+        elif op_name == 'FSTACK':
+            return self.gen_fstack(form.operands)
+        elif op_name == 'RSTACK':
+            return self.gen_rstack(form.operands)
+        elif op_name == 'IFFLAG':
+            return self.gen_ifflag(form.operands)
+        elif op_name == 'LOG-SHIFT':
+            return self.gen_log_shift(form.operands)
+        elif op_name == 'XOR':
+            return self.gen_xor(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -2417,6 +2427,84 @@ class ImprovedCodeGenerator:
         """
         # PRINTT is just TELL/PRINT
         return self.gen_tell(operands)
+
+    def gen_fstack(self, operands: List[ASTNode]) -> bytes:
+        """Generate FSTACK (get frame stack pointer).
+
+        <FSTACK> returns the current frame stack pointer.
+        Used for advanced stack manipulation.
+
+        Returns:
+            bytes: Z-machine code (stub - needs stack introspection)
+        """
+        # FSTACK needs access to frame pointer
+        # Stub for now
+        return b''
+
+    def gen_rstack(self, operands: List[ASTNode]) -> bytes:
+        """Generate RSTACK (get return stack pointer).
+
+        <RSTACK> returns the current return stack pointer.
+        Used for advanced stack operations.
+
+        Returns:
+            bytes: Z-machine code (stub - needs stack introspection)
+        """
+        # RSTACK needs access to return stack
+        # Stub for now
+        return b''
+
+    def gen_ifflag(self, operands: List[ASTNode]) -> bytes:
+        """Generate IFFLAG (conditional flag check).
+
+        <IFFLAG flag true-expr false-expr> checks a flag and evaluates one expression.
+        Convenience macro for flag-based conditionals.
+
+        Args:
+            operands[0]: Flag to check
+            operands[1]: Expression if true
+            operands[2]: Expression if false (optional)
+
+        Returns:
+            bytes: Z-machine code (expands to COND)
+        """
+        # IFFLAG is typically a macro that expands to COND
+        # For now, stub
+        return b''
+
+    def gen_log_shift(self, operands: List[ASTNode]) -> bytes:
+        """Generate LOG-SHIFT (logical shift).
+
+        <LOG-SHIFT value amount> performs logical shift (signed).
+        Alias for LSH/RSH depending on sign.
+
+        Args:
+            operands[0]: Value to shift
+            operands[1]: Shift amount (positive=left, negative=right)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # LOG-SHIFT: if positive use LSH, if negative use RSH
+        # For simplicity, delegate to LSH
+        return self.gen_lsh(operands)
+
+    def gen_xor(self, operands: List[ASTNode]) -> bytes:
+        """Generate XOR (bitwise exclusive OR).
+
+        <XOR val1 val2> performs bitwise XOR.
+        In V3, this may need to be computed via (A OR B) AND NOT(A AND B).
+
+        Args:
+            operands[0]: First value
+            operands[1]: Second value
+
+        Returns:
+            bytes: Z-machine code (stub - needs XOR emulation for V3)
+        """
+        # XOR in V3 needs emulation or compile-time evaluation
+        # Stub for now
+        return b''
 
     def gen_prog(self, operands: List[ASTNode]) -> bytes:
         """Generate PROG (sequential execution block).

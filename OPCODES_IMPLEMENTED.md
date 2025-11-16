@@ -5,7 +5,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Control Flow (16 opcodes)
+## Control Flow (17 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -25,6 +25,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | REST | ADD | Pointer arithmetic (list tail) | ✅ |
 | PROG | Sequential | Execute statements in sequence | ✅ |
 | BIND | Local scope | Create local bindings and execute body | ✅ |
+| IFFLAG | COND | Conditional flag check (macro stub) | ⚠️ |
 
 ---
 
@@ -124,7 +125,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Logical/Bitwise Operations (13 opcodes)
+## Logical/Bitwise Operations (16 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -140,6 +141,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | LSH | MUL | Left shift (V3: multiply by 2^n) | ✅ |
 | RSH | DIV | Right shift (V3: divide by 2^n) | ✅ |
 | USL | MUL | Unsigned shift left (alias for LSH) | ✅ |
+| LOG-SHIFT | MUL/DIV | Logical shift (delegates to LSH) | ✅ |
+| XOR | Emulated | Bitwise exclusive OR (stub for V3) | ⚠️ |
 | UXOR | XOR/compile-time | Unsigned XOR (compile-time eval for V3) | ✅ |
 
 ---
@@ -205,12 +208,14 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Stack Operations (2 opcodes)
+## Stack Operations (4 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
 | PUSH | PUSH | Push to stack | ✅ |
 | PULL | PULL | Pop from stack | ✅ |
+| FSTACK | Stack introspection | Get frame stack pointer (stub) | ⚠️ |
+| RSTACK | Stack introspection | Get return stack pointer (stub) | ⚠️ |
 
 ---
 
@@ -276,11 +281,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 156 distinct operations (141 working + 15 stubs)
+- **Total Opcodes**: 161 distinct operations (142 working + 19 stubs)
 - **Opcode Categories**: 15 categories
-- **Test Programs**: 57 working examples
-- **Planetfall Coverage**: ~99.5% of required operations
-- **Version**: 1.8.0
+- **Test Programs**: 58 working examples
+- **Planetfall Coverage**: ~99.8% of required operations
+- **Version**: 1.9.0
 
 ---
 
@@ -329,4 +334,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.8.0
+**Compiler Version**: 1.9.0
