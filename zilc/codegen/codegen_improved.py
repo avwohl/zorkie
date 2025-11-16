@@ -295,6 +295,10 @@ class ImprovedCodeGenerator:
             return self.gen_getp(form.operands)
         elif op_name == 'PUTP':
             return self.gen_putp(form.operands)
+        elif op_name == 'PTSIZE':
+            return self.gen_ptsize(form.operands)
+        elif op_name == 'NEXTP':
+            return self.gen_nextp(form.operands)
 
         # Conditionals (these create branch instructions)
         elif op_name == 'COND':
@@ -930,6 +934,50 @@ class ImprovedCodeGenerator:
             code.append(obj & 0xFF)
             code.append(prop & 0xFF)
             code.append(value & 0xFF)
+
+        return bytes(code)
+
+    def gen_ptsize(self, operands: List[ASTNode]) -> bytes:
+        """Generate GET_PROP_LEN (get property length).
+
+        <PTSIZE prop-addr> returns the length of a property.
+        Uses GET_PROP_LEN - 1OP opcode 0x04.
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        prop_addr = self.get_operand_value(operands[0])
+
+        # GET_PROP_LEN is 1OP opcode 0x04
+        if isinstance(prop_addr, int):
+            code.append(0x84)  # Short 1OP, opcode 0x04, small constant
+            code.append(prop_addr & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_nextp(self, operands: List[ASTNode]) -> bytes:
+        """Generate GET_NEXT_PROP (get next property).
+
+        <NEXTP obj prop> returns the next property number after prop.
+        If prop is 0, returns the first property.
+        Uses GET_NEXT_PROP - 2OP opcode 0x13.
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        obj = self.get_object_number(operands[0])
+        prop = self.get_operand_value(operands[1])
+
+        # GET_NEXT_PROP is 2OP opcode 0x13
+        if obj is not None and isinstance(prop, int):
+            if 0 <= obj <= 255 and 0 <= prop <= 255:
+                code.append(0x53)  # Long form, opcode 0x13
+                code.append(obj & 0xFF)
+                code.append(prop & 0xFF)
+                code.append(0x00)  # Store to stack
 
         return bytes(code)
 
