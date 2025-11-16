@@ -1537,6 +1537,41 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_move_window(self, operands: List[ASTNode]) -> bytes:
+        """Generate MOVE_WINDOW (V6 - reposition window).
+
+        <MOVE_WINDOW window y x> repositions window to specified pixel coordinates.
+        The top-left corner is (1,1). V6 only.
+
+        Args:
+            operands[0]: Window number
+            operands[1]: Y coordinate (pixels)
+            operands[2]: X coordinate (pixels)
+
+        Returns:
+            bytes: Z-machine code (MOVE_WINDOW EXT opcode)
+        """
+        if len(operands) < 3 or self.version < 6:
+            return b''
+
+        code = bytearray()
+
+        # MOVE_WINDOW is EXT opcode 0x10
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x10)  # MOVE_WINDOW
+
+        window = self.get_operand_value(operands[0])
+        y_coord = self.get_operand_value(operands[1])
+        x_coord = self.get_operand_value(operands[2])
+
+        if isinstance(window, int) and isinstance(y_coord, int) and isinstance(x_coord, int):
+            code.append(0x55)  # Type: small, small, small
+            code.append(window & 0xFF)
+            code.append(y_coord & 0xFF)
+            code.append(x_coord & 0xFF)
+
+        return bytes(code)
+
     def gen_mouse_window(self, operands: List[ASTNode]) -> bytes:
         """Generate MOUSE_WINDOW (V5+ - constrain mouse to window).
 
@@ -2569,16 +2604,6 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code (stub)
         """
         # Window attributes are V5+
-        return b''
-
-    def gen_set_margins(self, operands: List[ASTNode]) -> bytes:
-        """Generate SET-MARGINS (set text margins).
-
-        <SET-MARGINS left right> sets margins in characters.
-
-        Returns:
-            bytes: Z-machine code (stub)
-        """
         return b''
 
     def gen_intbl(self, operands: List[ASTNode]) -> bytes:
@@ -5868,9 +5893,9 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # SET_MARGINS is EXT opcode 0x11
+        # SET_MARGINS is EXT opcode 0x08
         code.append(0xBE)  # EXT opcode marker
-        code.append(0x11)  # SET_MARGINS
+        code.append(0x08)  # SET_MARGINS
 
         # Type byte
         num_operands = len(operands)
@@ -5940,9 +5965,9 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # PICTURE_TABLE is EXT opcode 0x13 (V6, but available in some V5)
+        # PICTURE_TABLE is EXT opcode 0x1C (V6, but available in some V5)
         code.append(0xBE)  # EXT opcode marker
-        code.append(0x13)  # PICTURE_TABLE
+        code.append(0x1C)  # PICTURE_TABLE
 
         table_addr = self.get_operand_value(operands[0])
 

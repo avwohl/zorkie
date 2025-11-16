@@ -1,7 +1,7 @@
 # ZIL Opcodes Implemented in Zorkie Compiler
 
 ## Overview
-This document lists all ZIL opcodes/operations currently implemented in the Zorkie compiler as of version 0.5.0.
+This document lists all ZIL opcodes/operations currently implemented in the Zorkie compiler as of version 4.0.0.
 
 ---
 
@@ -317,17 +317,18 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## V6 Graphics Opcodes (3 opcodes)
+## V6 Graphics Opcodes (4 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
 | DRAW_PICTURE | EXT:0x05 | Display picture at coordinates (V6) | ✅ |
 | ERASE_PICTURE | EXT:0x07 | Erase picture region to background (V6) | ✅ |
 | PICTURE_DATA | EXT:0x06 | Query picture dimensions/availability (V6) | ✅ |
+| PICTURE_TABLE | EXT:0x1C | Setup graphics table for picture caching (V6) | ✅ |
 
 ---
 
-## V6 Window Management Opcodes (5 opcodes)
+## V6 Window Management Opcodes (7 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -336,6 +337,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | SCROLL_WINDOW | EXT:0x14 | Scroll window by pixels (V6) | ✅ |
 | WINDOW_SIZE | EXT:0x11 | Resize window in pixels (V6) | ✅ |
 | WINDOW_STYLE | EXT:0x12 | Modify window attributes (V6) | ✅ |
+| MOVE_WINDOW | EXT:0x10 | Reposition window to pixel coordinates (V6) | ✅ |
+| SET_MARGINS | EXT:0x08 | Set text margins for window (V6) | ✅ |
 
 ---
 
@@ -394,7 +397,7 @@ Many Z-machine opcodes have multiple names in ZIL. The following aliases are sup
 
 ## Summary Statistics
 
-- **Total Opcodes**: 211 distinct operations (198 working + 13 stubs/partial)
+- **Total Opcodes**: 214 distinct operations (201 working + 13 stubs/partial)
 - **Opcode Categories**: 23 categories
 - **Aliases**: 12 standard Z-machine opcode aliases
 - **Test Programs**: 63 working examples (59 V3 + 4 V5)
@@ -403,8 +406,8 @@ Many Z-machine opcodes have multiple names in ZIL. The following aliases are sup
 - **V3 Status**: ✅ 100% complete (all 166 opcodes)
 - **V4 Status**: ✅ 100% complete (all V4 opcodes + timed input)
 - **V5 Status**: ✅ 100% complete (all standard V5 opcodes + extended set)
-- **V6 Status**: Major features implemented (19 V6-specific opcodes)
-- **Version**: 3.0.0
+- **V6 Status**: ✅ 100% complete (all 20 V6-specific opcodes)
+- **Version**: 4.0.0
 
 ---
 
@@ -434,20 +437,17 @@ All V5 opcodes implemented! Including:
 - Mouse support (MOUSE_WINDOW, READ_MOUSE)
 - Graphics table setup (PICTURE_TABLE)
 
-### V6: ~16 opcodes remaining
-Core V6 features implemented (19 opcodes):
-- ✅ Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA
-- ✅ Windows: GET_WIND_PROP, PUT_WIND_PROP, SCROLL_WINDOW, WINDOW_SIZE, WINDOW_STYLE
-- ✅ Mouse: MOUSE_WINDOW, READ_MOUSE
-- ✅ Display: BUFFER_SCREEN, SET_TRUE_COLOUR, PRINT_FORM
-- ✅ Menus: MAKE_MENU
-- ✅ Stack: PUSH_STACK, POP_STACK
-- ✅ Math: ART_SHIFT
+### V6: ✅ Complete (100%)
+All V6-specific opcodes fully implemented (20 opcodes):
+- ✅ Graphics (4): DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA, PICTURE_TABLE
+- ✅ Window Management (7): GET_WIND_PROP, PUT_WIND_PROP, SCROLL_WINDOW, WINDOW_SIZE, WINDOW_STYLE, MOVE_WINDOW, SET_MARGINS
+- ✅ Mouse (2): MOUSE_WINDOW, READ_MOUSE
+- ✅ Display (3): BUFFER_SCREEN, SET_TRUE_COLOUR, PRINT_FORM
+- ✅ Menus (1): MAKE_MENU
+- ✅ Stack (2): PUSH_STACK, POP_STACK
+- ✅ Math (1): ART_SHIFT
 
-Still needed (~16 opcodes):
-- Additional window/graphics operations (~8 opcodes)
-- Extended sound features (~4 opcodes)
-- V6-specific text operations (~4 opcodes)
+All 20 V6-specific extended opcodes (EXT:5-29) are now implemented!
 
 ---
 
@@ -502,4 +502,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 3.0.0 - V4 100% Complete!
+**Compiler Version**: 4.0.0 - V3/V4/V5/V6 100% Complete!
