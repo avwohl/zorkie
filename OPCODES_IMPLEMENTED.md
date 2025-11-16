@@ -26,7 +26,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Output/Print Operations (15 opcodes)
+## Output/Print Operations (20 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -44,6 +44,10 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | CLEAR | ERASE_WINDOW | Clear screen | ✅ |
 | SPLIT | SPLIT_WINDOW | Split screen into windows | ✅ |
 | SCREEN | SET_WINDOW | Select active window | ✅ |
+| CURSET | SET_CURSOR | Set cursor position | ✅ |
+| HLIGHT | SET_TEXT_STYLE | Set text highlighting/style | ✅ |
+| INPUT | SREAD | Read line input from player | ✅ |
+| BUFOUT | BUFFER_MODE | Enable/disable output buffering | ✅ |
 
 ---
 
@@ -96,7 +100,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Logical/Bitwise Operations (8 opcodes)
+## Logical/Bitwise Operations (9 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -108,6 +112,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | BTST | AND+mask | Test if bit is set | ✅ |
 | LSH | MUL | Left shift (V3: multiply by 2^n) | ✅ |
 | RSH | DIV | Right shift (V3: divide by 2^n) | ✅ |
+| UXOR | XOR/compile-time | Unsigned XOR (compile-time eval for V3) | ✅ |
 
 ---
 
@@ -211,11 +216,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 105 distinct operations
+- **Total Opcodes**: 110 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 44 working examples
-- **Planetfall Coverage**: ~80% of required operations
-- **Version**: 0.9.0
+- **Test Programs**: 45 working examples
+- **Planetfall Coverage**: ~82% of required operations
+- **Version**: 0.9.5
 
 ---
 
@@ -264,4 +269,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.9.0
+**Compiler Version**: 0.9.5

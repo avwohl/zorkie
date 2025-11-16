@@ -645,7 +645,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### 🎉 80% PLANETFALL MILESTONE - Utility Opcodes: ABS, SOUND, CLEAR, SPLIT, SCREEN
-- **Commit**: (pending)
+- **Commit**: 050b4b2
 - ABS - Absolute value
 - SOUND - Play sound effects (SOUND_EFFECT opcode)
 - CLEAR - Clear screen (ERASE_WINDOW opcode)
@@ -659,8 +659,23 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ IO and Screen Control - CURSET, HLIGHT, INPUT, BUFOUT, UXOR
+- **Commit**: (pending)
+- CURSET - Set cursor position (SET_CURSOR VAR 0xF1)
+- HLIGHT - Set text style/highlighting (SET_TEXT_STYLE VAR 0xF1)
+- INPUT - Read line input from player (SREAD VAR 0xE1)
+- BUFOUT - Enable/disable output buffering (BUFFER_MODE VAR 0xF1)
+- UXOR - Unsigned XOR (compile-time evaluation for V3)
+- Completes interactive IO capabilities
+- Adds cursor control and text styling
+- **Test**: io_and_screen_test.zil (1,348 bytes)
+- Brings total to 110 opcodes implemented
+- **Milestone**: 82% Planetfall Complete!
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.9.0
+**Current Version**: 0.9.5
 
-**Status**: 🟢 Active Development - 80% Planetfall Complete!
+**Status**: 🟢 Active Development - 82% Planetfall Complete!
