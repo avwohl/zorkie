@@ -1,0 +1,203 @@
+# ZIL Opcodes Implemented in Zorkie Compiler
+
+## Overview
+This document lists all ZIL opcodes/operations currently implemented in the Zorkie compiler as of version 0.5.0.
+
+---
+
+## Control Flow (10 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| RTRUE | 0x00 (RET 1) | Return true | ✅ |
+| RFALSE | 0x01 (RET 0) | Return false | ✅ |
+| RETURN | RET | Return value | ✅ |
+| QUIT | QUIT | End game | ✅ |
+| RESTART | RESTART | Restart game | ✅ |
+| SAVE | SAVE | Save game | ✅ |
+| RESTORE | RESTORE | Restore game | ✅ |
+| VERIFY | VERIFY | Verify story file | ✅ |
+| COND | JZ/JE/etc | Multi-clause conditional | ✅ |
+| REPEAT | JMP | Loop with optional bindings | ✅ |
+
+---
+
+## Output/Print Operations (9 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| TELL | PRINT | Print inline string | ✅ |
+| PRINT | PRINT | Print inline string | ✅ |
+| CRLF | NEW_LINE | Print newline | ✅ |
+| PRINTN | PRINT_NUM | Print number | ✅ |
+| PRINTD | PRINT_NUM | Print decimal (alias) | ✅ |
+| PRINTC | PRINT_CHAR | Print character | ✅ |
+| PRINTB | PRINT_PADDR | Print from byte array | ✅ |
+| PRINTI | PRINT | Print inline (property) | ✅ |
+
+---
+
+## Variables & Assignment (4 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| SET | STORE | Assign local variable | ✅ |
+| SETG | STOREW/STOREB | Assign global variable | ✅ |
+| INC | INC | Increment variable | ✅ |
+| DEC | DEC | Decrement variable | ✅ |
+
+---
+
+## Arithmetic Operations (5 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| + / ADD | ADD | Addition | ✅ |
+| - / SUB | SUB | Subtraction | ✅ |
+| * / MUL | MUL | Multiplication | ✅ |
+| / / DIV | DIV | Division | ✅ |
+| MOD | MOD | Modulo | ✅ |
+
+---
+
+## Comparison & Predicates (6 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| EQUAL? / = | JE | Test equality | ✅ |
+| L? / < | JL | Less than | ✅ |
+| G? / > | JG | Greater than | ✅ |
+| ZERO? / 0? | JZ | Test if zero | ✅ |
+| IN? | GET_PARENT+JE | Test containment | ✅ |
+| FSET? | TEST_ATTR | Test object attribute | ✅ |
+
+---
+
+## Logical/Bitwise Operations (3 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| AND | AND | Bitwise AND | ✅ |
+| OR | OR | Bitwise OR | ✅ |
+| NOT | NOT | Bitwise NOT | ✅ |
+
+---
+
+## Object Operations (9 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| MOVE | INSERT_OBJ | Move object to parent | ✅ |
+| REMOVE | REMOVE_OBJ | Remove from parent | ✅ |
+| LOC | GET_PARENT | Get object's parent | ✅ |
+| FSET | SET_ATTR | Set object attribute | ✅ |
+| FCLEAR | CLEAR_ATTR | Clear object attribute | ✅ |
+| GET-CHILD / FIRST? | GET_CHILD | Get first child | ✅ |
+| GET-SIBLING / NEXT? | GET_SIBLING | Get next sibling | ✅ |
+| GET-PARENT | GET_PARENT | Get parent object | ✅ |
+
+---
+
+## Property Operations (5 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| GETP | GET_PROP | Get object property | ✅ |
+| PUTP | PUT_PROP | Set object property | ✅ |
+| PTSIZE | GET_PROP_LEN | Get property length | ✅ |
+| NEXTP | GET_NEXT_PROP | Get next property | ✅ |
+
+---
+
+## Table/Array Operations (8 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| GET | LOADW | Get word from table (1-based) | ✅ |
+| PUT | STOREW | Set word in table | ✅ |
+| GETB | LOADB | Get byte from table | ✅ |
+| PUTB | STOREB | Set byte in table | ✅ |
+| LOADW | LOADW | Load word (direct) | ✅ |
+| LOADB | LOADB | Load byte (direct) | ✅ |
+| STOREW | STOREW | Store word (direct) | ✅ |
+| STOREB | STOREB | Store byte (direct) | ✅ |
+
+---
+
+## Stack Operations (2 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| PUSH | PUSH | Push to stack | ✅ |
+| PULL | PULL | Pop from stack | ✅ |
+
+---
+
+## Parser/Game Operations (3 opcodes)
+
+| ZIL Opcode | Z-machine | Description | Status |
+|------------|-----------|-------------|--------|
+| VERB? | EQUAL+PRSA | Test verb action | ✅ |
+| PERFORM | CALL | Dispatch action | ✅ |
+| RANDOM | RANDOM | Random number | ✅ |
+
+---
+
+## Macro System (1 major feature)
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| DEFMAC | Macro definition and expansion | ✅ |
+| Quote operator (') | Quoted parameters | ✅ |
+| FORM constructor | Build code templates | ✅ |
+| Parameter substitution | .VAR references | ✅ |
+
+---
+
+## Compilation Features
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Multi-file compilation | IFILE support | ✅ |
+| PROPDEF | Property number assignment | ✅ |
+| SYNTAX | Parser syntax definitions | ✅ |
+| VOCABULARY | SYNONYM/ADJECTIVE | ✅ |
+| Parser globals | PRSA, PRSO, PRSI, HERE, etc. | ✅ |
+| Action constants | V?TAKE, V?DROP, etc. (32) | ✅ |
+
+---
+
+## Summary Statistics
+
+- **Total Opcodes**: 64+ distinct operations
+- **Opcode Categories**: 13 categories
+- **Test Programs**: 27 working examples
+- **Planetfall Coverage**: ~50% of required operations
+- **Version**: 0.5.0
+
+---
+
+## Not Yet Implemented (High Priority)
+
+| ZIL Opcode | Description | Planetfall Uses |
+|------------|-------------|-----------------|
+| QUEUE | Daemon scheduling | 78 |
+| DEQUEUE | Remove daemon | - |
+| INT | Interrupt control | 45 |
+| JIGS-UP | Game over routine | 42 |
+| REST | List tail operation | 37 |
+
+---
+
+## Not Yet Implemented (Medium Priority)
+
+- Advanced string operations (escape sequences)
+- BUZZ words (abbreviations)
+- Advanced compile-time operations (GASSIGNED?, etc.)
+- More sophisticated routine calling
+- Property table optimization
+
+---
+
+**Last Updated**: 2025-11-16
+**Compiler Version**: 0.5.0
