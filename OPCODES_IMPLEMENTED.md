@@ -158,7 +158,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Table/Array Operations (12 opcodes)
+## Table/Array Operations (16 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -174,6 +174,10 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | NTH | LOADW | Get Nth element (0-based) | ✅ |
 | ZGET | LOADW | Zero-based get (alias for NTH) | ✅ |
 | ZPUT | STOREW | Zero-based put (0-based indexing) | ✅ |
+| GETB2 | LOADB | Get byte with base+offset addressing | ✅ |
+| PUTB2 | STOREB | Put byte with base+offset addressing | ✅ |
+| GETW2 | LOADW | Get word with base+offset addressing | ✅ |
+| PUTW2 | STOREW | Put word with base+offset addressing | ✅ |
 
 ---
 
@@ -233,11 +237,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 127 distinct operations (124 working + 3 V5+ stubs)
+- **Total Opcodes**: 131 distinct operations (128 working + 3 V5+ stubs)
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 50 working examples
-- **Planetfall Coverage**: ~92% of required operations
-- **Version**: 1.1.5
+- **Test Programs**: 51 working examples
+- **Planetfall Coverage**: ~95% of required operations
+- **Version**: 1.2.0
 
 ---
 
@@ -286,4 +290,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.1.5
+**Compiler Version**: 1.2.0

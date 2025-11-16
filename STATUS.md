@@ -742,7 +742,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Final Opcodes & V5+ Compatibility - WINSIZE, COLOR, FONT
-- **Commit**: (pending)
+- **Commit**: 391a587
 - WINSIZE - Set window size (working - uses SPLIT for window 1)
 - COLOR - Set text colors (V5+ stub for compatibility)
 - FONT - Set font (V5+ stub for compatibility)
@@ -755,8 +755,31 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎉 95% PLANETFALL MILESTONE - Memory Operations: GETB2, PUTB2, GETW2, PUTW2
+- **Commit**: (pending)
+- GETB2 - Get byte with base+offset addressing
+  - Computes effective address at compile-time
+  - Uses LOADB with calculated address
+- PUTB2 - Put byte with base+offset addressing
+  - Stores byte at base+offset location
+  - Uses STOREB with calculated address
+- GETW2 - Get word with base+offset addressing
+  - Word offset automatically scaled (*2)
+  - Uses LOADW with calculated address
+- PUTW2 - Put word with base+offset addressing
+  - Word offset automatically scaled (*2)
+  - Uses STOREW with calculated address
+- Completes base+offset addressing family
+- Enables pointer arithmetic patterns
+- Essential for array traversal
+- **Test**: memory_ops_test.zil (1,359 bytes)
+- Brings total to 131 opcodes (128 working + 3 stubs)
+- **ACHIEVEMENT**: 🎉 95% Planetfall Complete! 🎉
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.1.5
+**Current Version**: 1.2.0
 
-**Status**: 🟢 Active Development - 92% Planetfall Complete!
+**Status**: 🟢 Active Development - 95% Planetfall Complete!

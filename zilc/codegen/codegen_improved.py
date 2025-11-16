@@ -357,6 +357,14 @@ class ImprovedCodeGenerator:
             return self.gen_color(form.operands)
         elif op_name == 'FONT':
             return self.gen_font(form.operands)
+        elif op_name == 'GETB2':
+            return self.gen_getb2(form.operands)
+        elif op_name == 'PUTB2':
+            return self.gen_putb2(form.operands)
+        elif op_name == 'GETW2':
+            return self.gen_getw2(form.operands)
+        elif op_name == 'PUTW2':
+            return self.gen_putw2(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -1927,6 +1935,163 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code (stub)
         """
         return b''
+
+    def gen_intbl(self, operands: List[ASTNode]) -> bytes:
+        """Generate INTBL? (check if value in table).
+
+        <INTBL? value table length> searches table for value.
+        Returns true if found.
+
+        Args:
+            operands[0]: Value to search for
+            operands[1]: Table address
+            operands[2]: Table length
+
+        Returns:
+            bytes: Z-machine code (stub - needs loop)
+        """
+        # INTBL? needs loop generation to search
+        # For now, stub
+        return b''
+
+    def gen_zero_table(self, operands: List[ASTNode]) -> bytes:
+        """Generate ZERO (zero out table).
+
+        <ZERO table length> fills table with zeros.
+        Uses repeated STOREW operations.
+
+        Args:
+            operands[0]: Table address
+            operands[1]: Number of words to zero
+
+        Returns:
+            bytes: Z-machine code (stub - needs loop)
+        """
+        # ZERO needs loop generation
+        return b''
+
+    def gen_getb2(self, operands: List[ASTNode]) -> bytes:
+        """Generate GETB2 (get byte with base+offset).
+
+        <GETB2 base offset> gets byte at base+offset.
+        Uses ADD to compute address, then LOADB.
+
+        Args:
+            operands[0]: Base address
+            operands[1]: Offset
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        base = self.get_operand_value(operands[0])
+        offset = self.get_operand_value(operands[1])
+
+        if isinstance(base, int) and isinstance(offset, int):
+            # Calculate effective address
+            addr = base + offset
+            if 0 <= addr <= 255:
+                code.append(0x90)  # LOADB (1OP opcode 0x10)
+                code.append(addr & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_putb2(self, operands: List[ASTNode]) -> bytes:
+        """Generate PUTB2 (put byte with base+offset).
+
+        <PUTB2 base offset value> stores byte at base+offset.
+        Uses ADD to compute address, then STOREB.
+
+        Args:
+            operands[0]: Base address
+            operands[1]: Offset
+            operands[2]: Value to store
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+        base = self.get_operand_value(operands[0])
+        offset = self.get_operand_value(operands[1])
+        value = self.get_operand_value(operands[2])
+
+        if isinstance(base, int) and isinstance(offset, int) and isinstance(value, int):
+            # Calculate effective address
+            addr = base + offset
+            if 0 <= addr <= 255:
+                code.append(0xA1)  # STOREB (2OP opcode 0x02, variable form)
+                code.append(addr & 0xFF)
+                code.append(value & 0xFF)
+
+        return bytes(code)
+
+    def gen_getw2(self, operands: List[ASTNode]) -> bytes:
+        """Generate GETW2 (get word with base+offset).
+
+        <GETW2 base offset> gets word at base+offset.
+
+        Args:
+            operands[0]: Base address
+            operands[1]: Offset (in words)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        base = self.get_operand_value(operands[0])
+        offset = self.get_operand_value(operands[1])
+
+        if isinstance(base, int) and isinstance(offset, int):
+            # Word offset needs *2
+            addr = base + (offset * 2)
+            if 0 <= addr <= 255:
+                code.append(0x8F)  # LOADW (1OP opcode 0x0F)
+                code.append(addr & 0xFF)
+                code.append(0x00)
+
+        return bytes(code)
+
+    def gen_putw2(self, operands: List[ASTNode]) -> bytes:
+        """Generate PUTW2 (put word with base+offset).
+
+        <PUTW2 base offset value> stores word at base+offset.
+
+        Args:
+            operands[0]: Base address
+            operands[1]: Offset (in words)
+            operands[2]: Value to store
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+        base = self.get_operand_value(operands[0])
+        offset = self.get_operand_value(operands[1])
+        value = self.get_operand_value(operands[2])
+
+        if isinstance(base, int) and isinstance(offset, int) and isinstance(value, int):
+            # Word offset needs *2
+            addr = base + (offset * 2)
+            if 0 <= addr <= 255:
+                code.append(0xE1)  # STOREW (VAR form)
+                code.append(0x15)  # Type byte: 2 small constants
+                code.append(addr & 0xFF)
+                code.append(value & 0xFF)
+
+        return bytes(code)
 
     # ===== Comparison Operations =====
 
