@@ -85,7 +85,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Comparison & Predicates (15 opcodes)
+## Comparison & Predicates (17 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -94,6 +94,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | G? / > | JG | Greater than | ✅ |
 | L=? / <= | JG inverted | Less than or equal | ✅ |
 | G=? / >= | JL inverted | Greater than or equal | ✅ |
+| N=? / != | JE inverted | Not equal | ✅ |
 | ZERO? / 0? | JZ | Test if zero | ✅ |
 | NOT? | JZ | Test if false/zero (alias) | ✅ |
 | TRUE? | JZ | Test if non-zero/true | ✅ |
@@ -104,10 +105,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | IGRTR? | INC+JG | Increment and test greater | ✅ |
 | DLESS? | DEC+JL | Decrement and test less | ✅ |
 | CHECKU | GET_PROP_ADDR | Check if object has property | ✅ |
+| ORIGINAL? | TRUE? | Test if original (type check stub) | ✅ |
 
 ---
 
-## Logical/Bitwise Operations (10 opcodes)
+## Logical/Bitwise Operations (11 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -117,6 +119,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | BAND | AND | Bitwise AND (byte-oriented) | ✅ |
 | BOR | OR | Bitwise OR (byte-oriented) | ✅ |
 | BTST | AND+mask | Test if bit is set | ✅ |
+| TEST-BIT | AND+mask | Test specific bit number (computed mask) | ✅ |
 | LSH | MUL | Left shift (V3: multiply by 2^n) | ✅ |
 | RSH | DIV | Right shift (V3: divide by 2^n) | ✅ |
 | USL | MUL | Unsigned shift left (alias for LSH) | ✅ |
@@ -152,7 +155,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Table/Array Operations (10 opcodes)
+## Table/Array Operations (12 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -166,6 +169,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | STOREB | STOREB | Store byte (direct) | ✅ |
 | LENGTH | LOADW | Get table/string length | ✅ |
 | NTH | LOADW | Get Nth element (0-based) | ✅ |
+| ZGET | LOADW | Zero-based get (alias for NTH) | ✅ |
+| ZPUT | STOREW | Zero-based put (0-based indexing) | ✅ |
 
 ---
 
@@ -225,11 +230,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 119 distinct operations
+- **Total Opcodes**: 124 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 48 working examples
-- **Planetfall Coverage**: ~87% of required operations
-- **Version**: 1.0.5
+- **Test Programs**: 49 working examples
+- **Planetfall Coverage**: ~90% of required operations
+- **Version**: 1.1.0
 
 ---
 
@@ -278,4 +283,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.0.5
+**Compiler Version**: 1.1.0

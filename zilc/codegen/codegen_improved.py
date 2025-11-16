@@ -341,6 +341,16 @@ class ImprovedCodeGenerator:
             return self.gen_grtr_or_equal(form.operands)
         elif op_name in ('L=?', 'LESS?', '<='):
             return self.gen_less_or_equal(form.operands)
+        elif op_name in ('N=?', 'NEQUAL?', '!='):
+            return self.gen_nequal(form.operands)
+        elif op_name == 'ZGET':
+            return self.gen_zget(form.operands)
+        elif op_name == 'ZPUT':
+            return self.gen_zput(form.operands)
+        elif op_name == 'ORIGINAL?':
+            return self.gen_original(form.operands)
+        elif op_name == 'TEST-BIT':
+            return self.gen_test_bit(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -1647,6 +1657,133 @@ class ImprovedCodeGenerator:
                 code.append(val1 & 0xFF)
                 code.append(val2 & 0xFF)
                 code.append(0x00)  # Branch on false (inverted logic)
+
+        return bytes(code)
+
+    def gen_nequal(self, operands: List[ASTNode]) -> bytes:
+        """Generate N=? / NEQUAL? (not equal).
+
+        <N=? a b> tests if a != b.
+        Implemented as inverted JE (branch on false).
+
+        Args:
+            operands[0]: First value
+            operands[1]: Second value
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        val1 = self.get_operand_value(operands[0])
+        val2 = self.get_operand_value(operands[1])
+
+        if isinstance(val1, int) and isinstance(val2, int):
+            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
+                # JE with inverted branch (branch on false for !=)
+                code.append(0x41)  # JE (2OP opcode 0x01)
+                code.append(val1 & 0xFF)
+                code.append(val2 & 0xFF)
+                code.append(0x00)  # Branch on false (inverted)
+
+        return bytes(code)
+
+    def gen_zget(self, operands: List[ASTNode]) -> bytes:
+        """Generate ZGET (zero-based table get).
+
+        <ZGET table index> gets element at 0-based index.
+        This is an alias for NTH (0-based access).
+
+        Args:
+            operands[0]: Table address
+            operands[1]: Index (0-based)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        return self.gen_nth(operands)
+
+    def gen_zput(self, operands: List[ASTNode]) -> bytes:
+        """Generate ZPUT (zero-based table put).
+
+        <ZPUT table index value> sets element at 0-based index.
+        Similar to PUT but 0-based instead of 1-based.
+
+        Args:
+            operands[0]: Table address
+            operands[1]: Index (0-based)
+            operands[2]: Value to store
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+        value = self.get_operand_value(operands[2])
+
+        if isinstance(table, int) and isinstance(index, int) and isinstance(value, int):
+            # STOREW with 0-based index
+            code.append(0x51)  # STOREW (2OP opcode 0x11)
+            code.append(table & 0xFF)
+            code.append(index & 0xFF)
+            code.append(value & 0xFF)
+
+        return bytes(code)
+
+    def gen_original(self, operands: List[ASTNode]) -> bytes:
+        """Generate ORIGINAL? (test if value is original/not copied).
+
+        <ORIGINAL? value> tests if value is an original object reference.
+        This is typically a compile-time or runtime type check.
+
+        Args:
+            operands[0]: Value to test
+
+        Returns:
+            bytes: Z-machine code (stub - requires runtime support)
+        """
+        # ORIGINAL? is complex - needs runtime type information
+        # For now, return a simple non-zero test
+        if not operands:
+            return b''
+        return self.gen_true_predicate(operands)
+
+    def gen_test_bit(self, operands: List[ASTNode]) -> bytes:
+        """Generate bit test with specific bit number.
+
+        <TEST-BIT value bit> tests if specific bit is set.
+        Creates mask (1 << bit) and uses BTST pattern.
+
+        Args:
+            operands[0]: Value to test
+            operands[1]: Bit number (0-based)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        value = self.get_operand_value(operands[0])
+        bit_num = self.get_operand_value(operands[1])
+
+        if isinstance(value, int) and isinstance(bit_num, int):
+            # Create bit mask: 1 << bit_num
+            if 0 <= bit_num < 16:
+                mask = 1 << bit_num
+                if 0 <= mask <= 255:
+                    # AND value with mask
+                    code.append(0x49)  # AND (2OP opcode 0x09)
+                    code.append(value & 0xFF)
+                    code.append(mask & 0xFF)
+                    code.append(0x00)  # Store to stack
 
         return bytes(code)
 

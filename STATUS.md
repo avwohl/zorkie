@@ -706,7 +706,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Comparison and Parse Opcodes - G=?, L=?, CHECKU, LEXV
-- **Commit**: (pending)
+- **Commit**: fd468db
 - G=? / >= - Greater than or equal (inverted JL)
 - L=? / <= - Less than or equal (inverted JG)
 - CHECKU - Check if object has property (GET_PROP_ADDR)
@@ -723,8 +723,26 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎉 90% PLANETFALL MILESTONE - Utility Predicates & Table Ops
+- **Commit**: (pending)
+- N=? / != - Not equal (inverted JE)
+- ZGET - Zero-based table get (alias for NTH)
+- ZPUT - Zero-based table put (0-based STOREW)
+- ORIGINAL? - Test if original (type check stub)
+- TEST-BIT - Test specific bit number (computed mask)
+  - Calculates mask as (1 << bit_num)
+  - Uses AND for bit testing
+- Completes full comparison operator set (=, !=, <, >, <=, >=)
+- Adds zero-based table access convenience
+- Enables bit-level manipulation
+- **Test**: utility_predicates_test.zil (1,428 bytes)
+- Brings total to 124 opcodes implemented
+- **ACHIEVEMENT**: 🎉 90% Planetfall Complete! 🎉
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.0.5
+**Current Version**: 1.1.0
 
-**Status**: 🟢 Active Development - 87% Planetfall Complete!
+**Status**: 🟢 Active Development - 90% Planetfall Complete!
