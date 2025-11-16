@@ -452,16 +452,23 @@ Current feature implementation vs. Planetfall requirements:
 - **Essential for**: Planetfall (300+ uses of GET/PUT operations)
 
 ### ✅ IN? Object Containment Predicate
-- **Commit**: c74fc09
+- **Commit**: c74fc09, 4a1d791
 - Tests if obj1 is directly contained in obj2 (parent check)
 - Uses GET_PARENT + JE branch instruction combination
 - **Test**: in_test.zil (1,195 bytes)
 - **Essential for**: Planetfall (133 uses)
 
+### ✅ ZERO? and Additional Predicates
+- **Commit**: f655318
+- ZERO? (0?) - test if value equals zero using JZ instruction
+- Enhanced predicate testing coverage
+- **Test**: predicate_test.zil (1,214 bytes)
+- Tests ZERO?, EQUAL?, L?, G? predicates
+
 ---
 
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.4.2 (Parser + Multi-file + PROPDEF + DEFMAC + Tables + IN?)
+**Current Version**: 0.4.3 (Parser + Multi-file + PROPDEF + DEFMAC + Tables + Predicates)
 
 **Status**: 🟢 Active Development - Ready for Real Game Compilation!
