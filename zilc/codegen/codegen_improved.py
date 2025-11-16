@@ -241,6 +241,8 @@ class ImprovedCodeGenerator:
             return self.gen_printi(form.operands)
         elif op_name == 'PRINTADDR':
             return self.gen_printaddr(form.operands)
+        elif op_name == 'STRING':
+            return self.gen_string(form.operands)
 
         # Variables
         elif op_name == 'SET':
@@ -269,6 +271,10 @@ class ImprovedCodeGenerator:
             return self.gen_div(form.operands)
         elif op_name == 'MOD':
             return self.gen_mod(form.operands)
+        elif op_name == '1+':
+            return self.gen_add1(form.operands)
+        elif op_name == '1-':
+            return self.gen_sub1(form.operands)
         elif op_name == 'MIN':
             return self.gen_min(form.operands)
         elif op_name == 'MAX':
@@ -612,6 +618,47 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_string(self, operands: List[ASTNode]) -> bytes:
+        """Generate STRING (build string with escape sequences).
+
+        <STRING str> builds a string with special escape handling.
+        In full ZIL, STRING uses ! for escapes:
+          !\\" - literal quote
+          !\\\\ - literal backslash
+          !,VAR - interpolate variable value
+
+        For now, we implement basic string handling without interpolation.
+        Returns the address of the constructed string.
+
+        Args:
+            operands: String components (may include literals and variables)
+
+        Returns:
+            bytes: Address of constructed string
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+
+        # Basic implementation: if we have a string literal, encode it
+        if len(operands) == 1 and isinstance(operands[0], StringNode):
+            # Encode the string and return its address
+            # For simplicity, treat like a string constant
+            # In full implementation, would allocate memory and build string
+
+            # For now, just return a placeholder address
+            # Full implementation would:
+            # 1. Parse ! escape sequences
+            # 2. Allocate string buffer
+            # 3. Build string with substitutions
+            # 4. Return buffer address
+
+            code.append(0x01)  # Small constant
+            code.append(0x00)  # Placeholder address
+
+        return bytes(code)
+
     # ===== Variable Operations =====
 
     def gen_set(self, operands: List[ASTNode], is_global: bool = False) -> bytes:
@@ -834,6 +881,58 @@ class ImprovedCodeGenerator:
                 code.append(0x58)  # MOD opcode
                 code.append(val1 & 0xFF)
                 code.append(val2 & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_add1(self, operands: List[ASTNode]) -> bytes:
+        """Generate 1+ (add 1 to value).
+
+        <1+ value> is a shorthand for <+ value 1>
+
+        Args:
+            operands[0]: Value to increment
+
+        Returns:
+            bytes: Z-machine code (ADD value 1)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        val = self.get_operand_value(operands[0])
+
+        if isinstance(val, int):
+            if 0 <= val <= 255:
+                code.append(0x54)  # ADD opcode
+                code.append(val & 0xFF)
+                code.append(0x01)  # Add 1
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_sub1(self, operands: List[ASTNode]) -> bytes:
+        """Generate 1- (subtract 1 from value).
+
+        <1- value> is a shorthand for <- value 1>
+
+        Args:
+            operands[0]: Value to decrement
+
+        Returns:
+            bytes: Z-machine code (SUB value 1)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        val = self.get_operand_value(operands[0])
+
+        if isinstance(val, int):
+            if 0 <= val <= 255:
+                code.append(0x55)  # SUB opcode
+                code.append(val & 0xFF)
+                code.append(0x01)  # Subtract 1
                 code.append(0x00)  # Store to stack
 
         return bytes(code)

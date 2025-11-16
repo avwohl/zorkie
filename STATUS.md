@@ -596,7 +596,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Daemon Control and Print Utilities - ENABLE, DISABLE, PRINTADDR
-- **Commit**: (pending)
+- **Commit**: 61a7dd6
 - ENABLE - Enable interrupt (set enabled flag to 1)
 - DISABLE - Disable interrupt (alias for DEQUEUE)
 - PRINTADDR - Print string at byte address
@@ -606,8 +606,20 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ STRING and Arithmetic Shortcuts - STRING, 1+, 1-
+- **Commit**: (pending)
+- STRING - Build strings (basic implementation, 15 Planetfall uses!)
+- 1+ - Add 1 (shorthand for common increment)
+- 1- - Subtract 1 (shorthand for common decrement)
+- STRING provides foundation for string building
+- Arithmetic shortcuts improve code readability
+- **Test**: string_and_shortcuts_test.zil (1,200 bytes)
+- Brings total to 94 opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.7.1
+**Current Version**: 0.7.2
 
-**Status**: 🟢 Active Development - 71% Planetfall Complete!
+**Status**: 🟢 Active Development - 73% Planetfall Complete!

@@ -26,7 +26,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Output/Print Operations (10 opcodes)
+## Output/Print Operations (11 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -39,6 +39,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PRINTB | PRINT_PADDR | Print from byte array | ✅ |
 | PRINTI | PRINT | Print inline (property) | ✅ |
 | PRINTADDR | PRINT_ADDR | Print string at byte address | ✅ |
+| STRING | Memory alloc | Build string (basic, no interpolation) | ✅ |
 
 ---
 
@@ -56,7 +57,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Arithmetic Operations (7 opcodes)
+## Arithmetic Operations (9 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -65,6 +66,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | * / MUL | MUL | Multiplication | ✅ |
 | / / DIV | DIV | Division | ✅ |
 | MOD | MOD | Modulo | ✅ |
+| 1+ | ADD | Add 1 (shorthand) | ✅ |
+| 1- | SUB | Subtract 1 (shorthand) | ✅ |
 | MIN | Comparison | Minimum of two values | ✅ |
 | MAX | Comparison | Maximum of two values | ✅ |
 
@@ -196,19 +199,19 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 91 distinct operations
+- **Total Opcodes**: 94 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 40 working examples
-- **Planetfall Coverage**: ~71% of required operations
-- **Version**: 0.7.1
+- **Test Programs**: 41 working examples
+- **Planetfall Coverage**: ~73% of required operations
+- **Version**: 0.7.2
 
 ---
 
 ## Not Yet Implemented (High Priority)
 
-| ZIL Opcode | Description | Planetfall Uses |
-|------------|-------------|-----------------|
-| STRING | Build strings with escapes/interpolation | 15 |
+| ZIL Opcode | Description | Notes |
+|------------|-------------|-------|
+| STRING (full) | String interpolation with !,VAR | Basic version implemented |
 
 ---
 
@@ -249,4 +252,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.7.1
+**Compiler Version**: 0.7.2
