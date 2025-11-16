@@ -481,6 +481,28 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+## Recent Session Updates (2025-11-16 continued)
+
+### ✅ Lexer Improvements - Backslash in Atoms
+- **Commit**: 1e5ee0f
+- Allow backslash `\` in atom characters for patterns like `!\=`
+- Enables parsing of ZIL source with special character sequences
+- **Test**: string_escape_test.zil (1,010 bytes)
+
+### ✅ String Escape Sequences
+- Regular string literals support: `\n`, `\t`, `\\`, `\"`
+- Documented in OPCODES_IMPLEMENTED.md
+- STRING form escapes (`!\"`, `!\\`, `!,VAR`) deferred - requires STRING opcode
+
+### 📋 Daemon System Design
+- **Document**: docs/DAEMON_SYSTEM_DESIGN.md
+- Complete specification for QUEUE/DEQUEUE/INT opcodes
+- Interrupt table format and runtime CLOCKER system
+- Critical for Planetfall (78 QUEUE uses, 45 INT uses)
+- **Status**: Designed, not yet implemented (HIGH complexity, 2-3 sessions)
+
+---
+
 **Last Updated**: 2025-11-16
 
 **Current Version**: 0.5.0 (Complete property/table system + DEFMAC + Print ops)
