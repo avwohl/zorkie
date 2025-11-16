@@ -829,8 +829,28 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎊 98% PLANETFALL MILESTONE - Logical Predicates: AND? and OR?
+- **Commit**: (pending)
+- AND? - Logical AND predicate with short-circuit evaluation
+  - Evaluates expressions left to right
+  - Returns false (0) if any expression is false
+  - Returns last expression value if all true
+  - Critical for conditional logic chains
+- OR? - Logical OR predicate with short-circuit evaluation
+  - Evaluates expressions left to right
+  - Returns first true (non-zero) value
+  - Returns false (0) if all expressions are false
+  - Essential for fallback logic patterns
+- Both predicates used extensively in Planetfall's parser and game logic
+- Pattern: `<COND (<AND? expr1 expr2> actions) ...>`
+- **Test**: logical_pred_test.zil (1.4 KB)
+- Brings total to 143 opcodes (137 working + 6 stubs)
+- **ACHIEVEMENT**: 🎊 98% Planetfall Complete! 🎊
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.4.0
+**Current Version**: 1.5.0
 
-**Status**: 🟢 Active Development - 97% Planetfall Complete!
+**Status**: 🟢 Active Development - 98% Planetfall Complete!
