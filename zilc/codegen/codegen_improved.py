@@ -301,6 +301,16 @@ class ImprovedCodeGenerator:
         elif op_name == 'STOREB':
             return self.gen_storeb(form.operands)
 
+        # Table operations (higher-level)
+        elif op_name == 'GET':
+            return self.gen_get(form.operands)
+        elif op_name == 'PUT':
+            return self.gen_put(form.operands)
+        elif op_name == 'GETB':
+            return self.gen_getb(form.operands)
+        elif op_name == 'PUTB':
+            return self.gen_putb(form.operands)
+
         # Stack operations
         elif op_name == 'PUSH':
             return self.gen_push(form.operands)
@@ -1296,6 +1306,105 @@ class ImprovedCodeGenerator:
             code.append(0xE2)  # VAR form, opcode 0x02
             code.append(0x15)  # Type byte: 3 small constants
             code.append(array & 0xFF)
+            code.append(index & 0xFF)
+            code.append(value & 0xFF)
+
+        return bytes(code)
+
+    # ===== Table Operations (ZIL high-level) =====
+
+    def gen_get(self, operands: List[ASTNode]) -> bytes:
+        """Generate GET (table word access, 1-based index).
+
+        <GET table index> reads word from table[index].
+        In ZIL, tables are 1-based (GET table 1 is first element).
+        Z-machine LOADW uses word offsets (0-based).
+
+        For simplicity, we directly use LOADW and assume the index is already adjusted.
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+
+        # LOADW is 2OP opcode 0x0F
+        if isinstance(table, int) and isinstance(index, int):
+            # For now, support only constant addresses/indices
+            # In real usage, table will be a global variable address
+            code.append(0x4F)  # Long form, opcode 0x0F
+            code.append(table & 0xFF)
+            code.append(index & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_put(self, operands: List[ASTNode]) -> bytes:
+        """Generate PUT (table word write, 1-based index).
+
+        <PUT table index value> writes value to table[index].
+        Uses Z-machine STOREW instruction.
+        """
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+        value = self.get_operand_value(operands[2])
+
+        # STOREW is VAR opcode 0x01
+        if isinstance(table, int) and isinstance(index, int) and isinstance(value, int):
+            code.append(0xE1)  # VAR form, opcode 0x01
+            code.append(0x15)  # Type byte: 3 small constants
+            code.append(table & 0xFF)
+            code.append(index & 0xFF)
+            code.append(value & 0xFF)
+
+        return bytes(code)
+
+    def gen_getb(self, operands: List[ASTNode]) -> bytes:
+        """Generate GETB (table byte access, 0-based index).
+
+        <GETB table index> reads byte from table[index].
+        Uses Z-machine LOADB instruction.
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+
+        # LOADB is 2OP opcode 0x10
+        if isinstance(table, int) and isinstance(index, int):
+            code.append(0x50)  # Long form, opcode 0x10
+            code.append(table & 0xFF)
+            code.append(index & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_putb(self, operands: List[ASTNode]) -> bytes:
+        """Generate PUTB (table byte write, 0-based index).
+
+        <PUTB table index value> writes byte value to table[index].
+        Uses Z-machine STOREB instruction.
+        """
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+        index = self.get_operand_value(operands[1])
+        value = self.get_operand_value(operands[2])
+
+        # STOREB is VAR opcode 0x02
+        if isinstance(table, int) and isinstance(index, int) and isinstance(value, int):
+            code.append(0xE2)  # VAR form, opcode 0x02
+            code.append(0x15)  # Type byte: 3 small constants
+            code.append(table & 0xFF)
             code.append(index & 0xFF)
             code.append(value & 0xFF)
 
