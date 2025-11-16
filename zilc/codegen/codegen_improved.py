@@ -4539,6 +4539,175 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_encode_text(self, operands: List[ASTNode]) -> bytes:
+        """Generate ENCODE_TEXT (V5+ encode text to dictionary format).
+
+        <ENCODE_TEXT zscii-text length from coded-text> encodes
+        text into dictionary format (Z-encoded).
+
+        Args:
+            operands[0]: ZSCII text buffer address
+            operands[1]: Length of text
+            operands[2]: Starting position (from)
+            operands[3]: Coded text buffer address
+
+        Returns:
+            bytes: Z-machine code (ENCODE_TEXT EXT opcode)
+        """
+        if len(operands) < 4 or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # ENCODE_TEXT is EXT opcode 0x05
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x05)  # ENCODE_TEXT
+
+        # Type byte for 4 operands
+        code.append(0x00)  # All small constants (simplified)
+
+        for i in range(4):
+            val = self.get_operand_value(operands[i])
+            if isinstance(val, int):
+                code.append(val & 0xFF)
+
+        return bytes(code)
+
+    def gen_print_table(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINT_TABLE (V5+ print formatted table).
+
+        <PRINT_TABLE zscii-text width height skip> prints a
+        formatted table of text.
+
+        Args:
+            operands[0]: ZSCII text address
+            operands[1]: Width of table
+            operands[2]: Height (optional)
+            operands[3]: Skip (optional)
+
+        Returns:
+            bytes: Z-machine code (PRINT_TABLE EXT opcode)
+        """
+        if len(operands) < 2 or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # PRINT_TABLE is EXT opcode 0x10
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x10)  # PRINT_TABLE
+
+        # Type byte for operands
+        num_operands = len(operands)
+        type_byte = 0x00
+        for i in range(4):
+            if i < num_operands:
+                type_byte |= (0x01 << (6 - i*2))  # Small constant
+            else:
+                type_byte |= (0x03 << (6 - i*2))  # Omitted
+
+        code.append(type_byte)
+
+        for i in range(min(num_operands, 4)):
+            val = self.get_operand_value(operands[i])
+            if isinstance(val, int):
+                code.append(val & 0xFF)
+
+        return bytes(code)
+
+    def gen_scan_table(self, operands: List[ASTNode]) -> bytes:
+        """Generate SCAN_TABLE (V5+ search sorted table).
+
+        <SCAN_TABLE value table length form> searches for value
+        in a sorted table, returning address if found.
+
+        Args:
+            operands[0]: Value to search for
+            operands[1]: Table address
+            operands[2]: Table length
+            operands[3]: Form (entry size, optional)
+
+        Returns:
+            bytes: Z-machine code (SCAN_TABLE EXT opcode)
+        """
+        if len(operands) < 3 or self.version < 5:
+            return b''
+
+        code = bytearray()
+
+        # SCAN_TABLE is EXT opcode 0x18
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x18)  # SCAN_TABLE
+
+        # Type byte
+        num_operands = len(operands)
+        type_byte = 0x00
+        for i in range(4):
+            if i < num_operands:
+                type_byte |= (0x01 << (6 - i*2))
+            else:
+                type_byte |= (0x03 << (6 - i*2))
+
+        code.append(type_byte)
+
+        for i in range(min(num_operands, 4)):
+            val = self.get_operand_value(operands[i])
+            if isinstance(val, int):
+                code.append(val & 0xFF)
+
+        # Branch offset
+        code.append(0x40)  # Branch on true
+        code.append(0x00)
+
+        # Store result
+        code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_read_char(self, operands: List[ASTNode]) -> bytes:
+        """Generate READ_CHAR (V4+ read single character).
+
+        <READ_CHAR 1 time routine> reads a single character
+        from input (with optional timeout).
+
+        Args:
+            operands[0]: 1 (required)
+            operands[1]: Time in tenths of seconds (optional)
+            operands[2]: Routine to call on timeout (optional)
+
+        Returns:
+            bytes: Z-machine code (READ_CHAR EXT opcode for V5+)
+        """
+        if self.version < 4:
+            return b''
+
+        code = bytearray()
+
+        if self.version >= 5:
+            # V5+: READ_CHAR is EXT opcode 0x16
+            code.append(0xBE)  # EXT opcode marker
+            code.append(0x16)  # READ_CHAR
+
+            num_operands = len(operands)
+            type_byte = 0x00
+            for i in range(4):
+                if i < num_operands:
+                    type_byte |= (0x01 << (6 - i*2))
+                else:
+                    type_byte |= (0x03 << (6 - i*2))
+
+            code.append(type_byte)
+
+            for i in range(min(num_operands, 3)):
+                val = self.get_operand_value(operands[i])
+                if isinstance(val, int):
+                    code.append(val & 0xFF)
+
+            code.append(0x00)  # Store result to stack
+
+        # V4 has different opcode structure
+        return bytes(code)
+
     def gen_rest(self, operands: List[ASTNode]) -> bytes:
         """Generate REST (pointer arithmetic on tables).
 

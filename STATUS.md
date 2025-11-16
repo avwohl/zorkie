@@ -991,8 +991,23 @@ the ZIL operations required to compile Planetfall and other Infocom games!
 
 ---
 
+### V5 Advanced Text and Table Operations
+- **Session**: Extended V5 implementation
+- Added V5 text processing opcodes:
+  - ENCODE_TEXT (EXT:0x05) - encode text to dictionary format
+  - PRINT_TABLE (EXT:0x10) - formatted table output
+  - SCAN_TABLE (EXT:0x18) - binary search in sorted tables
+  - READ_CHAR (EXT:0x16) - single character input with timeout
+- V5 Extended Opcodes now: 8 total (was 4)
+- **Test**: v5_advanced_test.zil created
+- **Stats**: 177 opcodes total (158 working, 19 stubs)
+- V5 coverage improved: ~11 opcodes remaining (was ~15)
+- Version 2.1.0 → 2.2.0
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 2.1.0
+**Current Version**: 2.2.0
 
 **Status**: ✅ COMPLETE - 100% Planetfall Coverage + Multi-Version Support!

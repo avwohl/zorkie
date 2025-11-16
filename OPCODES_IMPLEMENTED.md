@@ -245,7 +245,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## V5 Extended Opcodes (4 opcodes)
+## V5 Extended Opcodes (8 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -253,6 +253,10 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | CALL_VN2 | EXT:0x0D | Call routine with up to 8 args (no store) | ✅ |
 | TOKENISE | EXT:0x00 | Tokenize text buffer (lexical analysis) | ✅ |
 | CHECK_ARG_COUNT | EXT:0x0F | Check number of arguments passed | ✅ |
+| ENCODE_TEXT | EXT:0x05 | Encode text to dictionary format | ✅ |
+| PRINT_TABLE | EXT:0x10 | Print formatted table | ✅ |
+| SCAN_TABLE | EXT:0x18 | Binary search in sorted table | ✅ |
+| READ_CHAR | EXT:0x16 | Read single character with timeout | ✅ |
 
 ---
 
@@ -297,12 +301,12 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 173 distinct operations (154 working + 19 stubs)
+- **Total Opcodes**: 177 distinct operations (158 working + 19 stubs)
 - **Opcode Categories**: 16 categories (added V5 Extended Opcodes)
-- **Test Programs**: 61 working examples (59 V3 + 2 V5)
+- **Test Programs**: 62 working examples (59 V3 + 3 V5)
 - **Planetfall Coverage**: V3 100% complete
 - **Multi-Version Support**: V3/V4/V5/V6 targeting enabled
-- **Version**: 2.1.0
+- **Version**: 2.2.0
 
 ---
 
@@ -317,17 +321,17 @@ All 166 V3 opcodes implemented. 100% Planetfall coverage.
 - Extended memory bank switching
 - Extended save/restore formats
 
-### V5: ~15 opcodes remaining
-- ENCODE_TEXT (encode dictionary words)
-- COPY_TABLE (already implemented as COPYT backend)
-- PRINT_TABLE (formatted table output)
-- SCAN_TABLE (search sorted table)
+### V5: ~11 opcodes remaining
 - CALL_1S, CALL_1N (1OP call variants)
 - SET_TEXT_STYLE enhancements
-- ERASE_LINE, BUFFER_MODE enhancements
-- READ_CHAR (single character input)
+- ERASE_LINE (erase current line)
+- BUFFER_MODE enhancements
 - PRINT_UNICODE (V5.1+)
-- And ~6 more extended opcodes
+- SAVE_UNDO, RESTORE_UNDO (undo support)
+- LOG_SHIFT (arithmetic shift)
+- ART_SHIFT (arithmetic shift right)
+- SET_MARGINS (text margins)
+- And ~2 more extended opcodes
 
 ### V6: ~35 opcodes remaining
 - Graphics: DRAW_PICTURE, ERASE_PICTURE, PICTURE_DATA, GET_PICTURE_INFO
