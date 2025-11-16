@@ -351,6 +351,12 @@ class ImprovedCodeGenerator:
             return self.gen_original(form.operands)
         elif op_name == 'TEST-BIT':
             return self.gen_test_bit(form.operands)
+        elif op_name == 'WINSIZE':
+            return self.gen_winsize(form.operands)
+        elif op_name == 'COLOR':
+            return self.gen_color(form.operands)
+        elif op_name == 'FONT':
+            return self.gen_font(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -1786,6 +1792,141 @@ class ImprovedCodeGenerator:
                     code.append(0x00)  # Store to stack
 
         return bytes(code)
+
+    def gen_color(self, operands: List[ASTNode]) -> bytes:
+        """Generate COLOR (set foreground/background colors).
+
+        <COLOR foreground background> sets text colors.
+        In V5+, uses SET_COLOUR. For V3, this is a stub.
+
+        Args:
+            operands[0]: Foreground color
+            operands[1]: Background color (optional)
+
+        Returns:
+            bytes: Z-machine code (stub for V3)
+        """
+        # SET_COLOUR is V5+, V3 doesn't support it
+        return b''
+
+    def gen_font(self, operands: List[ASTNode]) -> bytes:
+        """Generate FONT (set font).
+
+        <FONT font-number> sets the current font.
+        In V5+, uses SET_FONT. For V3, this is a stub.
+
+        Args:
+            operands[0]: Font number
+
+        Returns:
+            bytes: Z-machine code (stub for V3)
+        """
+        # SET_FONT is V5+
+        return b''
+
+    def gen_mouse_info(self, operands: List[ASTNode]) -> bytes:
+        """Generate MOUSE-INFO (get mouse information).
+
+        Gets mouse position and button state.
+        V5+ only, stub for V3.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # MOUSE_INFO is V5+
+        return b''
+
+    def gen_picinf(self, operands: List[ASTNode]) -> bytes:
+        """Generate PICINF (get picture information).
+
+        Gets picture dimensions and availability.
+        V6+ only, stub for V3.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # PICINF is V6+
+        return b''
+
+    def gen_margin(self, operands: List[ASTNode]) -> bytes:
+        """Generate MARGIN (set margins).
+
+        <MARGIN left right> sets left and right margins.
+        Used for text formatting.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # MARGIN requires special window handling
+        return b''
+
+    def gen_winsize(self, operands: List[ASTNode]) -> bytes:
+        """Generate WINSIZE (set window size).
+
+        <WINSIZE window lines> sets window dimensions.
+        Uses SPLIT_WINDOW pattern.
+
+        Args:
+            operands[0]: Window number
+            operands[1]: Number of lines
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        # For upper window (window 1), use SPLIT
+        window = self.get_operand_value(operands[0])
+        lines = self.get_operand_value(operands[1])
+
+        if window == 1:
+            return self.gen_split([operands[1]])
+
+        return b''
+
+    def gen_winget(self, operands: List[ASTNode]) -> bytes:
+        """Generate WINGET (get window property).
+
+        <WINGET window property> gets window information.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # Window property queries are complex
+        return b''
+
+    def gen_winput(self, operands: List[ASTNode]) -> bytes:
+        """Generate WINPUT (set window property).
+
+        <WINPUT window property value> sets window property.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # Window property setting is complex
+        return b''
+
+    def gen_winattr(self, operands: List[ASTNode]) -> bytes:
+        """Generate WINATTR (set window attributes).
+
+        <WINATTR window flags> sets window display attributes.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        # Window attributes are V5+
+        return b''
+
+    def gen_set_margins(self, operands: List[ASTNode]) -> bytes:
+        """Generate SET-MARGINS (set text margins).
+
+        <SET-MARGINS left right> sets margins in characters.
+
+        Returns:
+            bytes: Z-machine code (stub)
+        """
+        return b''
 
     # ===== Comparison Operations =====
 

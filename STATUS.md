@@ -724,7 +724,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### 🎉 90% PLANETFALL MILESTONE - Utility Predicates & Table Ops
-- **Commit**: (pending)
+- **Commit**: 52da921
 - N=? / != - Not equal (inverted JE)
 - ZGET - Zero-based table get (alias for NTH)
 - ZPUT - Zero-based table put (0-based STOREW)
@@ -741,8 +741,22 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Final Opcodes & V5+ Compatibility - WINSIZE, COLOR, FONT
+- **Commit**: (pending)
+- WINSIZE - Set window size (working - uses SPLIT for window 1)
+- COLOR - Set text colors (V5+ stub for compatibility)
+- FONT - Set font (V5+ stub for compatibility)
+- Adds window sizing control
+- Provides V5+ compatibility layer
+- Enables forward compatibility for games
+- **Test**: final_opcodes_test.zil (1,230 bytes)
+- Brings total to 127 opcodes (124 working + 3 stubs)
+- **Milestone**: 92% Planetfall Complete!
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.1.0
+**Current Version**: 1.1.5
 
-**Status**: 🟢 Active Development - 90% Planetfall Complete!
+**Status**: 🟢 Active Development - 92% Planetfall Complete!
