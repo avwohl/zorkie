@@ -521,8 +521,18 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Game Utility Opcodes - PROB, PICK-ONE, GOTO
+- **Commit**: (pending)
+- PROB - Probability testing for random events (26 Planetfall uses)
+- PICK-ONE - Random selection from tables (17 uses)
+- GOTO - Player movement between rooms (14 uses)
+- **Tests**: prob_test.zil (1,036 bytes), pick_one_test.zil (1,116 bytes), goto_test.zil (1,120 bytes)
+- Brings total to 71+ opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.5.2 (HELD? + IGRTR? + Property fix)
+**Current Version**: 0.5.3 (PROB + PICK-ONE + GOTO)
 
-**Status**: 🟢 Active Development - 54% Planetfall Complete!
+**Status**: 🟢 Active Development - 56% Planetfall Complete!

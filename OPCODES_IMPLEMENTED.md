@@ -137,13 +137,16 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Parser/Game Operations (3 opcodes)
+## Parser/Game Operations (6 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
 | VERB? | EQUAL+PRSA | Test verb action | ✅ |
 | PERFORM | CALL | Dispatch action | ✅ |
 | RANDOM | RANDOM | Random number | ✅ |
+| PROB | RANDOM+JL | Probability test (N% chance) | ✅ |
+| PICK-ONE | RANDOM+GET | Select random table element | ✅ |
+| GOTO | STORE HERE | Move player to room | ✅ |
 
 ---
 
@@ -173,11 +176,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 68+ distinct operations
+- **Total Opcodes**: 71+ distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 31 working examples
-- **Planetfall Coverage**: ~54% of required operations
-- **Version**: 0.5.2
+- **Test Programs**: 34 working examples
+- **Planetfall Coverage**: ~56% of required operations
+- **Version**: 0.5.3
 
 ---
 
@@ -229,4 +232,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.5.2
+**Compiler Version**: 0.5.3

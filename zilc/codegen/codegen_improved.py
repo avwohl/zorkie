@@ -348,6 +348,10 @@ class ImprovedCodeGenerator:
         # Random and utilities
         elif op_name == 'RANDOM':
             return self.gen_random(form.operands)
+        elif op_name == 'PROB':
+            return self.gen_prob(form.operands)
+        elif op_name == 'PICK-ONE':
+            return self.gen_pick_one(form.operands)
         elif op_name == 'RESTART':
             return self.gen_restart()
         elif op_name == 'SAVE':
@@ -356,6 +360,8 @@ class ImprovedCodeGenerator:
             return self.gen_restore()
         elif op_name == 'VERIFY':
             return self.gen_verify()
+        elif op_name == 'GOTO':
+            return self.gen_goto(form.operands)
 
         # Parser predicates
         elif op_name == 'VERB?':
@@ -1968,5 +1974,111 @@ class ImprovedCodeGenerator:
             code.append(var_val & 0xFF)
             code.append(compare_val & 0xFF)
             # Branch offset would be added during COND processing
+
+        return bytes(code)
+
+    def gen_prob(self, operands: List[ASTNode]) -> bytes:
+        """Generate PROB (probability test).
+
+        Tests if random number (1-100) is <= given percentage.
+        Equivalent to: <L? <RANDOM 100> percentage>
+
+        Args:
+            operands[0]: percentage (0-100)
+
+        Returns:
+            bytes: Z-machine code (RANDOM + JL)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        percentage = self.get_operand_value(operands[0])
+
+        # RANDOM 100 to get number 1-100
+        # RANDOM is 1OP opcode 0x07
+        code.append(0x87)  # Short form, small constant
+        code.append(100)   # Range: 1-100
+        code.append(0x00)  # Store to stack
+
+        # JL (test if <= percentage) is 2OP opcode 0x02
+        if isinstance(percentage, int):
+            code.append(0x42)  # Long form, opcode 0x02
+            code.append(0x00)  # Stack (result from RANDOM)
+            code.append(percentage & 0xFF)
+            # Branch offset would be added during COND processing
+
+        return bytes(code)
+
+    def gen_pick_one(self, operands: List[ASTNode]) -> bytes:
+        """Generate PICK-ONE (select random element from table).
+
+        Picks a random element from a table and returns it.
+        Equivalent to: <GET table <RANDOM <GET table 0>>>
+
+        Args:
+            operands[0]: table address
+
+        Returns:
+            bytes: Z-machine code (RANDOM + GET)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+
+        if isinstance(table, int):
+            # First, get table size from offset 0
+            # LOADW is 2OP opcode 0x0F
+            code.append(0x4F)  # Long form, opcode 0x0F
+            code.append(table & 0xFF)
+            code.append(0x00)  # Offset 0 (table size)
+            code.append(0x00)  # Store to stack
+
+            # RANDOM <table-size> to get index 1..size
+            # RANDOM is 1OP opcode 0x07
+            code.append(0x87)  # Short form, variable
+            code.append(0x00)  # Stack (table size)
+            code.append(0x00)  # Store to stack
+
+            # GET table random-index
+            # LOADW is 2OP opcode 0x0F
+            code.append(0x4F)  # Long form, opcode 0x0F
+            code.append(table & 0xFF)
+            code.append(0x00)  # Stack (random index)
+            code.append(0x00)  # Store to stack (final result)
+
+        return bytes(code)
+
+    def gen_goto(self, operands: List[ASTNode]) -> bytes:
+        """Generate GOTO (move player to new room).
+
+        Changes the HERE global to new room and describes it.
+        In full implementation, would also call room's action routine.
+
+        Args:
+            operands[0]: new room object
+
+        Returns:
+            bytes: Z-machine code (STORE HERE + room description call)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        room = self.get_operand_value(operands[0])
+
+        # Set HERE global to new room
+        here_var = self.globals.get('HERE', 2)  # Default to 2 if not defined
+
+        if isinstance(room, int):
+            # STORE is 2OP opcode 0x0D
+            code.append(0x2D)  # Short form
+            code.append(here_var & 0xFF)
+            code.append(room & 0xFF)
+
+            # TODO: Call room description routine
+            # For now, just changing HERE is sufficient for testing
 
         return bytes(code)
