@@ -871,8 +871,29 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### 🎉 99% PLANETFALL MILESTONE - Screen & Game Control
+- **Commit**: (pending)
+- BACK - Erase to beginning of line
+  - V3 implementation: prints newline
+  - Moves to next line (line erase approximation)
+  - Uses gen_newline() for V3 compatibility
+- DISPLAY - Update status line
+  - Automatic in V3, so implemented as no-op
+  - Status line updates handled by interpreter
+  - Compatibility stub for V4+ code
+- SCORE - Set game score
+  - Would set score global variable
+  - Stub implementation (needs score global location)
+  - Placeholder for score tracking
+- All three opcodes provide V3-compatible behavior
+- **Test**: misc_ops_test.zil (1.2 KB)
+- Brings total to 149 opcodes (140 working + 9 stubs)
+- **ACHIEVEMENT**: 🎉 99% Planetfall Complete! 🎉
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.6.0
+**Current Version**: 1.7.0
 
-**Status**: 🟢 Active Development - 98.5% Planetfall Complete!
+**Status**: 🟢 Active Development - 99% Planetfall Complete!

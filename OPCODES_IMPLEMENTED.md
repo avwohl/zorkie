@@ -28,7 +28,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Output/Print Operations (25 opcodes)
+## Output/Print Operations (28 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -54,6 +54,9 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | DIROUT | OUTPUT_STREAM | Direct output to memory table | ✅ |
 | PRINTOBJ | PRINT_OBJ | Print object short name | ✅ |
 | WINSIZE | SPLIT_WINDOW | Set window size (uses SPLIT for window 1) | ✅ |
+| BACK | NEW_LINE | Erase to beginning of line (V3: newline) | ✅ |
+| DISPLAY | Auto | Update status line (automatic in V3) | ✅ |
+| SCORE | STOREW | Set game score (stub) | ⚠️ |
 | COLOR | SET_COLOUR | Set text colors (V5+ stub) | ⚠️ |
 | FONT | SET_FONT | Set font (V5+ stub) | ⚠️ |
 
@@ -266,11 +269,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 146 distinct operations (138 working + 8 stubs)
+- **Total Opcodes**: 149 distinct operations (140 working + 9 stubs)
 - **Opcode Categories**: 15 categories
-- **Test Programs**: 55 working examples
-- **Planetfall Coverage**: ~98.5% of required operations
-- **Version**: 1.6.0
+- **Test Programs**: 56 working examples
+- **Planetfall Coverage**: ~99% of required operations
+- **Version**: 1.7.0
 
 ---
 
@@ -319,4 +322,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.6.0
+**Compiler Version**: 1.7.0

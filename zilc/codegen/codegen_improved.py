@@ -391,6 +391,12 @@ class ImprovedCodeGenerator:
             return self.gen_throw(form.operands)
         elif op_name == 'SPACES':
             return self.gen_spaces(form.operands)
+        elif op_name == 'BACK':
+            return self.gen_back(form.operands)
+        elif op_name == 'DISPLAY':
+            return self.gen_display(form.operands)
+        elif op_name == 'SCORE':
+            return self.gen_score(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -2244,6 +2250,50 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code (stub - needs loop)
         """
         # SPACES needs loop generation
+        return b''
+
+    def gen_back(self, operands: List[ASTNode]) -> bytes:
+        """Generate BACK (erase to beginning of line).
+
+        <BACK> moves cursor back and erases from current position to start of line.
+        V3 approximation: print newline to go to next line.
+
+        Returns:
+            bytes: Z-machine code for line erase
+        """
+        # BACK in V3: just print newline as approximation
+        return self.gen_newline()
+
+    def gen_display(self, operands: List[ASTNode]) -> bytes:
+        """Generate DISPLAY (update status line).
+
+        <DISPLAY room-desc score> updates the status line display.
+        In V3, this is automatic, so this is a no-op.
+
+        Args:
+            operands[0]: Room description (optional)
+            operands[1]: Score value (optional)
+
+        Returns:
+            bytes: Z-machine code (no-op in V3)
+        """
+        # DISPLAY is automatic in V3
+        return b''
+
+    def gen_score(self, operands: List[ASTNode]) -> bytes:
+        """Generate SCORE (set score value).
+
+        <SCORE points> sets the game score.
+        Typically stored in a global variable.
+
+        Args:
+            operands[0]: Score value
+
+        Returns:
+            bytes: Z-machine code (would set score global)
+        """
+        # SCORE would set a global variable
+        # For now, stub - requires knowing score global location
         return b''
 
     def gen_prog(self, operands: List[ASTNode]) -> bytes:
