@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .lexer import Lexer
 from .parser import Parser
+from .parser.macro_expander import MacroExpander
 from .codegen.codegen_improved import ImprovedCodeGenerator
 from .zmachine import ZAssembler, ObjectTable, Dictionary
 
@@ -127,6 +128,14 @@ class ZILCompiler:
         self.log(f"  {len(program.globals)} globals")
         self.log(f"  {len(program.propdefs)} property definitions")
         self.log(f"  {len(program.syntax)} syntax definitions")
+        self.log(f"  {len(program.macros)} macro definitions")
+
+        # Macro expansion
+        if program.macros:
+            self.log("Expanding macros...")
+            expander = MacroExpander()
+            program = expander.expand_all(program)
+            self.log(f"  Macros expanded")
 
         # Use program version if specified
         if program.version:

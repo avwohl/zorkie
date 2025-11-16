@@ -44,6 +44,7 @@ class NodeType(Enum):
     # Special
     PROPERTY_LIST = auto() # Object/room properties
     PARAM_LIST = auto()    # Routine parameters
+    MACRO = auto()         # <DEFMAC ...>
 
 
 @dataclass
@@ -256,6 +257,20 @@ class PropdefNode(ASTNode):
         return f"Propdef({self.name})"
 
 
+class MacroNode(ASTNode):
+    """DEFMAC macro definition."""
+    def __init__(self, name: str, params: List[tuple] = None, body: ASTNode = None,
+                 line: int = 0, column: int = 0):
+        super().__init__(NodeType.MACRO, line, column)
+        self.name = name
+        # params is list of (param_name, is_quoted, is_tuple, is_aux) tuples
+        self.params = params or []
+        self.body = body
+
+    def __repr__(self):
+        return f"Macro({self.name}, {len(self.params)} params)"
+
+
 @dataclass
 class Program:
     """Top-level program node containing all definitions."""
@@ -268,6 +283,7 @@ class Program:
     propdefs: List[PropdefNode] = field(default_factory=list)
     syntax: List[SyntaxNode] = field(default_factory=list)
     tables: List[TableNode] = field(default_factory=list)
+    macros: List[MacroNode] = field(default_factory=list)
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "

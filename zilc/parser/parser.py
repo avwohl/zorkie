@@ -69,6 +69,8 @@ class Parser:
                 program.propdefs.append(node)
             elif isinstance(node, SyntaxNode):
                 program.syntax.append(node)
+            elif isinstance(node, MacroNode):
+                program.macros.append(node)
             elif isinstance(node, VersionNode):
                 program.version = node.version
             elif isinstance(node, TableNode):
@@ -144,6 +146,11 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return node
 
+            elif op_name == "DEFMAC":
+                node = self.parse_defmac(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
             elif op_name in ("TABLE", "ITABLE", "LTABLE"):
                 node = self.parse_table(op_name, line, col)
                 self.expect(TokenType.RANGLE)
@@ -172,6 +179,14 @@ class Parser:
         token = self.current_token
         line = token.line
         col = token.column
+
+        # Handle quote operator: 'EXPR becomes <QUOTE EXPR>
+        if token.type == TokenType.QUOTE:
+            self.advance()
+            quoted_expr = self.parse_expression()
+            # Create a QUOTE form
+            quote_atom = AtomNode("QUOTE", line, col)
+            return FormNode(quote_atom, [quoted_expr], line, col)
 
         if token.type == TokenType.LANGLE:
             return self.parse_form()
@@ -388,6 +403,96 @@ class Parser:
             default_value = self.parse_expression()
 
         return PropdefNode(name, default_value, line, col)
+
+    def parse_defmac(self, line: int, col: int):
+        """Parse DEFMAC macro definition.
+
+        Syntax: <DEFMAC name (params...) body>
+
+        Parameter types:
+        - 'PARAM  - quoted parameter (evaluated at macro definition time)
+        - PARAM   - unquoted parameter (evaluated at expansion time)
+        - "TUPLE" - variable-length parameter list
+        - "AUX"   - auxiliary variables
+
+        Examples:
+        <DEFMAC ENABLE ('INT) <FORM PUT .INT ,C-ENABLED? 1>>
+        <DEFMAC VERB? ("TUPLE" ATMS "AUX" (O ()) (L ())) ...>
+        """
+        from .ast_nodes import MacroNode
+
+        # Parse macro name
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected macro name")
+        name = self.current_token.value
+        self.advance()
+
+        # Parse parameter list
+        params = []
+        if self.current_token.type == TokenType.LPAREN:
+            self.advance()  # (
+
+            aux_mode = False
+            tuple_mode = False
+
+            while self.current_token.type != TokenType.RPAREN:
+                if self.current_token.type == TokenType.EOF:
+                    self.error("Unclosed parameter list in DEFMAC")
+
+                # Check for special keywords
+                if self.current_token.type == TokenType.STRING:
+                    keyword = self.current_token.value
+                    if keyword == "AUX":
+                        aux_mode = True
+                        tuple_mode = False
+                        self.advance()
+                        continue
+                    elif keyword == "TUPLE":
+                        tuple_mode = True
+                        self.advance()
+                        # Next token should be the tuple variable name
+                        if self.current_token.type != TokenType.ATOM:
+                            self.error("Expected variable name after \"TUPLE\"")
+                        param_name = self.current_token.value
+                        params.append((param_name, False, True, False))
+                        self.advance()
+                        continue
+
+                # Check for quoted parameter
+                is_quoted = False
+                if self.current_token.type == TokenType.QUOTE:
+                    # Quote prefix for parameter: 'PARAM
+                    is_quoted = True
+                    self.advance()
+
+                # Parse parameter (can be simple atom or with default value)
+                if self.current_token.type == TokenType.ATOM:
+                    param_name = self.current_token.value
+                    params.append((param_name, is_quoted, False, aux_mode))
+                    self.advance()
+                elif self.current_token.type == TokenType.LPAREN:
+                    # AUX variable with default value: (VAR default)
+                    self.advance()  # (
+                    if self.current_token.type != TokenType.ATOM:
+                        self.error("Expected variable name in AUX binding")
+                    param_name = self.current_token.value
+                    self.advance()
+
+                    # Parse default value (we'll store it but won't use it yet)
+                    # For now, just skip it
+                    default_val = self.parse_expression()
+
+                    params.append((param_name, False, False, True))
+                    self.expect(TokenType.RPAREN)
+                else:
+                    self.error(f"Unexpected token in parameter list: {self.current_token.type}")
+
+            self.expect(TokenType.RPAREN)
+
+        # Parse macro body (single expression)
+        body = self.parse_expression()
+
+        return MacroNode(name, params, body, line, col)
 
     def parse_table(self, table_type: str, line: int, col: int) -> TableNode:
         """Parse TABLE/ITABLE/LTABLE definition."""

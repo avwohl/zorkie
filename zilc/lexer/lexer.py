@@ -37,6 +37,7 @@ class TokenType(Enum):
     # Special
     COMMA = auto()       # ,
     PERIOD = auto()      # .
+    QUOTE = auto()       # ' (quote operator)
 
     # End of file
     EOF = auto()
@@ -280,6 +281,11 @@ class Lexer:
             elif ch == ',':
                 self.advance()
                 self.tokens.append(Token(TokenType.COMMA, ',', line, col))
+
+            # Quote operator
+            elif ch == "'":
+                self.advance()
+                self.tokens.append(Token(TokenType.QUOTE, "'", line, col))
 
             else:
                 self.error(f"Unexpected character: {ch!r}")
