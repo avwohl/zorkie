@@ -5,12 +5,13 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Control Flow (12 opcodes)
+## Control Flow (14 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
 | RTRUE | 0x00 (RET 1) | Return true | ✅ |
 | RFALSE | 0x01 (RET 0) | Return false | ✅ |
+| RFATAL | 0x01 (RET 0) | Return false (fatal condition) | ✅ |
 | RETURN | RET | Return value | ✅ |
 | QUIT | QUIT | End game | ✅ |
 | RESTART | RESTART | Restart game | ✅ |
@@ -19,6 +20,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | VERIFY | VERIFY | Verify story file | ✅ |
 | COND | JZ/JE/etc | Multi-clause conditional | ✅ |
 | REPEAT | JMP | Loop with optional bindings | ✅ |
+| AGAIN | JMP | Restart current loop (continue) | ✅ |
 | JIGS-UP | PRINT_RET+QUIT | Game over with message | ✅ |
 | REST | ADD | Pointer arithmetic (list tail) | ✅ |
 
@@ -180,11 +182,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 75+ distinct operations
+- **Total Opcodes**: 77+ distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 35 working examples
-- **Planetfall Coverage**: ~58% of required operations
-- **Version**: 0.5.5
+- **Test Programs**: 36 working examples
+- **Planetfall Coverage**: ~60% of required operations
+- **Version**: 0.6.0
 
 ---
 
@@ -236,4 +238,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.5.5
+**Compiler Version**: 0.6.0

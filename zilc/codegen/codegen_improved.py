@@ -211,10 +211,14 @@ class ImprovedCodeGenerator:
             return self.gen_rtrue()
         elif op_name == 'RFALSE':
             return self.gen_rfalse()
+        elif op_name == 'RFATAL':
+            return self.gen_rfatal()
         elif op_name == 'RETURN':
             return self.gen_return(form.operands)
         elif op_name == 'QUIT':
             return self.gen_quit()
+        elif op_name == 'AGAIN':
+            return self.gen_again()
 
         # Output
         elif op_name == 'TELL':
@@ -403,6 +407,14 @@ class ImprovedCodeGenerator:
         """Generate RFALSE (return false)."""
         return bytes([0xB1])
 
+    def gen_rfatal(self) -> bytes:
+        """Generate RFATAL (return false, fatal condition).
+
+        In most implementations, RFATAL is the same as RFALSE.
+        Some games may use it to indicate a fatal/unrecoverable condition.
+        """
+        return bytes([0xB1])  # Same as RFALSE
+
     def gen_return(self, operands: List[ASTNode]) -> bytes:
         """Generate RETURN value."""
         if not operands:
@@ -425,6 +437,19 @@ class ImprovedCodeGenerator:
     def gen_quit(self) -> bytes:
         """Generate QUIT."""
         return bytes([0xBA])
+
+    def gen_again(self) -> bytes:
+        """Generate AGAIN (restart current loop).
+
+        AGAIN jumps back to the start of the innermost REPEAT loop.
+        This is similar to 'continue' in C.
+
+        Note: Proper implementation requires tracking loop start labels.
+        For now, this generates a placeholder.
+        """
+        # TODO: Implement proper loop label tracking
+        # For now, just return empty (needs loop context)
+        return b''
 
     # ===== Output Instructions =====
 

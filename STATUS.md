@@ -550,8 +550,17 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Control Flow Opcodes - RFATAL and AGAIN
+- **Commit**: (pending)
+- RFATAL - Return false for fatal conditions (24 Planetfall uses)
+- AGAIN - Restart current loop / continue (6 uses)
+- **Test**: control_flow_test.zil (1,110 bytes)
+- Brings total to 77+ opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.5.5 (BOR + Complete Bitwise Suite)
+**Current Version**: 0.6.0 - MAJOR MILESTONE! 🎉
 
-**Status**: 🟢 Active Development - 58% Planetfall Complete!
+**Status**: 🟢 Active Development - 60% Planetfall Complete!
