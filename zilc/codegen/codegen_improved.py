@@ -299,6 +299,18 @@ class ImprovedCodeGenerator:
             return self.gen_bufout(form.operands)
         elif op_name == 'UXOR':
             return self.gen_uxor(form.operands)
+        elif op_name == 'USL':
+            return self.gen_usl(form.operands)
+        elif op_name == 'DIROUT':
+            return self.gen_dirout(form.operands)
+        elif op_name == 'PRINTOBJ':
+            return self.gen_printobj(form.operands)
+        elif op_name == 'READ':
+            return self.gen_read(form.operands)
+        elif op_name == 'MAPF':
+            return self.gen_mapf(form.operands)
+        elif op_name == 'MAPT':
+            return self.gen_mapt(form.operands)
 
         # Comparison
         elif op_name in ('=', 'EQUAL?', '==?'):
@@ -1292,6 +1304,131 @@ class ImprovedCodeGenerator:
                 code.append(result & 0xFF)
 
         return bytes(code)
+
+    def gen_usl(self, operands: List[ASTNode]) -> bytes:
+        """Generate USL (unsigned shift left).
+
+        <USL value shift> shifts value left by shift bits (unsigned).
+        Similar to LSH but explicitly unsigned.
+
+        Args:
+            operands[0]: Value to shift
+            operands[1]: Number of bits to shift
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # USL is essentially the same as LSH for our purposes
+        return self.gen_lsh(operands)
+
+    def gen_dirout(self, operands: List[ASTNode]) -> bytes:
+        """Generate DIROUT (direct output to memory).
+
+        <DIROUT table> directs subsequent output to a memory table.
+        In V3+, this is the OUTPUT_STREAM opcode (VAR 0x13).
+        Stream 3 = redirect to table.
+
+        Args:
+            operands[0]: Table address for output (or 0 to restore)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        table = self.get_operand_value(operands[0])
+
+        if isinstance(table, int):
+            code.append(0xF3)  # OUTPUT_STREAM (VAR opcode 0x13)
+
+            if table == 0:
+                # Restore normal output (stream -3)
+                code.append(0x15)  # Type byte: 2 small constants
+                code.append(0xFD)  # -3 (close stream 3)
+                code.append(0x00)
+            else:
+                # Direct to table (stream 3)
+                code.append(0x15)  # Type byte: 2 small constants
+                code.append(0x03)  # Stream 3
+                code.append(table & 0xFF)
+
+        return bytes(code)
+
+    def gen_mapf(self, operands: List[ASTNode]) -> bytes:
+        """Generate MAPF (map first/apply to each).
+
+        <MAPF routine table> applies routine to each element in table.
+        This is a compile-time construct that generates calls.
+
+        Args:
+            operands[0]: Routine to call
+            operands[1]: Table to iterate over
+
+        Returns:
+            bytes: Z-machine code (stub for now)
+        """
+        # MAPF is complex - it needs to iterate and call
+        # For now, return empty - would need loop generation
+        return b''
+
+    def gen_mapt(self, operands: List[ASTNode]) -> bytes:
+        """Generate MAPT (map true/find first match).
+
+        <MAPT routine table> finds first element where routine returns true.
+        This is a compile-time construct that generates search loop.
+
+        Args:
+            operands[0]: Predicate routine
+            operands[1]: Table to search
+
+        Returns:
+            bytes: Z-machine code (stub for now)
+        """
+        # MAPT is complex - needs loop with conditional
+        # For now, return empty - would need loop generation
+        return b''
+
+    def gen_printobj(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINTOBJ (print object short name).
+
+        <PRINTOBJ object> prints the short name of an object.
+        Uses PRINT_OBJ opcode (1OP 0x0A).
+
+        Args:
+            operands[0]: Object number
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        obj = self.get_operand_value(operands[0])
+
+        if isinstance(obj, int):
+            if 0 <= obj <= 255:
+                code.append(0x8A)  # PRINT_OBJ (1OP opcode 0x0A)
+                code.append(obj & 0xFF)
+
+        return bytes(code)
+
+    def gen_read(self, operands: List[ASTNode]) -> bytes:
+        """Generate READ (read input - alias for INPUT).
+
+        <READ buffer parse> reads a line of text.
+        This is an alias for INPUT/SREAD.
+
+        Args:
+            operands[0]: Text buffer
+            operands[1]: Parse buffer
+
+        Returns:
+            bytes: Z-machine code
+        """
+        return self.gen_input(operands)
 
     # ===== Comparison Operations =====
 

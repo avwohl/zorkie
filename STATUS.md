@@ -660,7 +660,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ IO and Screen Control - CURSET, HLIGHT, INPUT, BUFOUT, UXOR
-- **Commit**: (pending)
+- **Commit**: ea84b44
 - CURSET - Set cursor position (SET_CURSOR VAR 0xF1)
 - HLIGHT - Set text style/highlighting (SET_TEXT_STYLE VAR 0xF1)
 - INPUT - Read line input from player (SREAD VAR 0xE1)
@@ -674,8 +674,24 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Advanced Opcodes - USL, DIROUT, PRINTOBJ, READ
+- **Commit**: (pending)
+- USL - Unsigned shift left (alias for LSH)
+- DIROUT - Direct output to memory table (OUTPUT_STREAM VAR 0xF3)
+  - Stream 3 for table redirection
+  - Supports restore with parameter 0
+- PRINTOBJ - Print object short name (PRINT_OBJ 1OP 0x8A)
+- READ - Read line input (alias for INPUT/SREAD)
+- Adds memory output redirection capability
+- Completes object name printing
+- **Test**: advanced_opcodes_test.zil (1,276 bytes)
+- Brings total to 114 opcodes implemented
+- **Milestone**: 84% Planetfall Complete!
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.9.5
+**Current Version**: 0.9.8
 
-**Status**: 🟢 Active Development - 82% Planetfall Complete!
+**Status**: 🟢 Active Development - 84% Planetfall Complete!

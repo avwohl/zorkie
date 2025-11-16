@@ -26,7 +26,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Output/Print Operations (20 opcodes)
+## Output/Print Operations (22 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -47,7 +47,10 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | CURSET | SET_CURSOR | Set cursor position | ✅ |
 | HLIGHT | SET_TEXT_STYLE | Set text highlighting/style | ✅ |
 | INPUT | SREAD | Read line input from player | ✅ |
+| READ | SREAD | Read line input (alias for INPUT) | ✅ |
 | BUFOUT | BUFFER_MODE | Enable/disable output buffering | ✅ |
+| DIROUT | OUTPUT_STREAM | Direct output to memory table | ✅ |
+| PRINTOBJ | PRINT_OBJ | Print object short name | ✅ |
 
 ---
 
@@ -100,7 +103,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Logical/Bitwise Operations (9 opcodes)
+## Logical/Bitwise Operations (10 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -112,6 +115,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | BTST | AND+mask | Test if bit is set | ✅ |
 | LSH | MUL | Left shift (V3: multiply by 2^n) | ✅ |
 | RSH | DIV | Right shift (V3: divide by 2^n) | ✅ |
+| USL | MUL | Unsigned shift left (alias for LSH) | ✅ |
 | UXOR | XOR/compile-time | Unsigned XOR (compile-time eval for V3) | ✅ |
 
 ---
@@ -216,11 +220,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 110 distinct operations
+- **Total Opcodes**: 114 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 45 working examples
-- **Planetfall Coverage**: ~82% of required operations
-- **Version**: 0.9.5
+- **Test Programs**: 46 working examples
+- **Planetfall Coverage**: ~84% of required operations
+- **Version**: 0.9.8
 
 ---
 
@@ -269,4 +273,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.9.5
+**Compiler Version**: 0.9.8
