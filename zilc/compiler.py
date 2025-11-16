@@ -101,6 +101,44 @@ class ZILCompiler:
 
         return self.compile_string(combined_source, main_file)
 
+    def preprocess_ifiles(self, source: str, base_path: Path) -> str:
+        """
+        Preprocess IFILE directives by expanding them inline.
+
+        Handles: <IFILE "filename"> - includes content of filename.zil
+
+        Args:
+            source: Source code with potential IFILE directives
+            base_path: Base directory for resolving relative file paths
+
+        Returns:
+            Source code with IFILE directives expanded
+        """
+        import re
+
+        # Pattern to match <IFILE "filename"> or <IFILE 'filename'>
+        ifile_pattern = r'<\s*IFILE\s+"([^"]+)"\s*>'
+
+        def replace_ifile(match):
+            filename = match.group(1)
+            # Try adding .zil extension if not present
+            if not filename.endswith('.zil'):
+                filename += '.zil'
+
+            # Resolve path relative to base_path
+            file_path = base_path / filename.lower()
+
+            try:
+                self.log(f"  Including file: {file_path}")
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                # Recursively process nested IFILE directives
+                return self.preprocess_ifiles(content, base_path)
+            except FileNotFoundError:
+                raise FileNotFoundError(f"IFILE not found: {file_path}")
+
+        return re.sub(ifile_pattern, replace_ifile, source, flags=re.IGNORECASE)
+
     def compile_string(self, source: str, filename: str = "<input>") -> bytes:
         """
         Compile ZIL source code to Z-machine bytecode.
@@ -112,6 +150,11 @@ class ZILCompiler:
         Returns:
             Z-machine story file as bytes
         """
+        # Preprocess IFILE directives
+        base_path = Path(filename).parent if filename != "<input>" else Path.cwd()
+        self.log("Preprocessing IFILE directives...")
+        source = self.preprocess_ifiles(source, base_path)
+
         # Lexical analysis
         self.log("Lexing...")
         lexer = Lexer(source, filename)

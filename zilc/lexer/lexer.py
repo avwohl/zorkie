@@ -102,9 +102,22 @@ class Lexer:
             self.advance()
 
     def skip_comment(self):
-        """Skip ZIL comment: ;\"comment\" """
-        if self.peek() == ';' and self.peek(1) == '"':
+        """Skip ZIL comments: ;\"comment\" or ; comment to end of line"""
+        if self.peek() != ';':
+            return
+
+        # Check for block comment: ;" ... "
+        # Need to skip whitespace between ; and "
+        pos = 1
+        while self.peek(pos) and self.peek(pos) in ' \t':
+            pos += 1
+
+        if self.peek(pos) == '"':
+            # Block comment: ; "comment"
             self.advance()  # ;
+            # Skip whitespace
+            while self.peek() and self.peek() in ' \t':
+                self.advance()
             self.advance()  # "
 
             # Read until closing "
@@ -115,6 +128,10 @@ class Lexer:
                 self.advance()
             else:
                 self.error("Unterminated comment")
+        else:
+            # Line comment: ; comment to end of line
+            while self.peek() and self.peek() != '\n':
+                self.advance()
 
     def read_string(self) -> str:
         """Read a string literal."""
@@ -211,8 +228,8 @@ class Lexer:
             if self.pos >= len(self.source):
                 break
 
-            # Check for comment
-            if self.peek() == ';' and self.peek(1) == '"':
+            # Check for comment (both ;" and ; styles)
+            if self.peek() == ';':
                 self.skip_comment()
                 continue
 
