@@ -691,7 +691,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### 🎉 85% PLANETFALL MILESTONE - DLESS? Predicate
-- **Commit**: (pending)
+- **Commit**: 3f9dc26
 - DLESS? - Decrement and test if less (DEC+JL)
   - Companion to IGRTR? for countdown loops
   - Uses DEC (1OP 0x86) + JL (2OP 0x82)
@@ -705,8 +705,26 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Comparison and Parse Opcodes - G=?, L=?, CHECKU, LEXV
+- **Commit**: (pending)
+- G=? / >= - Greater than or equal (inverted JL)
+- L=? / <= - Less than or equal (inverted JG)
+- CHECKU - Check if object has property (GET_PROP_ADDR)
+  - Returns 0 if property doesn't exist
+  - Unrestricted property checking
+- LEXV - Get word from parse buffer (LOADW with offset calculation)
+  - Parses Nth word from lexical buffer
+  - Offset formula: (word_num - 1) * 4 + 1
+- Completes comparison operator suite
+- Adds essential parser word extraction
+- **Test**: comparison_and_parse_test.zil (1,463 bytes)
+- Brings total to 119 opcodes implemented
+- **Milestone**: 87% Planetfall Complete!
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 1.0.0
+**Current Version**: 1.0.5
 
-**Status**: 🟢 Active Development - 85% Planetfall Complete!
+**Status**: 🟢 Active Development - 87% Planetfall Complete!

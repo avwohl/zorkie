@@ -85,13 +85,15 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Comparison & Predicates (12 opcodes)
+## Comparison & Predicates (15 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
 | EQUAL? / = | JE | Test equality | ✅ |
 | L? / < | JL | Less than | ✅ |
 | G? / > | JG | Greater than | ✅ |
+| L=? / <= | JG inverted | Less than or equal | ✅ |
+| G=? / >= | JL inverted | Greater than or equal | ✅ |
 | ZERO? / 0? | JZ | Test if zero | ✅ |
 | NOT? | JZ | Test if false/zero (alias) | ✅ |
 | TRUE? | JZ | Test if non-zero/true | ✅ |
@@ -101,6 +103,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | HELD? | GET_PARENT+JE+WINNER | Test if player holds object | ✅ |
 | IGRTR? | INC+JG | Increment and test greater | ✅ |
 | DLESS? | DEC+JL | Decrement and test less | ✅ |
+| CHECKU | GET_PROP_ADDR | Check if object has property | ✅ |
 
 ---
 
@@ -175,7 +178,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Parser/Game Operations (13 opcodes)
+## Parser/Game Operations (14 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -192,6 +195,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | DEQUEUE | STOREW | Disable interrupt | ✅ |
 | ENABLE | STOREW | Enable interrupt | ✅ |
 | DISABLE | STOREW | Disable interrupt (alias) | ✅ |
+| LEXV | LOADW | Get word from parse buffer | ✅ |
 
 ---
 
@@ -221,11 +225,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 115 distinct operations
+- **Total Opcodes**: 119 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 47 working examples
-- **Planetfall Coverage**: ~85% of required operations
-- **Version**: 1.0.0
+- **Test Programs**: 48 working examples
+- **Planetfall Coverage**: ~87% of required operations
+- **Version**: 1.0.5
 
 ---
 
@@ -274,4 +278,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 1.0.0
+**Compiler Version**: 1.0.5

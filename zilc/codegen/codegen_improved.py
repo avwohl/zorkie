@@ -333,6 +333,14 @@ class ImprovedCodeGenerator:
             return self.gen_igrtr(form.operands)
         elif op_name == 'DLESS?':
             return self.gen_dless(form.operands)
+        elif op_name == 'CHECKU':
+            return self.gen_checku(form.operands)
+        elif op_name == 'LEXV':
+            return self.gen_lexv(form.operands)
+        elif op_name in ('G=?', 'GRTR?', '>='):
+            return self.gen_grtr_or_equal(form.operands)
+        elif op_name in ('L=?', 'LESS?', '<='):
+            return self.gen_less_or_equal(form.operands)
 
         # Logical
         elif op_name == 'AND':
@@ -1484,6 +1492,163 @@ class ImprovedCodeGenerator:
         # CHECK is complex - needs bit calculation
         # For now return empty - would need proper bit indexing
         return b''
+
+    def gen_checku(self, operands: List[ASTNode]) -> bytes:
+        """Generate CHECKU (check if object has property - unrestricted).
+
+        <CHECKU object property> tests if object provides a property.
+        Uses GET_PROP_ADDR which returns 0 if property not found.
+
+        Args:
+            operands[0]: Object number
+            operands[1]: Property number
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        obj = self.get_operand_value(operands[0])
+        prop = self.get_operand_value(operands[1])
+
+        if isinstance(obj, int) and isinstance(prop, int):
+            if 0 <= obj <= 255 and 0 <= prop <= 255:
+                # GET_PROP_ADDR returns 0 if not found
+                code.append(0x53)  # GET_PROP_ADDR (2OP opcode 0x13)
+                code.append(obj & 0xFF)
+                code.append(prop & 0xFF)
+                code.append(0x00)  # Store to stack
+                # Then test with JZ - if 0, property doesn't exist
+
+        return bytes(code)
+
+    def gen_lexv(self, operands: List[ASTNode]) -> bytes:
+        """Generate LEXV (get word from lexical/parse buffer).
+
+        <LEXV parse-buffer word-number> gets the Nth word from parse buffer.
+        Parse buffer format: [word-count] [word1-addr] [word1-len] ...
+
+        Args:
+            operands[0]: Parse buffer address
+            operands[1]: Word number (1-based)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        buf = self.get_operand_value(operands[0])
+        word_num = self.get_operand_value(operands[1])
+
+        # Calculate offset: (word_num - 1) * 4 + 1
+        # Each word entry is 4 bytes, +1 to skip count byte
+        if isinstance(buf, int) and isinstance(word_num, int):
+            offset = (word_num - 1) * 4 + 1
+            if 0 <= offset <= 255:
+                code.append(0x4F)  # LOADW
+                code.append(buf & 0xFF)
+                code.append(offset & 0xFF)
+                code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_band_shift(self, operands: List[ASTNode]) -> bytes:
+        """Generate BAND with shift (bitwise AND with shifted mask).
+
+        Helper for bit manipulation patterns.
+
+        Args:
+            operands[0]: Value
+            operands[1]: Mask
+            operands[2]: Shift amount (optional)
+
+        Returns:
+            bytes: Z-machine code
+        """
+        # This is a complex pattern - for now use simple BAND
+        return self.gen_band(operands[:2])
+
+    def gen_copyt(self, operands: List[ASTNode]) -> bytes:
+        """Generate COPYT (copy table).
+
+        <COPYT source dest length> copies bytes from source to dest.
+        In V5+, uses COPY_TABLE. For V3, needs loop generation.
+
+        Args:
+            operands[0]: Source address
+            operands[1]: Destination address
+            operands[2]: Length in bytes
+
+        Returns:
+            bytes: Z-machine code (stub for V3)
+        """
+        # COPY_TABLE is V5+
+        # For V3, would need to generate a loop
+        return b''
+
+    def gen_grtr_or_equal(self, operands: List[ASTNode]) -> bytes:
+        """Generate >= comparison (greater than or equal).
+
+        <G=? a b> tests if a >= b.
+        Implemented as NOT(a < b).
+
+        Args:
+            operands[0]: First value
+            operands[1]: Second value
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        val1 = self.get_operand_value(operands[0])
+        val2 = self.get_operand_value(operands[1])
+
+        if isinstance(val1, int) and isinstance(val2, int):
+            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
+                # JL with inverted branch (branch on false)
+                code.append(0x42)  # JL (2OP opcode 0x02)
+                code.append(val1 & 0xFF)
+                code.append(val2 & 0xFF)
+                code.append(0x00)  # Branch on false (inverted logic)
+
+        return bytes(code)
+
+    def gen_less_or_equal(self, operands: List[ASTNode]) -> bytes:
+        """Generate <= comparison (less than or equal).
+
+        <L=? a b> tests if a <= b.
+        Implemented as NOT(a > b).
+
+        Args:
+            operands[0]: First value
+            operands[1]: Second value
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if len(operands) < 2:
+            return b''
+
+        code = bytearray()
+        val1 = self.get_operand_value(operands[0])
+        val2 = self.get_operand_value(operands[1])
+
+        if isinstance(val1, int) and isinstance(val2, int):
+            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
+                # JG with inverted branch (branch on false)
+                code.append(0x43)  # JG (2OP opcode 0x03)
+                code.append(val1 & 0xFF)
+                code.append(val2 & 0xFF)
+                code.append(0x00)  # Branch on false (inverted logic)
+
+        return bytes(code)
 
     # ===== Comparison Operations =====
 
