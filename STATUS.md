@@ -583,7 +583,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ MAJOR MILESTONE - Daemon System: QUEUE, INT, DEQUEUE
-- **Commit**: (pending)
+- **Commit**: 093abf9
 - QUEUE - Schedule interrupt/daemon (78 Planetfall uses!)
 - INT - Get interrupt by name (45 Planetfall uses!)
 - DEQUEUE - Disable interrupt
@@ -595,8 +595,19 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Daemon Control and Print Utilities - ENABLE, DISABLE, PRINTADDR
+- **Commit**: (pending)
+- ENABLE - Enable interrupt (set enabled flag to 1)
+- DISABLE - Disable interrupt (alias for DEQUEUE)
+- PRINTADDR - Print string at byte address
+- Completes daemon system control opcodes
+- **Test**: daemon_extras_test.zil (1,100 bytes)
+- Brings total to 91 opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.7.0 - MAJOR MILESTONE!
+**Current Version**: 0.7.1
 
-**Status**: 🟢 Active Development - 70% Planetfall Complete!
+**Status**: 🟢 Active Development - 71% Planetfall Complete!

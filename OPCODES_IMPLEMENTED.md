@@ -26,7 +26,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Output/Print Operations (9 opcodes)
+## Output/Print Operations (10 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -38,6 +38,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | PRINTC | PRINT_CHAR | Print character | ✅ |
 | PRINTB | PRINT_PADDR | Print from byte array | ✅ |
 | PRINTI | PRINT | Print inline (property) | ✅ |
+| PRINTADDR | PRINT_ADDR | Print string at byte address | ✅ |
 
 ---
 
@@ -151,7 +152,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Parser/Game Operations (9 opcodes)
+## Parser/Game Operations (11 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -164,6 +165,8 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | QUEUE | Memory alloc | Schedule interrupt/daemon | ✅ |
 | INT | Memory lookup | Get interrupt by name | ✅ |
 | DEQUEUE | STOREW | Disable interrupt | ✅ |
+| ENABLE | STOREW | Enable interrupt | ✅ |
+| DISABLE | STOREW | Disable interrupt (alias) | ✅ |
 
 ---
 
@@ -193,11 +196,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 88 distinct operations
+- **Total Opcodes**: 91 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 39 working examples
-- **Planetfall Coverage**: ~70% of required operations
-- **Version**: 0.7.0
+- **Test Programs**: 40 working examples
+- **Planetfall Coverage**: ~71% of required operations
+- **Version**: 0.7.1
 
 ---
 
@@ -206,8 +209,6 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | ZIL Opcode | Description | Planetfall Uses |
 |------------|-------------|-----------------|
 | STRING | Build strings with escapes/interpolation | 15 |
-| ENABLE | Enable interrupt (set enabled flag) | Used with QUEUE |
-| DISABLE | Disable interrupt (clear enabled flag) | Used with QUEUE |
 
 ---
 
@@ -248,4 +249,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.7.0
+**Compiler Version**: 0.7.1

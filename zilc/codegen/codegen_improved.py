@@ -239,6 +239,8 @@ class ImprovedCodeGenerator:
             return self.gen_printb(form.operands)
         elif op_name == 'PRINTI':
             return self.gen_printi(form.operands)
+        elif op_name == 'PRINTADDR':
+            return self.gen_printaddr(form.operands)
 
         # Variables
         elif op_name == 'SET':
@@ -406,6 +408,10 @@ class ImprovedCodeGenerator:
             return self.gen_int(form.operands)
         elif op_name == 'DEQUEUE':
             return self.gen_dequeue(form.operands)
+        elif op_name == 'ENABLE':
+            return self.gen_enable(form.operands)
+        elif op_name == 'DISABLE':
+            return self.gen_disable(form.operands)
 
         # List/table operations
         elif op_name == 'REST':
@@ -570,6 +576,41 @@ class ImprovedCodeGenerator:
         """
         # Delegate to TELL implementation
         return self.gen_tell(operands)
+
+    def gen_printaddr(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINT_ADDR (print string at address).
+
+        <PRINTADDR addr> prints a string stored at the given byte address.
+        Uses PRINT_ADDR opcode (0x15 in VAR form).
+
+        Unlike PRINTB which uses packed addresses, PRINTADDR uses byte addresses.
+
+        Args:
+            operands[0]: Byte address of string
+
+        Returns:
+            bytes: Z-machine code (PRINT_ADDR)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        addr = self.get_operand_value(operands[0])
+
+        # PRINT_ADDR is VAR opcode 0x15 (V4+)
+        # For V3, we can use PRINT_PADDR with address conversion
+        if isinstance(addr, int):
+            if self.version >= 4:
+                code.append(0xF5)  # VAR form, opcode 0x15
+                code.append(0x01)  # Type byte: small constant
+                code.append(addr & 0xFF)
+            else:
+                # V3: use PRINT_PADDR
+                code.append(0xED)  # VAR form, opcode 0x0D
+                code.append(0x01)  # Type byte: small constant
+                code.append(addr & 0xFF)
+
+        return bytes(code)
 
     # ===== Variable Operations =====
 
@@ -2553,3 +2594,47 @@ class ImprovedCodeGenerator:
             code.append(0x00)  # Value 0 (disabled)
 
         return bytes(code)
+
+    def gen_enable(self, operands: List[ASTNode]) -> bytes:
+        """Generate ENABLE (enable interrupt).
+
+        <ENABLE interrupt-addr> enables an interrupt.
+        Sets the enabled flag (offset 4) to 1.
+
+        Args:
+            operands[0]: Interrupt structure address
+
+        Returns:
+            bytes: Z-machine code (STOREW to set enabled=1)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+        int_addr = self.get_operand_value(operands[0])
+
+        if isinstance(int_addr, int):
+            # STOREW int_addr 4 1  (set enabled flag to 1)
+            code.append(0xE1)  # VAR form, STOREW
+            code.append(0x15)  # Type byte: 3 small constants
+            code.append(int_addr & 0xFF)
+            code.append(0x04)  # Offset 4 (enabled flag)
+            code.append(0x01)  # Value 1 (enabled)
+
+        return bytes(code)
+
+    def gen_disable(self, operands: List[ASTNode]) -> bytes:
+        """Generate DISABLE (disable interrupt).
+
+        <DISABLE interrupt-addr> disables an interrupt.
+        Sets the enabled flag (offset 4) to 0.
+        This is an alias for DEQUEUE.
+
+        Args:
+            operands[0]: Interrupt structure address
+
+        Returns:
+            bytes: Z-machine code (STOREW to set enabled=0)
+        """
+        # DISABLE is functionally the same as DEQUEUE
+        return self.gen_dequeue(operands)
