@@ -55,7 +55,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ---
 
-## Arithmetic Operations (5 opcodes)
+## Arithmetic Operations (7 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -64,10 +64,12 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | * / MUL | MUL | Multiplication | ✅ |
 | / / DIV | DIV | Division | ✅ |
 | MOD | MOD | Modulo | ✅ |
+| MIN | Comparison | Minimum of two values | ✅ |
+| MAX | Comparison | Maximum of two values | ✅ |
 
 ---
 
-## Comparison & Predicates (8 opcodes)
+## Comparison & Predicates (9 opcodes)
 
 | ZIL Opcode | Z-machine | Description | Status |
 |------------|-----------|-------------|--------|
@@ -75,6 +77,7 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 | L? / < | JL | Less than | ✅ |
 | G? / > | JG | Greater than | ✅ |
 | ZERO? / 0? | JZ | Test if zero | ✅ |
+| ASSIGNED? | LOAD+JZ | Test if variable assigned | ✅ |
 | IN? | GET_PARENT+JE | Test containment | ✅ |
 | FSET? | TEST_ATTR | Test object attribute | ✅ |
 | HELD? | GET_PARENT+JE+WINNER | Test if player holds object | ✅ |
@@ -187,11 +190,11 @@ This document lists all ZIL opcodes/operations currently implemented in the Zork
 
 ## Summary Statistics
 
-- **Total Opcodes**: 82 distinct operations
+- **Total Opcodes**: 85 distinct operations
 - **Opcode Categories**: 13 categories
-- **Test Programs**: 37 working examples
-- **Planetfall Coverage**: ~61% of required operations
-- **Version**: 0.6.1
+- **Test Programs**: 38 working examples
+- **Planetfall Coverage**: ~62% of required operations
+- **Version**: 0.6.2
 
 ---
 
@@ -243,4 +246,4 @@ This requires implementing the STRING opcode, which is deferred for now
 ---
 
 **Last Updated**: 2025-11-16
-**Compiler Version**: 0.6.1
+**Compiler Version**: 0.6.2

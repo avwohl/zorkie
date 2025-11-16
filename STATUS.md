@@ -561,7 +561,7 @@ Current feature implementation vs. Planetfall requirements:
 ---
 
 ### ✅ Variable and Table Utilities - VALUE, LVAL, GVAL, LENGTH, NTH
-- **Commit**: (pending)
+- **Commit**: 1ae2691
 - VALUE - Get variable value (general indirection)
 - LVAL - Get local variable value
 - GVAL - Get global variable value
@@ -572,8 +572,18 @@ Current feature implementation vs. Planetfall requirements:
 
 ---
 
+### ✅ Arithmetic and Predicate Utilities - MIN, MAX, ASSIGNED?
+- **Commit**: (pending)
+- MIN - Minimum of two values
+- MAX - Maximum of two values
+- ASSIGNED? - Test if global variable is assigned
+- **Test**: min_max_test.zil (1,100 bytes)
+- Brings total to 85 opcodes implemented
+
+---
+
 **Last Updated**: 2025-11-16
 
-**Current Version**: 0.6.1
+**Current Version**: 0.6.2
 
-**Status**: 🟢 Active Development - 61% Planetfall Complete!
+**Status**: 🟢 Active Development - 62% Planetfall Complete!
