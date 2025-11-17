@@ -1,0 +1,32 @@
+# Test outputs
+output_*.z3
+output_*.z5
+output_*.z8
+my-*.z3
+my-*.z5
+test-*.z3
+
+# Hex dumps
+*.hex
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build artifacts (if you build ZILF locally)
+zilf/bin/
+zilf/obj/
+zilf/*.exe
+zilf/*.dll
+
+# Test results
+test-results.txt
+*.log

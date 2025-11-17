@@ -1,0 +1,1 @@
+../zork1/zork1.zil

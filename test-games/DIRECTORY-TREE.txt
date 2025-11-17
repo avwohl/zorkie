@@ -1,0 +1,128 @@
+test-games/ - ZIL Compiler Test Suite
+│
+├── 📖 ENTRY POINTS (start here!)
+│   ├── START-HERE.md              ← Read this first!
+│   ├── FINAL-SUMMARY.txt          ← Or this
+│   └── Makefile                   ← Or just run "make help"
+│
+├── 📚 COMPLETE GUIDES
+│   ├── HELLO-WORLD-EXAMPLE.md     ← Walkthrough of hello.zil
+│   ├── TESTING-GUIDE.md           ← Complete testing workflow
+│   ├── TEST-OUTPUT-EXAMPLES.md    ← What to expect when testing
+│   └── COMMON-BUGS.md             ← Debugging guide
+│
+├── 📋 REFERENCE MATERIALS
+│   ├── Z-MACHINE-HEADER-REF.md    ← Header format specification
+│   ├── OPCODE-REFERENCE.md        ← Z-machine opcodes
+│   ├── INDEX.md                   ← Complete directory index
+│   └── DIRECTORY-TREE.txt         ← This file
+│
+├── 📝 QUICK REFERENCES
+│   ├── QUICK-START.md
+│   ├── TEST-INVENTORY.md
+│   ├── README.md
+│   └── SUMMARY.txt
+│
+├── 🛠️ TESTING TOOLS
+│   ├── compare-zcode.sh           ← Automated test suite
+│   ├── inspect-zcode.sh           ← Bytecode inspector
+│   └── verify-zfiles.sh           ← Format validator
+│
+├── ⚙️ AUTOMATION & CONFIG
+│   ├── Makefile                   ← Common tasks (make help)
+│   └── .gitignore                 ← Ignore test outputs
+│
+├── 📂 QUICK ACCESS (examples/)
+│   ├── hello.zil                  → zilf/sample/hello/hello.zil
+│   ├── hello-reference.z3         → zilf/test/.../hello.z3
+│   ├── zork1.zil                  → zork1/zork1.zil
+│   ├── zork1-reference.z3         → zork1/COMPILED/zork1.z3
+│   ├── planetfall.zil             → ../games/planetfall/source/planetfall.zil
+│   └── planetfall-reference.z3    → ../games/planetfall/source/COMPILED/planetfall.z3
+│
+├── 🎮 TEST GAMES (complete sets)
+│   │
+│   ├── zork1/                     ← Zork I (86 KB)
+│   │   ├── *.zil                  (14 source files)
+│   │   └── COMPILED/
+│   │       └── zork1.z3           Reference binary
+│   │
+│   ├── zork3/                     ← Zork III (88 KB)
+│   │   ├── *.zil
+│   │   └── COMPILED/
+│   │       └── zork3.z3
+│   │
+│   ├── enchanter/                 ← Enchanter (111 KB)
+│   │   ├── *.zil
+│   │   └── COMPILED/
+│   │       └── enchanter.z3
+│   │
+│   └── zilf/                      ← ZILF compiler & samples
+│       ├── sample/
+│       │   ├── hello/
+│       │   │   └── hello.zil      (86 bytes - minimal!)
+│       │   ├── beer/
+│       │   │   └── beer.zil       (692 bytes - loops)
+│       │   ├── cloak/
+│       │   │   └── cloak.zil      (3.2 KB - complete game)
+│       │   ├── dragon/
+│       │   │   └── dragon.zil     (8.4 KB - adventure)
+│       │   ├── advent/
+│       │   │   └── advent.zil     (182 KB - Colossal Cave)
+│       │   └── ...7 more samples
+│       │
+│       ├── test/Dezapf.Tests/Resources/
+│       │   ├── hello.z3           (512 bytes - reference)
+│       │   └── name.z3            (1 KB - reference)
+│       │
+│       ├── src/                   Full ZILF compiler source (C#)
+│       ├── zillib/                ZIL library code
+│       └── doc/                   ZILF documentation
+│
+└── 🎯 YOUR TARGET GAME
+    ../games/planetfall/           ← Planetfall (107 KB)
+        ├── source/
+        │   ├── *.zil              Multiple source files
+        │   └── COMPILED/
+        │       └── planetfall.z3  Reference binary
+
+SUMMARY
+-------
+13 Documentation files (~45 KB)
+3 Testing scripts
+1 Makefile
+1 .gitignore  
+6 Quick-access symlinks
+5 Complete test game sets (source + binary)
+11+ ZILF sample games
+Full ZILF compiler source code
+
+QUICK COMMANDS
+--------------
+make help                # Show all commands
+make verify              # Verify test suite
+make inspect-hello       # See hello.z3 structure
+make examples            # List test cases
+make docs                # List documentation
+
+# When your compiler is ready:
+make COMPILER=./yours test-hello
+make COMPILER=./yours test-all
+
+TESTING PROGRESSION
+-------------------
+1. hello.zil (86 bytes)      ← Start here (5 lines of code)
+2. cloak.zil (3.2 KB)        ← Next (minimal complete game)
+3. zork1 (86 KB)             ← Then (full commercial game)
+4. planetfall (107 KB)       ← Finally (your target)
+
+START HERE
+----------
+$ cat START-HERE.md
+$ make inspect-hello
+$ cat HELLO-WORLD-EXAMPLE.md
+
+Then when your compiler is ready:
+$ make COMPILER=./mycompiler test-hello
+
+Good luck!

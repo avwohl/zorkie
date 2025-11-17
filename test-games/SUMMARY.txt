@@ -1,0 +1,46 @@
+TEST GAMES SUMMARY
+==================
+
+Downloaded and organized test games for ZIL compiler validation.
+
+READY TO USE (ZIL source + compiled .z3):
+------------------------------------------
+✓ Zork I       - zork1/*.zil         → zork1/COMPILED/zork1.z3 (86KB)
+✓ Zork III     - zork3/*.zil         → zork3/COMPILED/zork3.z3
+✓ Enchanter    - enchanter/*.zil     → enchanter/COMPILED/enchanter.z3
+✓ Hello (mini) - sample/hello/*.zil  → (test/Resources/hello.z3)
+✓ Name (mini)  - (no source in repo) → test/Resources/name.z3
+
+ZILF SAMPLES (source only, need to compile with ZILF for reference):
+--------------------------------------------------------------------
+- hello.zil        (5 lines - minimal)
+- beer.zil         (99 bottles)
+- cloak.zil        (Cloak of Darkness - complete minimal game)
+- cloak_plus.zil   (enhanced version)
+- dragon.zil       (simple adventure)
+- advent/          (Colossal Cave - large)
+- mandelbrot.zil   (math demo)
+
+TOOLS PROVIDED:
+---------------
+✓ compare-zcode.sh      - Automated binary comparison script
+✓ README.md             - Complete overview
+✓ TEST-INVENTORY.md     - Detailed test catalog
+✓ QUICK-START.md        - How to use these tests
+
+USAGE:
+------
+./compare-zcode.sh -c /path/to/compiler -t zork1
+./compare-zcode.sh -c /path/to/compiler -a         (all tests)
+./compare-zcode.sh -c /path/to/compiler -t zork1 -v (verbose)
+
+TESTING STRATEGY:
+-----------------
+Phase 1: Start with hello.zil (smallest)
+Phase 2: Test cloak.zil (minimal complete game)  
+Phase 3: Validate zork1 (full commercial game)
+Phase 4: Test all games
+Phase 5: Compare Planetfall output
+
+The goal: Verify your compiler produces valid Z-machine code that matches
+(or is functionally equivalent to) the reference implementations.
