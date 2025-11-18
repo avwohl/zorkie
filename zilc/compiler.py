@@ -117,8 +117,9 @@ class ZILCompiler:
         """
         import re
 
-        # Pattern to match <IFILE "filename"> or <INSERT-FILE "filename">
-        ifile_pattern = r'<\s*(?:IFILE|INSERT-FILE)\s+"([^"]+)"\s*>'
+        # Pattern to match <IFILE "filename"> or <INSERT-FILE "filename" T>
+        # Second parameter (T or other) is optional and ignored
+        ifile_pattern = r'<\s*(?:IFILE|INSERT-FILE)\s+"([^"]+)"(?:\s+[^>]*)?\s*>'
 
         def replace_ifile(match):
             filename = match.group(1)
@@ -133,6 +134,8 @@ class ZILCompiler:
                 self.log(f"  Including file: {file_path}")
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
+                # Preprocess control characters in included file
+                content = self.preprocess_control_characters(content)
                 # Recursively process nested IFILE directives
                 return self.preprocess_ifiles(content, base_path)
             except FileNotFoundError:
@@ -140,12 +143,33 @@ class ZILCompiler:
 
         return re.sub(ifile_pattern, replace_ifile, source, flags=re.IGNORECASE)
 
+    def preprocess_control_characters(self, source: str) -> str:
+        """
+        Preprocess text representations of control characters.
+        Converts ^L (form-feed marker) to actual whitespace.
+
+        Args:
+            source: Source code with potential control character markers
+
+        Returns:
+            Source code with control characters converted
+        """
+        import re
+        # Replace /^L (form-feed marker with slash) with newlines
+        # Must be done first to avoid leaving standalone /
+        source = re.sub(r'/\^L', '\n', source)
+        # Replace ^L (form-feed marker) with newlines
+        source = source.replace('^L', '\n')
+        return source
+
     def preprocess_zilf_directives(self, source: str) -> str:
         """
         Preprocess ZILF-specific directives:
         - COMPILATION-FLAG: Set compile-time flags
         - IFFLAG: Conditional compilation based on flags
         - VERSION?: Conditional compilation based on Z-machine version
+        - SETG: Track global variable values for compile-time evaluation
+        - %<COND>: Compile-time conditional evaluation
 
         Args:
             source: Source code with potential ZILF directives
@@ -154,6 +178,25 @@ class ZILCompiler:
             Source code with directives evaluated and conditionals resolved
         """
         import re
+
+        # Track compile-time global values for %<COND> evaluation
+        self.compile_globals = {}
+
+        # Extract SETG directives to track compile-time values
+        # <SETG VARNAME value>
+        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?]+)\s+(\d+|T|<>)\s*>'
+        def extract_setg(match):
+            var_name = match.group(1)
+            var_value = match.group(2)
+            if var_value.isdigit():
+                self.compile_globals[var_name] = int(var_value)
+            elif var_value == 'T':
+                self.compile_globals[var_name] = True
+            elif var_value == '<>':
+                self.compile_globals[var_name] = False
+            self.log(f"  Global: {var_name} = {self.compile_globals.get(var_name)}")
+            return match.group(0)  # Keep the SETG in source
+        source = re.sub(setg_pattern, extract_setg, source, flags=re.IGNORECASE)
 
         # First pass: Extract COMPILATION-FLAG directives
         # <COMPILATION-FLAG FLAGNAME <T>> or <COMPILATION-FLAG FLAGNAME <>>
@@ -176,6 +219,9 @@ class ZILCompiler:
         # Third pass: Evaluate VERSION? conditionals
         # Process manually to handle nested brackets properly
         source = self._process_version(source)
+
+        # Fourth pass: Evaluate %<COND> compile-time conditionals
+        source = self._process_compile_cond(source)
 
         return source
 
@@ -358,6 +404,146 @@ class ZILCompiler:
             'false_expr': false_expr
         }
 
+    def _process_compile_cond(self, source: str) -> str:
+        """
+        Process %<COND> compile-time conditionals.
+        Example: %<COND (<==? ,ZORK-NUMBER 1> '(...)) (T '(...))>
+        Evaluates at compile time and splices result into code.
+        """
+        import re
+        result = []
+        pos = 0
+
+        while pos < len(source):
+            # Look for %<COND (note: % prefix is critical)
+            match = re.search(r'%<\s*COND\s+', source[pos:], re.IGNORECASE)
+            if not match:
+                result.append(source[pos:])
+                break
+
+            # Add text before match
+            result.append(source[pos:pos + match.start()])
+
+            # Find the matching > for this %<COND
+            # Skip the % and start from <
+            start = pos + match.start() + 1  # +1 to skip %
+            content, end = self._extract_balanced_content(source, start)
+
+            if content:
+                # Evaluate the COND at compile time
+                evaluated = self._evaluate_compile_cond(content)
+                result.append(evaluated)
+                pos = end
+            else:
+                # Can't find matching bracket, keep original
+                result.append(match.group(0))
+                pos += match.end()
+
+        return ''.join(result)
+
+    def _evaluate_compile_cond(self, content: str) -> str:
+        """
+        Evaluate a compile-time COND expression.
+        Returns the selected branch as a string.
+        """
+        import re
+
+        # content is like: <COND (test1 result1) (test2 result2) ...>
+        # Extract just the COND body (remove <COND and final >)
+        cond_match = re.match(r'<\s*COND\s+(.*)\s*>\s*$', content, re.DOTALL | re.IGNORECASE)
+        if not cond_match:
+            return content  # Can't parse, return as-is
+
+        cond_body = cond_match.group(1).strip()
+
+        # Parse clauses: each is a parenthesized (test result...) pair
+        clauses = self._parse_cond_clauses(cond_body)
+
+        # Evaluate each clause
+        for test, result in clauses:
+            if self._evaluate_compile_test(test):
+                # This clause matches, return its result
+                # Strip leading quote if present (quote means "literal")
+                result = result.strip()
+                if result.startswith("'"):
+                    result = result[1:].strip()
+                return result
+
+        # No clause matched, return empty
+        return ''
+
+    def _parse_cond_clauses(self, body: str) -> list:
+        """Parse COND clauses into (test, result) pairs."""
+        clauses = []
+        pos = 0
+
+        while pos < len(body):
+            # Skip whitespace
+            while pos < len(body) and body[pos] in ' \t\n\r':
+                pos += 1
+
+            if pos >= len(body):
+                break
+
+            # Expect (test result...)
+            if body[pos] != '(':
+                break
+
+            # Find matching )
+            depth = 1
+            start = pos + 1
+            pos += 1
+
+            while pos < len(body) and depth > 0:
+                if body[pos] == '(':
+                    depth += 1
+                elif body[pos] == ')':
+                    depth -= 1
+                pos += 1
+
+            if depth == 0:
+                clause_content = body[start:pos-1].strip()
+                # Split into test and result
+                # Find first space-separated token (test), rest is result
+                parts = clause_content.split(None, 1)
+                if len(parts) == 2:
+                    test, result = parts
+                    clauses.append((test.strip(), result.strip()))
+                elif len(parts) == 1:
+                    # Just a test, no result
+                    clauses.append((parts[0].strip(), ''))
+
+        return clauses
+
+    def _evaluate_compile_test(self, test: str) -> bool:
+        """Evaluate a compile-time test expression."""
+        import re
+
+        # Handle different test types:
+        # - T (always true)
+        # - <==? ,VAR value>
+        # - <EQUAL? ...>
+        # - etc.
+
+        if test.upper() == 'T':
+            return True
+
+        if test.upper() == '<>':
+            return False
+
+        # Match <==? ,VAR value>
+        eq_match = re.match(r'<\s*==\?\s+,([A-Z0-9\-?]+)\s+(\d+)\s*>', test, re.IGNORECASE)
+        if eq_match:
+            var_name = eq_match.group(1)
+            var_value = int(eq_match.group(2))
+            # Check compile-time globals
+            if var_name in self.compile_globals:
+                return self.compile_globals[var_name] == var_value
+            return False
+
+        # Default: can't evaluate, return False
+        return False
+
     def compile_string(self, source: str, filename: str = "<input>") -> bytes:
         """
         Compile ZIL source code to Z-machine bytecode.
@@ -369,6 +555,9 @@ class ZILCompiler:
         Returns:
             Z-machine story file as bytes
         """
+        # Preprocess control characters (^L etc.)
+        source = self.preprocess_control_characters(source)
+
         # Preprocess IFILE directives
         base_path = Path(filename).parent if filename != "<input>" else Path.cwd()
         self.log("Preprocessing IFILE directives...")

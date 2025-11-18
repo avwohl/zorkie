@@ -1050,8 +1050,115 @@ V5 Complete Feature List:
 
 ---
 
-**Last Updated**: 2025-11-16
+---
 
-**Current Version**: 2.4.0
+## 🔍 REALITY CHECK - Binary Compilation Testing (2025-11-18)
 
-**Status**: ✅ COMPLETE - 100% Planetfall Coverage + Multi-Version Support!
+### Test Results Summary
+
+After attempting to compile actual ZIL sources and compare with official binaries:
+
+**Finding #1: Compiler Incompleteness**
+- Tested: Zork1 (official Infocom source vs official binary)
+- Official binary: 86,838 bytes (Release 119, Serial 880429)
+- Our output: 622 bytes (minimal stub)
+- **Conclusion**: Compiler generates only header stubs, not complete games
+
+**Finding #2: ZILF vs Infocom ZIL**
+- Modern ZIL files use ZILF syntax (backtick operator, etc.)
+- Our compiler targets original Infocom ZIL
+- Cannot test against ZILF-compiled binaries
+
+### What's Actually Missing
+
+Despite 188 opcodes "implemented", the compiler lacks:
+
+1. **Complete Code Generation**
+   - Opcodes generate individual instructions
+   - Missing: Full routine body compilation
+   - Missing: Control flow graphs and branching
+   - Missing: Label resolution and jumps
+
+2. **Object Table Generation**
+   - Only minimal stub objects
+   - Missing: Complete property tables
+   - Missing: Object tree relationships
+   - Missing: Attribute packing
+
+3. **Dictionary Generation**
+   - Basic structure exists
+   - Missing: Full vocabulary integration
+   - Missing: Word encoding and sorting
+   - Missing: Synonym resolution
+
+4. **String Table**
+   - TELL works for inline strings
+   - Missing: String table optimization
+   - Missing: Abbreviations
+   - Missing: String deduplication
+
+5. **Memory Layout**
+   - Header generation works
+   - Missing: Proper section sizing
+   - Missing: Dynamic memory allocation
+   - Missing: High memory packing
+
+6. **Routine Compilation**
+   - Individual opcodes work
+   - Missing: Complete routine assembly
+   - Missing: Local variable allocation
+   - Missing: Stack frame management
+
+### What Actually Works
+
+- ✅ Header generation (64-byte Z-machine header)
+- ✅ Individual opcode instruction encoding
+- ✅ ZSCII text encoding
+- ✅ Basic memory structure
+- ✅ Lexer and parser (parse ZIL syntax)
+- ⚠️ Simple test programs (minimal.zil, hello.zil) - **but these are minimal stubs**
+
+### What's Left to Do
+
+**Phase 1: Complete Code Generation (3-5 sessions)**
+- Generate complete routine bodies with all instructions
+- Implement full COND branching with proper labels
+- Add REPEAT/DO loop generation
+- Complete control flow graph construction
+
+**Phase 2: Object System (2-3 sessions)**
+- Generate complete property tables
+- Build object tree with parent/child/sibling links
+- Pack attributes into bit vectors
+- Implement default property handling
+
+**Phase 3: Dictionary & Strings (2 sessions)**
+- Build complete dictionary from SYNTAX and vocabulary
+- Implement string table with deduplication
+- Add abbreviations table
+- Sort dictionary entries
+
+**Phase 4: Integration Testing (2-3 sessions)**
+- Compile Zork1 completely
+- Compare structure with official binary
+- Fix discrepancies
+- Validate with other Infocom games
+
+**Total Remaining: ~10-13 sessions of focused work**
+
+### Honest Assessment
+
+- **Opcode Coverage**: 90%+ (188 opcodes)
+- **Actual Compiler Completion**: ~30%
+- **Can compile real games**: No
+- **Can generate valid test programs**: Partially (minimal stubs only)
+
+The opcode implementations are mostly correct, but they're like having a box of parts without the assembly instructions. The compiler architecture needs the integration layer to produce complete, playable story files.
+
+---
+
+**Last Updated**: 2025-11-18
+
+**Current Version**: 2.4.0 (opcode library) / 0.3.0 (actual compiler)
+
+**Status**: ⚠️ IN PROGRESS - Opcode library complete, compiler integration 30% complete
