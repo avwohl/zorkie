@@ -70,7 +70,8 @@ class ZAssembler:
         return sum(data[0x40:]) & 0xFFFF
 
     def build_story_file(self, routines: bytes, objects: bytes = b'',
-                        dictionary: bytes = b'', globals_data: bytes = b'') -> bytes:
+                        dictionary: bytes = b'', globals_data: bytes = b'',
+                        abbreviations_table=None) -> bytes:
         """
         Build complete story file.
 
@@ -79,6 +80,7 @@ class ZAssembler:
             objects: Object table data
             dictionary: Dictionary data
             globals_data: Global variables data
+            abbreviations_table: AbbreviationsTable instance (optional)
 
         Returns:
             Complete story file as bytes
@@ -97,6 +99,39 @@ class ZAssembler:
         globals_addr = current_addr
         story.extend(globals_data)
         current_addr += len(globals_data)
+
+        # Pad to word boundary
+        while len(story) % 2 != 0:
+            story.append(0)
+            current_addr += 1
+
+        # Add abbreviations table (V2+) if present
+        abbrev_addr = 0
+        abbrev_strings_addr = 0
+        if abbreviations_table and self.version >= 2 and len(abbreviations_table) > 0:
+            # Encode abbreviation strings first
+            from .text_encoding import ZTextEncoder
+            text_encoder = ZTextEncoder(self.version)
+            abbreviations_table.encode_abbreviations(text_encoder)
+
+            # Abbreviations table comes first (96 word addresses)
+            abbrev_addr = current_addr
+            abbrev_strings_addr = abbrev_addr + 192  # After the 96-entry table
+
+            # Generate the abbreviations table
+            abbrev_table_bytes = abbreviations_table.get_abbreviation_table_bytes(abbrev_strings_addr)
+            story.extend(abbrev_table_bytes)
+            current_addr += len(abbrev_table_bytes)
+
+            # Add the encoded abbreviation strings
+            for encoded_string in abbreviations_table.encoded_strings:
+                story.extend(encoded_string)
+                current_addr += len(encoded_string)
+
+            # Pad to word boundary
+            while len(story) % 2 != 0:
+                story.append(0)
+                current_addr += 1
 
         # Pad to next boundary if needed
         while len(story) % 2 != 0:
@@ -173,6 +208,8 @@ class ZAssembler:
         struct.pack_into('>H', story, 0x0A, objects_addr)  # Object table address
         struct.pack_into('>H', story, 0x0C, globals_addr)  # Globals address
         struct.pack_into('>H', story, 0x0E, current_addr)  # Static memory base
+        if abbrev_addr > 0:
+            struct.pack_into('>H', story, 0x18, abbrev_addr)  # Abbreviations table address
 
         # Calculate and store checksum
         checksum = self.calculate_checksum(story)

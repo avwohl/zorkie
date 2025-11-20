@@ -16,9 +16,10 @@ from ..zmachine.text_encoding import ZTextEncoder, words_to_bytes
 class ImprovedCodeGenerator:
     """Enhanced code generator with extensive opcode support."""
 
-    def __init__(self, version: int = 3):
+    def __init__(self, version: int = 3, abbreviations_table=None):
         self.version = version
-        self.encoder = ZTextEncoder(version)
+        self.abbreviations_table = abbreviations_table
+        self.encoder = ZTextEncoder(version, abbreviations_table=abbreviations_table)
         self.opcodes = OpcodeTable()
 
         # Symbol tables

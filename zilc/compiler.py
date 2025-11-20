@@ -649,9 +649,51 @@ class ZILCompiler:
             self.version = program.version
             self.log(f"  Target version: {self.version}")
 
+        # Build abbreviations table (V2+)
+        abbreviations_table = None
+        if self.version >= 2:
+            from .zmachine.abbreviations import AbbreviationsTable
+            self.log("Building abbreviations table...")
+
+            # Collect all strings from the program
+            all_strings = []
+
+            # Strings from object/room descriptions
+            for obj in program.objects + program.rooms:
+                for key, value in obj.properties.items():
+                    if isinstance(value, str):
+                        all_strings.append(value)
+                    elif hasattr(value, 'value') and isinstance(value.value, str):
+                        all_strings.append(value.value)
+
+            # Strings from routines (TELL statements, inline strings)
+            from .parser.ast_nodes import FormNode, StringNode
+            def collect_strings_from_form(form):
+                """Recursively collect strings from form."""
+                if isinstance(form, StringNode):
+                    all_strings.append(form.value)
+                elif isinstance(form, FormNode):
+                    # FormNode uses 'operands', not 'args'
+                    for operand in form.operands:
+                        collect_strings_from_form(operand)
+                elif isinstance(form, (list, tuple)):
+                    for item in form:
+                        collect_strings_from_form(item)
+
+            for routine in program.routines:
+                for statement in routine.body:
+                    collect_strings_from_form(statement)
+
+            self.log(f"  Collected {len(all_strings)} strings")
+
+            # Build abbreviations table
+            abbreviations_table = AbbreviationsTable()
+            abbreviations_table.analyze_strings(all_strings, max_abbrevs=96)
+            self.log(f"  Selected {len(abbreviations_table)} abbreviations")
+
         # Code generation
         self.log("Generating code...")
-        codegen = ImprovedCodeGenerator(self.version)
+        codegen = ImprovedCodeGenerator(self.version, abbreviations_table=abbreviations_table)
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
 
@@ -887,7 +929,8 @@ class ZILCompiler:
         story = assembler.build_story_file(
             routines_code,
             objects_data,
-            dict_data
+            dict_data,
+            abbreviations_table=abbreviations_table
         )
 
         return story
@@ -903,7 +946,8 @@ def main():
     parser.add_argument('input', help='Input .zil source file')
     parser.add_argument('-o', '--output', help='Output story file (.z3, .z5, etc.)')
     parser.add_argument('-v', '--version', type=int, default=3,
-                       choices=[3, 4, 5, 8],
+                       choices=[1, 2, 3, 4, 5, 6, 7, 8],
+                       metavar='1-8',
                        help='Target Z-machine version (default: 3)')
     parser.add_argument('-i', '--include', action='append',
                        help='Include additional ZIL files (can be used multiple times)')

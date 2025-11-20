@@ -20,11 +20,12 @@ ALPHABET_A2 = " \x00\x00\x00\x00\x00\n0123456789.,!?_#'\"/\\-:()"
 class ZTextEncoder:
     """Encodes text to Z-machine format."""
 
-    def __init__(self, version: int = 3):
+    def __init__(self, version: int = 3, abbreviations_table=None):
         self.version = version
         self.alphabet_a0 = ALPHABET_A0
         self.alphabet_a1 = ALPHABET_A1
         self.alphabet_a2 = ALPHABET_A2
+        self.abbreviations_table = abbreviations_table
 
     def char_to_zchar(self, ch: str, current_alphabet: int = 0) -> Tuple[List[int], int]:
         """
@@ -79,13 +80,14 @@ class ZTextEncoder:
         else:
             return ([6, high, low], current_alphabet)
 
-    def encode_string(self, text: str, max_words: int = None) -> List[int]:
+    def encode_string(self, text: str, max_words: int = None, use_abbreviations: bool = True) -> List[int]:
         """
         Encode a string to Z-characters packed into 16-bit words.
 
         Args:
             text: The string to encode
             max_words: Maximum number of 16-bit words (for dictionary entries)
+            use_abbreviations: Whether to use abbreviations table (default True)
 
         Returns:
             List of 16-bit words with Z-characters packed in
@@ -94,9 +96,28 @@ class ZTextEncoder:
         zchars = []
         current_alphabet = 0
 
-        for ch in text:
+        # Process text with abbreviation support
+        i = 0
+        while i < len(text):
+            # Try to find abbreviation match if enabled
+            if use_abbreviations and self.abbreviations_table and len(self.abbreviations_table) > 0:
+                match = self.abbreviations_table.find_abbreviation(text, i)
+                if match:
+                    abbrev_index, abbrev_length = match
+                    # Encode abbreviation reference
+                    # Z-char 1-3 followed by index within that table (0-31)
+                    table_num = abbrev_index // 32  # 0, 1, or 2
+                    table_index = abbrev_index % 32
+                    abbrev_zchar = 1 + table_num  # Z-char 1, 2, or 3
+                    zchars.extend([abbrev_zchar, table_index])
+                    i += abbrev_length
+                    continue
+
+            # No abbreviation match - encode character normally
+            ch = text[i]
             ch_zchars, current_alphabet = self.char_to_zchar(ch.lower(), current_alphabet)
             zchars.extend(ch_zchars)
+            i += 1
 
         # Pad to multiple of 3
         while len(zchars) % 3 != 0:
@@ -137,6 +158,20 @@ class ZTextEncoder:
         """
         max_words = 2 if self.version <= 3 else 3
         return self.encode_string(word, max_words)
+
+    def encode_text_zchars(self, text: str, use_abbreviations: bool = False) -> bytes:
+        """
+        Encode text to Z-character bytes (for abbreviation strings).
+
+        Args:
+            text: Text to encode
+            use_abbreviations: Whether to use abbreviations (False for encoding abbreviations themselves)
+
+        Returns:
+            Bytes of encoded text
+        """
+        words = self.encode_string(text, use_abbreviations=use_abbreviations)
+        return words_to_bytes(words)
 
 
 def encode_string(text: str, version: int = 3) -> List[int]:
