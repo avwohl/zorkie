@@ -144,10 +144,10 @@ self.max_properties = 31 (V3) or 63 (V5+)
 
 ```bash
 # Compile for V3 (default)
-python3 zilc.py game.zil -o game.z3
+./zorkie game.zil -o game.z3
 
 # Compile for V5 with colors
-python3 zilc.py game_v5.zil -o game.z5
+./zorkie game_v5.zil -o game.z5
 
 # The <VERSION> directive in the .zil file
 # determines the target version

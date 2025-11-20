@@ -21,7 +21,7 @@ No external dependencies required - uses only Python 3 standard library.
 
 ```bash
 cd zorkie
-python3 zilc.py --help
+./zorkie --help
 ```
 
 ## Usage
@@ -29,7 +29,7 @@ python3 zilc.py --help
 ### Basic Compilation
 
 ```bash
-python3 zilc.py input.zil
+./zorkie input.zil
 ```
 
 This will create `input.z3` in the same directory.
@@ -37,19 +37,19 @@ This will create `input.z3` in the same directory.
 ### Specify Output File
 
 ```bash
-python3 zilc.py input.zil -o game.z3
+./zorkie input.zil -o game.z3
 ```
 
 ### Target Different Z-machine Version
 
 ```bash
-python3 zilc.py input.zil -v 5  # Creates .z5 file
+./zorkie input.zil -v 5  # Creates .z5 file
 ```
 
 ### Verbose Output
 
 ```bash
-python3 zilc.py input.zil --verbose
+./zorkie input.zil --verbose
 ```
 
 ## Architecture
@@ -214,8 +214,8 @@ python3 tests/test_lexer.py
 ### Compiler Tests
 
 ```bash
-python3 zilc.py examples/minimal.zil --verbose
-python3 zilc.py examples/hello.zil --verbose
+./zorkie examples/minimal.zil --verbose
+./zorkie examples/hello.zil --verbose
 ```
 
 ### Running Compiled Games

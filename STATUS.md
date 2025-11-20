@@ -160,7 +160,7 @@ All examples compile and generate valid Z-code:
 
 #### Test Results
 ```bash
-python3 zilc.py examples/minimal.zil --verbose
+./zorkie examples/minimal.zil --verbose
 # Output: Compilation successful: 644 bytes
 
 python3 tools/analyze_z3.py examples/minimal.z3
@@ -285,9 +285,9 @@ Generated file sizes:
 
 ### Compile a ZIL Program
 ```bash
-python3 zilc.py input.zil              # Creates input.z3
-python3 zilc.py input.zil -v 5         # Target Z-machine v5
-python3 zilc.py input.zil --verbose    # Show compilation steps
+./zorkie input.zil              # Creates input.z3
+./zorkie input.zil -v 5         # Target Z-machine v5
+./zorkie input.zil --verbose    # Show compilation steps
 ```
 
 ### Analyze Z-machine File
