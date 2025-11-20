@@ -705,9 +705,9 @@ class ZILCompiler:
             self.log(f"  Collected {len(all_strings)} strings")
 
             # Build abbreviations table
-            # Generate more candidates than needed (300) to allow overlap elimination
+            # Generate more candidates than needed (1000) to allow overlap elimination
             abbreviations_table = AbbreviationsTable()
-            abbreviations_table.analyze_strings(all_strings, max_abbrevs=300)
+            abbreviations_table.analyze_strings(all_strings, max_abbrevs=1000)
             self.log(f"  Generated {len(abbreviations_table)} abbreviation candidates")
 
         # Create string table for deduplication (optional - controlled by flag)
