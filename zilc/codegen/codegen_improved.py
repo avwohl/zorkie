@@ -16,9 +16,10 @@ from ..zmachine.text_encoding import ZTextEncoder, words_to_bytes
 class ImprovedCodeGenerator:
     """Enhanced code generator with extensive opcode support."""
 
-    def __init__(self, version: int = 3, abbreviations_table=None):
+    def __init__(self, version: int = 3, abbreviations_table=None, string_table=None):
         self.version = version
         self.abbreviations_table = abbreviations_table
+        self.string_table = string_table
         self.encoder = ZTextEncoder(version, abbreviations_table=abbreviations_table)
         self.opcodes = OpcodeTable()
 
@@ -665,10 +666,7 @@ class ImprovedCodeGenerator:
         return bytes([0xBB])
 
     def gen_tell(self, operands: List[ASTNode]) -> bytes:
-        """Generate PRINT instruction with inline text."""
-        code = bytearray()
-        code.append(0xB2)  # PRINT opcode
-
+        """Generate PRINT instruction (or PRINT_PADDR if string_table enabled)."""
         # Concatenate all string operands
         text_parts = []
         for op in operands:
@@ -678,10 +676,39 @@ class ImprovedCodeGenerator:
                 text_parts.append('\n')
 
         text = ''.join(text_parts)
-        encoded_words = self.encoder.encode_string(text)
-        code.extend(words_to_bytes(encoded_words))
 
-        return bytes(code)
+        # If string table is enabled, use PRINT_PADDR for deduplication
+        if self.string_table is not None:
+            code = bytearray()
+
+            # Add string to table and get offset
+            self.string_table.add_string(text)
+
+            # Emit PRINT_PADDR placeholder (0x8D for SHORT form, 1OP)
+            # We'll use a special marker that will be resolved during assembly
+            # For now, emit SHORT PRINT_PADDR with constant operand
+            code.append(0x8D)  # SHORT form, opcode 0x0D (PRINT_PADDR)
+
+            # Encode the string text as a marker in the bytecode
+            # The assembler will resolve this to the actual packed address
+            # We store the string length and text for the assembler to find
+            marker = b'\xFF\xFE'  # Special marker for string table reference
+            code.extend(marker)
+            text_bytes = text.encode('utf-8')
+            code.append(len(text_bytes) & 0xFF)
+            code.append((len(text_bytes) >> 8) & 0xFF)
+            code.extend(text_bytes)
+
+            return bytes(code)
+        else:
+            # Original behavior: inline PRINT
+            code = bytearray()
+            code.append(0xB2)  # PRINT opcode
+
+            encoded_words = self.encoder.encode_string(text)
+            code.extend(words_to_bytes(encoded_words))
+
+            return bytes(code)
 
     def gen_print_num(self, operands: List[ASTNode]) -> bytes:
         """Generate PRINT_NUM (print signed number)."""

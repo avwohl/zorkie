@@ -65,6 +65,31 @@ class StringTable:
             return None
         return self.base_address + self.addresses[text]
 
+    def get_packed_address(self, text: str, version: int = 3) -> Optional[int]:
+        """
+        Get the packed address of a string for use with PRINT_PADDR.
+
+        Args:
+            text: The string to look up
+            version: Z-machine version (affects packing)
+
+        Returns:
+            Packed address, or None if string not in table
+        """
+        addr = self.get_address(text)
+        if addr is None:
+            return None
+
+        # Packed address formula depends on version
+        if version <= 3:
+            return addr // 2
+        elif version <= 5:
+            return addr // 4
+        elif version <= 7:
+            return addr // 4
+        else:  # V8
+            return addr // 8
+
     def get_offset(self, text: str) -> Optional[int]:
         """
         Get the offset of a string relative to base_address.

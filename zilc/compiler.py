@@ -18,9 +18,10 @@ from .zmachine import ZAssembler, ObjectTable, Dictionary
 class ZILCompiler:
     """Main ZIL compiler class."""
 
-    def __init__(self, version: int = 3, verbose: bool = False):
+    def __init__(self, version: int = 3, verbose: bool = False, enable_string_dedup: bool = False):
         self.version = version
         self.verbose = verbose
+        self.enable_string_dedup = enable_string_dedup
         self.compilation_flags = {}  # ZILF compilation flags
 
     def log(self, message: str):
@@ -709,11 +710,24 @@ class ZILCompiler:
             abbreviations_table.analyze_strings(all_strings, max_abbrevs=300)
             self.log(f"  Generated {len(abbreviations_table)} abbreviation candidates")
 
+        # Create string table for deduplication (optional - controlled by flag)
+        string_table = None
+        if self.enable_string_dedup:
+            from .zmachine.string_table import StringTable
+            from .zmachine.text_encoding import ZTextEncoder
+            text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table)
+            string_table = StringTable(text_encoder)
+            self.log("String table deduplication enabled")
+
         # Code generation
         self.log("Generating code...")
-        codegen = ImprovedCodeGenerator(self.version, abbreviations_table=abbreviations_table)
+        codegen = ImprovedCodeGenerator(self.version, abbreviations_table=abbreviations_table,
+                                       string_table=string_table)
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
+
+        if string_table is not None:
+            self.log(f"  String table: {len(string_table)} unique strings")
 
         # Build object table with proper properties
         self.log("Building object table...")
@@ -988,7 +1002,8 @@ class ZILCompiler:
             routines_code,
             objects_data,
             dict_data,
-            abbreviations_table=abbreviations_table
+            abbreviations_table=abbreviations_table,
+            string_table=string_table
         )
 
         return story
@@ -1011,10 +1026,13 @@ def main():
                        help='Include additional ZIL files (can be used multiple times)')
     parser.add_argument('--verbose', action='store_true',
                        help='Verbose output')
+    parser.add_argument('--string-dedup', action='store_true',
+                       help='Enable string table deduplication (uses PRINT_PADDR)')
 
     args = parser.parse_args()
 
-    compiler = ZILCompiler(version=args.version, verbose=args.verbose)
+    compiler = ZILCompiler(version=args.version, verbose=args.verbose,
+                          enable_string_dedup=args.string_dedup)
 
     # Use multi-file compilation if includes are specified
     if args.include:

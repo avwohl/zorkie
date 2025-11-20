@@ -69,9 +69,68 @@ class ZAssembler:
         """Calculate story file checksum (sum of all bytes except header)."""
         return sum(data[0x40:]) & 0xFFFF
 
+    def _resolve_string_markers(self, routines: bytes, string_table) -> bytes:
+        """
+        Resolve string table markers in routine bytecode.
+
+        Replaces markers (0x8D 0xFF 0xFE <length> <text>) with actual
+        PRINT_PADDR instructions (0x8D <packed_addr_hi> <packed_addr_lo>).
+
+        Args:
+            routines: Original routine bytecode with markers
+            string_table: StringTable instance with resolved addresses
+
+        Returns:
+            Modified routine bytecode with markers resolved
+        """
+        result = bytearray()
+        i = 0
+
+        while i < len(routines):
+            # Check for string table marker: 0x8D 0xFF 0xFE
+            if (i + 4 < len(routines) and
+                routines[i] == 0x8D and
+                routines[i+1] == 0xFF and
+                routines[i+2] == 0xFE):
+
+                # Read string length (2 bytes, little-endian)
+                text_len = routines[i+3] | (routines[i+4] << 8)
+
+                # Read string text
+                if i + 5 + text_len <= len(routines):
+                    text_bytes = routines[i+5:i+5+text_len]
+                    text = text_bytes.decode('utf-8')
+
+                    # Get packed address from string table
+                    packed_addr = string_table.get_packed_address(text, self.version)
+
+                    if packed_addr is not None:
+                        # Emit PRINT_PADDR with actual packed address
+                        result.append(0x8D)  # SHORT PRINT_PADDR
+                        result.append((packed_addr >> 8) & 0xFF)  # High byte
+                        result.append(packed_addr & 0xFF)  # Low byte
+
+                        # Skip past the marker and text
+                        i += 5 + text_len
+                        continue
+                    else:
+                        # String not in table (shouldn't happen), keep marker
+                        result.append(routines[i])
+                        i += 1
+                else:
+                    # Incomplete marker, keep byte
+                    result.append(routines[i])
+                    i += 1
+            else:
+                # Normal bytecode, copy as-is
+                result.append(routines[i])
+                i += 1
+
+        return bytes(result)
+
     def build_story_file(self, routines: bytes, objects: bytes = b'',
                         dictionary: bytes = b'', globals_data: bytes = b'',
-                        abbreviations_table=None) -> bytes:
+                        abbreviations_table=None, string_table=None) -> bytes:
         """
         Build complete story file.
 
@@ -81,6 +140,7 @@ class ZAssembler:
             dictionary: Dictionary data
             globals_data: Global variables data
             abbreviations_table: AbbreviationsTable instance (optional)
+            string_table: StringTable instance (optional, for deduplication)
 
         Returns:
             Complete story file as bytes
@@ -198,8 +258,32 @@ class ZAssembler:
         # Mark start of high memory
         self.high_mem_base = len(story)
 
+        # If string table is present, add string table after routines and resolve markers
+        if string_table is not None:
+            # Calculate where string table will be located (after routines)
+            string_table_base = self.high_mem_base + len(routines)
+
+            # Align to word boundary
+            if string_table_base % 2 != 0:
+                string_table_base += 1
+
+            # Set the base address in string table
+            string_table.set_base_address(string_table_base)
+
+            # Resolve string table markers in routines
+            routines = self._resolve_string_markers(routines, string_table)
+
         # Add routines
         story.extend(routines)
+
+        # Add string table data if present
+        if string_table is not None:
+            # Align to word boundary
+            while len(story) % 2 != 0:
+                story.append(0)
+
+            # Add all encoded strings
+            story.extend(string_table.get_encoded_data())
 
         # Update header with correct addresses
         struct.pack_into('>H', story, 0x04, self.high_mem_base)  # High memory base
