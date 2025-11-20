@@ -667,22 +667,39 @@ class ZILCompiler:
                         all_strings.append(value.value)
 
             # Strings from routines (TELL statements, inline strings)
-            from .parser.ast_nodes import FormNode, StringNode
-            def collect_strings_from_form(form):
-                """Recursively collect strings from form."""
-                if isinstance(form, StringNode):
-                    all_strings.append(form.value)
-                elif isinstance(form, FormNode):
-                    # FormNode uses 'operands', not 'args'
-                    for operand in form.operands:
-                        collect_strings_from_form(operand)
-                elif isinstance(form, (list, tuple)):
-                    for item in form:
-                        collect_strings_from_form(item)
+            from .parser.ast_nodes import FormNode, StringNode, CondNode, RepeatNode
+            def collect_strings_from_node(node):
+                """Recursively collect strings from any AST node."""
+                if node is None:
+                    return
+                elif isinstance(node, StringNode):
+                    all_strings.append(node.value)
+                elif isinstance(node, FormNode):
+                    # Recurse into all operands
+                    for operand in node.operands:
+                        collect_strings_from_node(operand)
+                elif isinstance(node, CondNode):
+                    # CondNode has clauses: list of (condition, actions) tuples
+                    for clause in node.clauses:
+                        if isinstance(clause, (list, tuple)):
+                            # clause is (condition, actions)
+                            for item in clause:
+                                collect_strings_from_node(item)
+                        else:
+                            collect_strings_from_node(clause)
+                elif isinstance(node, RepeatNode):
+                    # RepeatNode has bindings and body
+                    for statement in node.body:
+                        collect_strings_from_node(statement)
+                elif isinstance(node, (list, tuple)):
+                    # Recurse into lists/tuples
+                    for item in node:
+                        collect_strings_from_node(item)
+                # AtomNode, NumberNode, etc. don't contain strings
 
             for routine in program.routines:
                 for statement in routine.body:
-                    collect_strings_from_form(statement)
+                    collect_strings_from_node(statement)
 
             self.log(f"  Collected {len(all_strings)} strings")
 
