@@ -82,7 +82,10 @@ class StringDeduplicationPass(OptimizationPass):
 
         self.log(f"  Total strings: {total_strings}")
         self.log(f"  Unique strings: {unique_strings}")
-        self.log(f"  Duplicates: {duplicates} ({duplicates/total_strings*100:.1f}%)")
+        if total_strings > 0:
+            self.log(f"  Duplicates: {duplicates} ({duplicates/total_strings*100:.1f}%)")
+        else:
+            self.log(f"  Duplicates: 0 (0.0%)")
 
         # Phase 4: Build deduplicated string table
         string_table_data = self._build_string_table()
