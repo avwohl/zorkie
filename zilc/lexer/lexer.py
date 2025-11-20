@@ -70,6 +70,7 @@ class Lexer:
         self.column = 1
         self.tokens: List[Token] = []
         self.paren_depth = 0  # Track parenthesis depth for context-aware semicolon handling
+        self.angle_depth = 0  # Track angle bracket depth for context-aware semicolon handling
 
     def error(self, message: str):
         """Raise a lexer error with location information."""
@@ -147,8 +148,14 @@ class Lexer:
             # Now skip the form
             self.skip_paren_form_comment()
         else:
-            # Line comment: ; comment to end of line
-            while self.peek() and self.peek() != '\n':
+            # Inline comment: ; comments out next token/word, stops at delimiters or whitespace
+            # Skip the semicolon
+            self.advance()
+            # Skip whitespace after semicolon
+            while self.peek() and self.peek() in ' \t':
+                self.advance()
+            # Skip until delimiter or whitespace (comments out one token)
+            while self.peek() and self.peek() not in ' \t\n><()':
                 self.advance()
 
     def skip_angle_form_comment(self):
@@ -295,9 +302,9 @@ class Lexer:
                     # Fall through to atom handling below
                     pass
                 # Check if this could be a ZILF separator:
-                # Inside parentheses AND not followed by comment indicators (" < ()
+                # Inside parentheses (but not angle brackets) AND not followed by comment indicators (" < ()
                 # Skip whitespace to check what comes after
-                elif self.paren_depth > 0:
+                elif self.paren_depth > 0 and self.angle_depth == 0:
                     pos = 1
                     while self.peek(pos) and self.peek(pos) in ' \t':
                         pos += 1
@@ -335,9 +342,11 @@ class Lexer:
             # Delimiters
             if ch == '<':
                 self.advance()
+                self.angle_depth += 1
                 self.tokens.append(Token(TokenType.LANGLE, '<', line, col))
             elif ch == '>':
                 self.advance()
+                self.angle_depth -= 1
                 self.tokens.append(Token(TokenType.RANGLE, '>', line, col))
             elif ch == '(':
                 self.advance()

@@ -116,6 +116,10 @@ class Parser:
             # Skip stray closing brackets (may result from complex macro expansions)
             self.advance()
             return None
+        elif self.current_token.type == TokenType.RPAREN:
+            # Skip stray closing parens (may result from complex macro/preprocessing)
+            self.advance()
+            return None
         else:
             self.error(f"Unexpected token at top level: {self.current_token.type.name}")
 

@@ -504,16 +504,60 @@ class ZILCompiler:
             if depth == 0:
                 clause_content = body[start:pos-1].strip()
                 # Split into test and result
-                # Find first space-separated token (test), rest is result
-                parts = clause_content.split(None, 1)
-                if len(parts) == 2:
-                    test, result = parts
-                    clauses.append((test.strip(), result.strip()))
-                elif len(parts) == 1:
-                    # Just a test, no result
-                    clauses.append((parts[0].strip(), ''))
+                # The test is the first complete s-expression
+                test, result = self._split_first_sexpr(clause_content)
+                clauses.append((test.strip(), result.strip()))
 
         return clauses
+
+    def _split_first_sexpr(self, text: str) -> tuple:
+        """
+        Split text into first s-expression and the rest.
+        Returns (first_sexpr, rest)
+        """
+        text = text.strip()
+        if not text:
+            return ('', '')
+
+        # If it starts with <, find matching >
+        if text[0] == '<':
+            depth = 1
+            pos = 1
+            while pos < len(text) and depth > 0:
+                if text[pos] == '<':
+                    depth += 1
+                elif text[pos] == '>':
+                    depth -= 1
+                pos += 1
+            if depth == 0:
+                return (text[:pos], text[pos:].strip())
+            else:
+                # Unmatched, treat whole thing as test
+                return (text, '')
+
+        # If it starts with (, find matching )
+        elif text[0] == '(':
+            depth = 1
+            pos = 1
+            while pos < len(text) and depth > 0:
+                if text[pos] == '(':
+                    depth += 1
+                elif text[pos] == ')':
+                    depth -= 1
+                pos += 1
+            if depth == 0:
+                return (text[:pos], text[pos:].strip())
+            else:
+                # Unmatched, treat whole thing as test
+                return (text, '')
+
+        # Otherwise, split on first whitespace
+        else:
+            parts = text.split(None, 1)
+            if len(parts) == 2:
+                return (parts[0], parts[1])
+            else:
+                return (parts[0], '')
 
     def _evaluate_compile_test(self, test: str) -> bool:
         """Evaluate a compile-time test expression."""
@@ -522,6 +566,7 @@ class ZILCompiler:
         # Handle different test types:
         # - T (always true)
         # - <==? ,VAR value>
+        # - <GASSIGNED? VAR>
         # - <EQUAL? ...>
         # - etc.
 
@@ -530,6 +575,13 @@ class ZILCompiler:
 
         if test.upper() == '<>':
             return False
+
+        # Match <GASSIGNED? VAR>
+        gassigned_match = re.match(r'<\s*GASSIGNED\?\s+([A-Z0-9\-?]+)\s*>', test, re.IGNORECASE)
+        if gassigned_match:
+            var_name = gassigned_match.group(1)
+            # Check if variable is in compile-time globals
+            return var_name in self.compile_globals
 
         # Match <==? ,VAR value>
         eq_match = re.match(r'<\s*==\?\s+,([A-Z0-9\-?]+)\s+(\d+)\s*>', test, re.IGNORECASE)
@@ -734,11 +786,20 @@ class ZILCompiler:
                 if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
                     for syn in synonyms:
                         if hasattr(syn, 'value'):
-                            dictionary.add_synonym(syn.value, obj_num)
+                            val = syn.value
+                            # Convert to string if it's a number
+                            if isinstance(val, (int, float)):
+                                val = str(val)
+                            dictionary.add_synonym(val, obj_num)
                         elif isinstance(syn, str):
                             dictionary.add_synonym(syn, obj_num)
+                        elif isinstance(syn, (int, float)):
+                            dictionary.add_synonym(str(syn), obj_num)
                 elif hasattr(synonyms, 'value'):
-                    dictionary.add_synonym(synonyms.value, obj_num)
+                    val = synonyms.value
+                    if isinstance(val, (int, float)):
+                        val = str(val)
+                    dictionary.add_synonym(val, obj_num)
 
             # Add adjectives
             if 'ADJECTIVE' in obj.properties:
@@ -746,11 +807,19 @@ class ZILCompiler:
                 if hasattr(adjectives, '__iter__') and not isinstance(adjectives, str):
                     for adj in adjectives:
                         if hasattr(adj, 'value'):
-                            dictionary.add_adjective(adj.value, obj_num)
+                            val = adj.value
+                            if isinstance(val, (int, float)):
+                                val = str(val)
+                            dictionary.add_adjective(val, obj_num)
                         elif isinstance(adj, str):
                             dictionary.add_adjective(adj, obj_num)
+                        elif isinstance(adj, (int, float)):
+                            dictionary.add_adjective(str(adj), obj_num)
                 elif hasattr(adjectives, 'value'):
-                    dictionary.add_adjective(adjectives.value, obj_num)
+                    val = adjectives.value
+                    if isinstance(val, (int, float)):
+                        val = str(val)
+                    dictionary.add_adjective(val, obj_num)
 
             # DISABLED: Don't add PSEUDO words to dictionary
             # PSEUDO strings are handled internally by the game, not via dictionary lookup
