@@ -940,6 +940,38 @@ class ZILCompiler:
         self.log(f"  Dictionary contains {len(dictionary.words)} words")
         dict_data = dictionary.build()
 
+        # Run optimization passes before assembly
+        self.log("Running optimization passes...")
+        from .optimization.passes import OptimizationPipeline, StringDeduplicationPass, AbbreviationOptimizationPass
+
+        compilation_data = {
+            'routines_code': routines_code,
+            'objects_data': objects_data,
+            'dictionary_data': dict_data,
+            'abbreviations_table': abbreviations_table,
+            'program': program
+        }
+
+        pipeline = OptimizationPipeline(verbose=self.verbose)
+        pipeline.add_pass(StringDeduplicationPass)
+        pipeline.add_pass(AbbreviationOptimizationPass)
+
+        compilation_data = pipeline.run(compilation_data)
+
+        # Extract optimized data
+        routines_code = compilation_data['routines_code']
+        objects_data = compilation_data['objects_data']
+        dict_data = compilation_data['dictionary_data']
+
+        # Log optimization statistics
+        if 'optimization_stats' in compilation_data:
+            for pass_name, stats in compilation_data['optimization_stats'].items():
+                if stats:
+                    self.log(f"  {pass_name}:")
+                    for key, value in stats.items():
+                        if key != 'most_common':  # Skip detailed list
+                            self.log(f"    {key}: {value}")
+
         # Assemble story file
         self.log("Assembling story file...")
         assembler = ZAssembler(self.version)

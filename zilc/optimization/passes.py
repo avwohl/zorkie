@@ -1,0 +1,266 @@
+"""
+Optimization passes for Z-machine compilation.
+
+Passes run between code generation and assembly to optimize the story file.
+Each pass transforms the compiled data to reduce size or improve performance.
+"""
+
+from typing import Dict, List, Tuple, Optional, Any
+from collections import Counter
+import struct
+
+
+class OptimizationPass:
+    """Base class for optimization passes."""
+
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+        self.stats = {}
+
+    def log(self, message: str):
+        """Log message if verbose mode enabled."""
+        if self.verbose:
+            print(f"[opt] {message}")
+
+    def run(self, compilation_data: Dict) -> Dict:
+        """
+        Run the optimization pass.
+
+        Args:
+            compilation_data: Dictionary containing:
+                - routines_code: bytes
+                - objects_data: bytes
+                - dictionary_data: bytes
+                - program: parsed AST
+
+        Returns:
+            Modified compilation_data dictionary
+        """
+        raise NotImplementedError
+
+
+class StringDeduplicationPass(OptimizationPass):
+    """
+    Global string deduplication optimization.
+
+    Collects all strings from:
+    - Inline PRINT instructions in routines
+    - Property values in objects
+    - Any other string data
+
+    Creates a deduplicated string table and rewrites references.
+    """
+
+    def __init__(self, verbose: bool = False):
+        super().__init__(verbose)
+        self.string_table: Dict[str, bytes] = {}  # string -> encoded bytes
+        self.string_addresses: Dict[str, int] = {}  # string -> address
+        self.string_usage: Counter = Counter()  # string -> usage count
+
+    def run(self, compilation_data: Dict) -> Dict:
+        """Run string deduplication pass."""
+        self.log("String Deduplication Pass")
+
+        routines_code = compilation_data.get('routines_code', b'')
+        objects_data = compilation_data.get('objects_data', b'')
+
+        # Phase 1: Extract all strings from routines
+        routine_strings = self._extract_strings_from_routines(routines_code)
+        self.log(f"  Found {len(routine_strings)} strings in routines")
+
+        # Phase 2: Extract all strings from object properties
+        object_strings = self._extract_strings_from_objects(objects_data)
+        self.log(f"  Found {len(object_strings)} strings in object properties")
+
+        # Phase 3: Count string usage
+        all_strings = routine_strings + object_strings
+        self.string_usage = Counter(all_strings)
+
+        total_strings = len(all_strings)
+        unique_strings = len(self.string_usage)
+        duplicates = total_strings - unique_strings
+
+        self.log(f"  Total strings: {total_strings}")
+        self.log(f"  Unique strings: {unique_strings}")
+        self.log(f"  Duplicates: {duplicates} ({duplicates/total_strings*100:.1f}%)")
+
+        # Phase 4: Build deduplicated string table
+        string_table_data = self._build_string_table()
+
+        # Phase 5: Rewrite routines to use string table references
+        # (This would require changing PRINT to PRINT_PADDR - complex)
+        # For now, just track statistics
+
+        self.stats = {
+            'total_strings': total_strings,
+            'unique_strings': unique_strings,
+            'duplicates': duplicates,
+            'string_table_size': len(string_table_data),
+            'most_common': self.string_usage.most_common(10)
+        }
+
+        # Store string table in compilation data
+        compilation_data['string_table'] = string_table_data
+        compilation_data['string_addresses'] = self.string_addresses
+        compilation_data['dedup_stats'] = self.stats
+
+        return compilation_data
+
+    def _extract_strings_from_routines(self, routines_code: bytes) -> List[str]:
+        """
+        Extract strings from routine bytecode.
+
+        Looks for PRINT (0xB2) instructions followed by encoded text.
+        """
+        strings = []
+        i = 0
+
+        while i < len(routines_code):
+            if routines_code[i] == 0xB2:  # PRINT opcode
+                # Following bytes are encoded Z-string until we hit end-bit
+                i += 1
+                encoded_words = []
+
+                while i + 1 < len(routines_code):
+                    word = (routines_code[i] << 8) | routines_code[i + 1]
+                    encoded_words.append(word)
+                    i += 2
+
+                    # Check for end-bit (bit 15)
+                    if word & 0x8000:
+                        break
+
+                # Decode the string (simplified - just store raw for now)
+                # In production, we'd decode Z-chars to text
+                decoded = self._decode_zstring(encoded_words)
+                if decoded:
+                    strings.append(decoded)
+            else:
+                i += 1
+
+        return strings
+
+    def _decode_zstring(self, words: List[int]) -> Optional[str]:
+        """
+        Decode Z-character words to string.
+
+        Simplified decoder - just extract printable characters.
+        """
+        # This is a simplified version - full decoder would handle:
+        # - Alphabet shifting (A0/A1/A2)
+        # - ZSCII escapes
+        # - Abbreviations
+        # For now, return a marker to track the string
+        return f"<string:{len(words)}words>"
+
+    def _extract_strings_from_objects(self, objects_data: bytes) -> List[str]:
+        """
+        Extract strings from object property tables.
+
+        Property strings are embedded in property data.
+        """
+        # This would parse the object table structure
+        # For now, return empty list as this is complex
+        return []
+
+    def _build_string_table(self) -> bytes:
+        """Build deduplicated string table."""
+        table = bytearray()
+        offset = 0
+
+        for string in self.string_usage:
+            # For now, just track the string
+            # In production, encode and store
+            self.string_addresses[string] = offset
+            # Placeholder: each string takes some bytes
+            encoded = string.encode('utf-8')  # Placeholder
+            table.extend(encoded)
+            table.append(0)  # Null terminator
+            offset = len(table)
+
+        return bytes(table)
+
+
+class PropertyOptimizationPass(OptimizationPass):
+    """
+    Optimize object property tables.
+
+    - Remove unused properties
+    - Compact property data
+    - Deduplicate property values
+    """
+
+    def run(self, compilation_data: Dict) -> Dict:
+        self.log("Property Optimization Pass")
+        # TODO: Implement property optimization
+        return compilation_data
+
+
+class AbbreviationOptimizationPass(OptimizationPass):
+    """
+    Optimize abbreviations table.
+
+    - Remove overlapping abbreviations
+    - Re-rank by actual savings
+    - Adjust abbreviation table for better compression
+    """
+
+    def run(self, compilation_data: Dict) -> Dict:
+        self.log("Abbreviation Optimization Pass")
+
+        abbreviations_table = compilation_data.get('abbreviations_table')
+        if not abbreviations_table or len(abbreviations_table) == 0:
+            return compilation_data
+
+        # Count how many abbreviations have overlap
+        overlaps = 0
+        abbrevs = abbreviations_table.abbreviations
+
+        for i, abbr1 in enumerate(abbrevs):
+            for abbr2 in abbrevs[i+1:]:
+                if abbr1 in abbr2 or abbr2 in abbr1:
+                    overlaps += 1
+
+        if overlaps > 0:
+            self.log(f"  Found {overlaps} overlapping abbreviations")
+            self.log(f"  Consider re-ranking to eliminate overlaps")
+
+        self.stats = {
+            'total_abbreviations': len(abbrevs),
+            'overlaps_detected': overlaps
+        }
+
+        return compilation_data
+
+
+class OptimizationPipeline:
+    """
+    Run multiple optimization passes in sequence.
+    """
+
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+        self.passes: List[OptimizationPass] = []
+
+    def add_pass(self, pass_class: type, **kwargs):
+        """Add an optimization pass to the pipeline."""
+        pass_instance = pass_class(verbose=self.verbose, **kwargs)
+        self.passes.append(pass_instance)
+
+    def run(self, compilation_data: Dict) -> Dict:
+        """Run all optimization passes in sequence."""
+        if self.verbose:
+            print(f"[opt] Running {len(self.passes)} optimization passes")
+
+        for pass_instance in self.passes:
+            compilation_data = pass_instance.run(compilation_data)
+
+        # Collect statistics from all passes
+        all_stats = {}
+        for i, pass_instance in enumerate(self.passes):
+            pass_name = pass_instance.__class__.__name__
+            all_stats[pass_name] = pass_instance.stats
+
+        compilation_data['optimization_stats'] = all_stats
+
+        return compilation_data

@@ -11,9 +11,10 @@ import struct
 class ObjectTable:
     """Builds Z-machine object table."""
 
-    def __init__(self, version: int = 3, text_encoder=None):
+    def __init__(self, version: int = 3, text_encoder=None, string_table=None):
         self.version = version
         self.text_encoder = text_encoder
+        self.string_table = string_table  # Optional StringTable for deduplication
         self.objects: List[Dict[str, Any]] = []
         self.property_defaults = [0] * (31 if version <= 3 else 63)
 
