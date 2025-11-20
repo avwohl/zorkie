@@ -42,3 +42,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated site (built from docs)
+site/
