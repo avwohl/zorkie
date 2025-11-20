@@ -704,9 +704,10 @@ class ZILCompiler:
             self.log(f"  Collected {len(all_strings)} strings")
 
             # Build abbreviations table
+            # Generate more candidates than needed (300) to allow overlap elimination
             abbreviations_table = AbbreviationsTable()
-            abbreviations_table.analyze_strings(all_strings, max_abbrevs=96)
-            self.log(f"  Selected {len(abbreviations_table)} abbreviations")
+            abbreviations_table.analyze_strings(all_strings, max_abbrevs=300)
+            self.log(f"  Generated {len(abbreviations_table)} abbreviation candidates")
 
         # Code generation
         self.log("Generating code...")
@@ -958,10 +959,11 @@ class ZILCompiler:
 
         compilation_data = pipeline.run(compilation_data)
 
-        # Extract optimized data
+        # Extract optimized data (may have been modified by optimization passes)
         routines_code = compilation_data['routines_code']
         objects_data = compilation_data['objects_data']
         dict_data = compilation_data['dictionary_data']
+        abbreviations_table = compilation_data.get('abbreviations_table', abbreviations_table)
 
         # Log optimization statistics
         if 'optimization_stats' in compilation_data:
@@ -971,6 +973,13 @@ class ZILCompiler:
                     for key, value in stats.items():
                         if key != 'most_common':  # Skip detailed list
                             self.log(f"    {key}: {value}")
+
+        # Re-encode abbreviations if they were optimized
+        if abbreviations_table and len(abbreviations_table) > 0:
+            from .zmachine.text_encoding import ZTextEncoder
+            text_encoder = ZTextEncoder(self.version)
+            abbreviations_table.encode_abbreviations(text_encoder)
+            self.log(f"  Encoded {len(abbreviations_table)} optimized abbreviations")
 
         # Assemble story file
         self.log("Assembling story file...")

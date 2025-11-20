@@ -212,25 +212,86 @@ class AbbreviationOptimizationPass(OptimizationPass):
         if not abbreviations_table or len(abbreviations_table) == 0:
             return compilation_data
 
-        # Count how many abbreviations have overlap
-        overlaps = 0
-        abbrevs = abbreviations_table.abbreviations
+        # Get original abbreviations
+        original_abbrevs = abbreviations_table.abbreviations.copy()
 
-        for i, abbr1 in enumerate(abbrevs):
-            for abbr2 in abbrevs[i+1:]:
-                if abbr1 in abbr2 or abbr2 in abbr1:
-                    overlaps += 1
+        # Count original overlaps
+        original_overlaps = self._count_overlaps(original_abbrevs)
 
-        if overlaps > 0:
-            self.log(f"  Found {overlaps} overlapping abbreviations")
-            self.log(f"  Consider re-ranking to eliminate overlaps")
+        if original_overlaps > 0:
+            self.log(f"  Found {original_overlaps} overlapping abbreviations")
+            self.log(f"  Eliminating overlaps...")
+
+            # Eliminate overlaps
+            optimized_abbrevs = self._eliminate_overlaps(original_abbrevs)
+
+            # Update abbreviations table
+            abbreviations_table.abbreviations = optimized_abbrevs
+            abbreviations_table.lookup = {s: i for i, s in enumerate(optimized_abbrevs)}
+
+            new_overlaps = self._count_overlaps(optimized_abbrevs)
+            eliminated = original_overlaps - new_overlaps
+
+            self.log(f"  Eliminated {eliminated} overlaps")
+            self.log(f"  Remaining overlaps: {new_overlaps}")
+            self.log(f"  New abbreviation count: {len(optimized_abbrevs)}")
+        else:
+            optimized_abbrevs = original_abbrevs
 
         self.stats = {
-            'total_abbreviations': len(abbrevs),
-            'overlaps_detected': overlaps
+            'original_count': len(original_abbrevs),
+            'original_overlaps': original_overlaps,
+            'optimized_count': len(optimized_abbrevs),
+            'optimized_overlaps': self._count_overlaps(optimized_abbrevs),
+            'overlaps_eliminated': original_overlaps - self._count_overlaps(optimized_abbrevs)
         }
 
         return compilation_data
+
+    def _count_overlaps(self, abbrevs: List[str]) -> int:
+        """Count overlapping abbreviation pairs."""
+        overlaps = 0
+        for i, abbr1 in enumerate(abbrevs):
+            for abbr2 in abbrevs[i+1:]:
+                if self._has_overlap(abbr1, abbr2):
+                    overlaps += 1
+        return overlaps
+
+    def _has_overlap(self, abbr1: str, abbr2: str) -> bool:
+        """Check if two abbreviations overlap."""
+        return abbr1 in abbr2 or abbr2 in abbr1
+
+    def _eliminate_overlaps(self, abbrevs: List[str]) -> List[str]:
+        """
+        Eliminate overlapping abbreviations using greedy selection.
+
+        Strategy:
+        1. Sort by savings (already done in original selection)
+        2. Select abbreviations one by one
+        3. Skip any that overlap with already-selected ones
+        4. Continue until we have 96 or run out of candidates
+
+        Note: If we can't reach 96 from the provided list, we try to
+        select the best non-overlapping subset.
+        """
+        selected = []
+
+        for abbr in abbrevs:
+            # Check if this abbreviation overlaps with any already selected
+            has_overlap = any(self._has_overlap(abbr, s) for s in selected)
+
+            if not has_overlap:
+                selected.append(abbr)
+
+            # Stop when we have 96 abbreviations
+            if len(selected) >= 96:
+                break
+
+        if len(selected) < 96:
+            self.log(f"  Warning: Only {len(selected)} non-overlapping abbreviations available")
+            self.log(f"  Need to expand candidate pool for better coverage")
+
+        return selected
 
 
 class OptimizationPipeline:
