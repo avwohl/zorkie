@@ -2,10 +2,26 @@
 
 A compiler for the Infocom ZIL/ZILF language that produces Z-machine story files (.z3, .z4, .z5, etc.).
 
+## Installation
+
+### From PyPI
+
+```bash
+pip install zorkie
+```
+
+### From Source
+
+```bash
+git clone https://github.com/yourusername/zorkie.git
+cd zorkie
+pip install -e .
+```
+
 ## Usage
 
 ```bash
-./zorkie <source.zil> -o <output.z3>
+zorkie <source.zil> -o <output.z3>
 ```
 
 ### Options
@@ -16,7 +32,7 @@ A compiler for the Infocom ZIL/ZILF language that produces Z-machine story files
 ### Example
 
 ```bash
-./zorkie game.zil -o game.z3
+zorkie game.zil -o game.z3
 ```
 
 The output file can be run in any Z-machine interpreter (Frotz, Lectrote, etc.).

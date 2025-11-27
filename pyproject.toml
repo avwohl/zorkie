@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zorkie"
+dynamic = ["version"]
+description = "A compiler for the Infocom ZIL/ZILF language that produces Z-machine story files"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.8"
+authors = [
+    {name = "ZIL Compiler Project"}
+]
+keywords = ["zil", "zilf", "z-machine", "infocom", "interactive-fiction", "compiler"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment",
+    "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/zorkie"
+Repository = "https://github.com/yourusername/zorkie"
+Issues = "https://github.com/yourusername/zorkie/issues"
+
+[project.scripts]
+zorkie = "zilc.compiler:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "zilc.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["zilc*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.zil"]
