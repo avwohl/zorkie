@@ -56,7 +56,8 @@ class ZAssembler:
         header[0x18:0x1A] = struct.pack('>H', 0x0000)
 
         # Bytes 0x1A-0x1B: File length / divisor
-        divisor = 2 if self.version <= 3 else (8 if self.version == 8 else 4)
+        # V1-3: divisor 2, V4-5: divisor 4, V6+: divisor 8
+        divisor = 2 if self.version <= 3 else (4 if self.version <= 5 else 8)
         file_length = len(self.memory) // divisor if self.memory else 1
         header[0x1A:0x1C] = struct.pack('>H', file_length)
 
@@ -258,6 +259,12 @@ class ZAssembler:
         # Mark start of high memory
         self.high_mem_base = len(story)
 
+        # For V6+, high memory must be aligned to 8-byte boundary for packed addresses
+        if self.version >= 6:
+            while self.high_mem_base % 8 != 0:
+                story.append(0)
+                self.high_mem_base = len(story)
+
         # If string table is present, add string table after routines and resolve markers
         if string_table is not None:
             # Calculate where string table will be located (after routines)
@@ -285,9 +292,42 @@ class ZAssembler:
             # Add all encoded strings
             story.extend(string_table.get_encoded_data())
 
+        # Calculate Initial PC - must point to first instruction, not routine header
+        # Routine header format:
+        #   V1-4: 1 byte (local count) + N words (local defaults)
+        #   V5+: 1 byte (local count) only
+        initial_pc = self.high_mem_base
+        if routines:
+            num_locals = routines[0] & 0x0F  # Local count is in low nibble
+            if self.version <= 4:
+                # Skip: 1 byte header + num_locals * 2 bytes for defaults
+                initial_pc = self.high_mem_base + 1 + (num_locals * 2)
+            else:
+                # Skip: 1 byte header only
+                initial_pc = self.high_mem_base + 1
+
+        # For V6-7, the Initial PC field stores a packed routine address
+        # The packed address calculation depends on version:
+        #   V6-7: packed_address = (byte_address - routines_offset * 8) / 4
+        # For simplicity with routines_offset = high_mem_base / 8:
+        #   V6-7: packed_address = (addr - high_mem_base) / 4 = offset / 4
+        # Since the routine starts at high_mem_base, and we want to skip
+        # to the first instruction (which is 1 byte after for V5+),
+        # we need to calculate the packed address of the routine itself.
+        #
+        # Actually for V6-7, Initial PC points to the ROUTINE (packed),
+        # and the interpreter handles finding the first instruction.
+        # V8 uses direct byte addresses like V5.
+        if self.version in (6, 7):
+            # Packed routine address = (routine_byte_addr - 8 * routines_offset) / 4
+            # With routines_offset = high_mem_base / 8:
+            # packed = (high_mem_base - high_mem_base) / 4 = 0
+            # So the first routine is always at packed address 0 relative to routines_offset
+            initial_pc = 0  # Packed address of first routine
+
         # Update header with correct addresses
         struct.pack_into('>H', story, 0x04, self.high_mem_base)  # High memory base
-        struct.pack_into('>H', story, 0x06, self.high_mem_base)  # Initial PC
+        struct.pack_into('>H', story, 0x06, initial_pc)  # Initial PC (or packed routine for V6+)
         struct.pack_into('>H', story, 0x08, dict_addr)  # Dictionary address
         struct.pack_into('>H', story, 0x0A, objects_addr)  # Object table address
         struct.pack_into('>H', story, 0x0C, globals_addr)  # Globals address
@@ -295,12 +335,32 @@ class ZAssembler:
         if abbrev_addr > 0:
             struct.pack_into('>H', story, 0x18, abbrev_addr)  # Abbreviations table address
 
+        # V6-7 specific header fields (V8 doesn't use these)
+        if self.version in (6, 7):
+            # 0x28-0x29: Routines offset / 8
+            # For V6-7, routines are addressed as packed addresses with offset
+            # We store high_mem_base / 8 as the routines offset
+            routines_offset = self.high_mem_base // 8
+            struct.pack_into('>H', story, 0x28, routines_offset)
+
+            # 0x2A-0x2B: Strings offset / 8 (same as routines for simple case)
+            # In a full implementation, strings would be in a separate area
+            strings_offset = self.high_mem_base // 8
+            struct.pack_into('>H', story, 0x2A, strings_offset)
+
+        # Pad file to proper boundary for file length calculation
+        # V1-3: divisor 2 (must be even)
+        # V4-5: divisor 4
+        # V6+: divisor 8
+        divisor = 2 if self.version <= 3 else (4 if self.version <= 5 else 8)
+        while len(story) % divisor != 0:
+            story.append(0)
+
         # Calculate and store checksum
         checksum = self.calculate_checksum(story)
         struct.pack_into('>H', story, 0x1C, checksum)
 
         # Update file length
-        divisor = 2 if self.version <= 3 else (8 if self.version == 8 else 4)
         file_length = len(story) // divisor
         struct.pack_into('>H', story, 0x1A, file_length)
 

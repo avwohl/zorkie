@@ -25,6 +25,7 @@ class ImprovedCodeGenerator:
 
         # Symbol tables
         self.globals: Dict[str, int] = {}
+        self.global_values: Dict[str, int] = {}  # Global name -> initial value
         self.constants: Dict[str, int] = {}
         self.routines: Dict[str, int] = {}
         self.locals: Dict[str, int] = {}
@@ -125,9 +126,14 @@ class ImprovedCodeGenerator:
 
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
-        # Process globals
+        # Process globals (register names and capture initial values)
         for global_node in program.globals:
             self.globals[global_node.name] = self.next_global
+            # Capture initial value if provided
+            if global_node.initial_value is not None:
+                init_val = self.get_operand_value(global_node.initial_value)
+                if isinstance(init_val, int):
+                    self.global_values[global_node.name] = init_val
             self.next_global += 1
 
         # Process constants
@@ -716,17 +722,33 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
+        operand = operands[0]
+
+        # If operand is a nested form, evaluate it first (result goes to stack)
+        if isinstance(operand, FormNode):
+            # Generate code for the expression (pushes result to stack)
+            expr_code = self.generate_form(operand)
+            code.extend(expr_code)
+            # Now print from stack (variable 0)
+            op_type = 1  # Variable
+            op_val = 0   # Stack
+        else:
+            # Determine operand type and value
+            op_type, op_val = self._get_operand_type_and_value(operand)
+
         # PRINT_NUM is VAR opcode 0x06
         code.append(0xE6)  # Variable form, VAR, opcode 0x06
 
-        # Type byte (1 operand)
-        code.append(0x00)  # Will be filled based on operand type
+        # Type byte encoding for VAR form with single operand:
+        # Bits 7-6: operand type (00=large, 01=small, 10=variable, 11=omitted)
+        # Bits 5-0: 111111 (remaining operands omitted)
+        if op_type == 0:  # Small constant
+            type_byte = 0x7F  # 01 11 11 11 = small const, rest omitted
+        else:  # Variable
+            type_byte = 0xBF  # 10 11 11 11 = variable, rest omitted
 
-        # For now, simplified: assume variable or small constant
-        value = self.get_operand_value(operands[0])
-        if isinstance(value, int) and 0 <= value <= 255:
-            code[-1] = 0x01  # Small constant
-            code.append(value & 0xFF)
+        code.append(type_byte)
+        code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -877,22 +899,46 @@ class ImprovedCodeGenerator:
         else:
             return b''
 
-        # STORE instruction: 2OP opcode 0x0D
         code = bytearray()
 
-        # Evaluate value
-        value = self.get_operand_value(value_node)
+        # Check if value is an expression (FormNode) that needs evaluation
+        if isinstance(value_node, FormNode):
+            # Generate code to evaluate expression (result goes to stack)
+            expr_code = self.generate_form(value_node)
+            code.extend(expr_code)
 
-        if isinstance(value, int) and 0 <= value <= 255:
-            # STORE variable small_constant
-            code.append(0x2D)  # Long form, small/small
-            code.append(var_num & 0xFF)
-            code.append(value & 0xFF)
-        elif isinstance(value, int):
-            # STORE variable large_constant
-            code.append(0x0D)  # Long form, large/large (need to verify)
-            code.append(var_num & 0xFF)
-            code.extend(struct.pack('>H', value & 0xFFFF))
+            # Pop result from stack into target variable using PULL
+            # PULL is VAR opcode 0x09
+            # V1-5, V8: pull (variable) - operand is target variable, no store byte
+            # V6-7: pull stack -> (result) - operand is stack reference, store byte follows
+            #       If operand omitted (type 0xFF), uses main game stack
+            code.append(0xE9)  # VAR form PULL
+            if self.version in (6, 7):
+                # V6-7: omit operand to use main stack, then store target
+                code.append(0xFF)  # Type: all omitted (11 11 11 11) = main stack
+                code.append(var_num & 0xFF)  # Store result to target variable
+            else:
+                # V1-5, V8: operand is target variable number
+                code.append(0x7F)  # Type: small constant (01), omit rest
+                code.append(var_num & 0xFF)  # Variable number to store into
+        else:
+            # Simple value assignment
+            value = self.get_operand_value(value_node)
+
+            if isinstance(value, int) and 0 <= value <= 255:
+                # STORE variable, small_constant
+                # Long form: bit6=0 (small for var num), bit5=0 (small for value)
+                # = 0b00001101 = 0x0D
+                code.append(0x0D)  # Long form, small/small
+                code.append(var_num & 0xFF)
+                code.append(value & 0xFF)
+            elif isinstance(value, int):
+                # STORE variable, large_constant - need variable form
+                # Use VAR form for large constants
+                code.append(0xCD)  # VAR form, opcode 0x0D
+                code.append(0x1F)  # types: small, large, omit, omit (01 00 11 11)
+                code.append(var_num & 0xFF)
+                code.extend(struct.pack('>H', value & 0xFFFF))
 
         return bytes(code)
 
@@ -996,18 +1042,50 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
         # ADD is 2OP opcode 0x14
-        val1 = self.get_operand_value(operands[0])
-        val2 = self.get_operand_value(operands[1])
+        # Determine operand types and values
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # Simplified: small constants
-        if isinstance(val1, int) and isinstance(val2, int):
-            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                code.append(0x54)  # Long form, small/small
-                code.append(val1 & 0xFF)
-                code.append(val2 & 0xFF)
-                code.append(0x00)  # Store to stack
+        # Build opcode byte: bits 6-5 are operand types, bits 4-0 are opcode
+        # Type: 0 = small constant, 1 = variable
+        opcode = 0x14 | (op1_type << 6) | (op2_type << 5)
+        code.append(opcode)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
+
+    def _get_operand_type_and_value(self, node: ASTNode) -> Tuple[int, int]:
+        """Get operand type (0=small const, 1=variable) and value/var number.
+
+        Returns:
+            Tuple of (type, value) where type is 0 for small constant, 1 for variable
+        """
+        if isinstance(node, NumberNode):
+            return (0, node.value)  # Small constant
+        elif isinstance(node, GlobalVarNode):
+            # ,VARNAME syntax - global variable reference
+            var_num = self.globals.get(node.name, 0x10)
+            return (1, var_num)  # Variable
+        elif isinstance(node, LocalVarNode):
+            # .VARNAME syntax - local variable reference
+            var_num = self.locals.get(node.name, 1)
+            return (1, var_num)  # Variable
+        elif isinstance(node, AtomNode):
+            # Check if it's a known constant
+            if node.value in self.constants:
+                return (0, self.constants[node.value])
+            # Check if it's a global variable
+            elif node.value in self.globals:
+                return (1, self.globals[node.value])
+            # Check if it's a local variable
+            elif node.value in self.locals:
+                return (1, self.locals[node.value])
+            # Default to small constant 0
+            return (0, 0)
+        else:
+            return (0, 0)
 
     def gen_sub(self, operands: List[ASTNode]) -> bytes:
         """Generate SUB instruction."""
@@ -1015,15 +1093,15 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        val1 = self.get_operand_value(operands[0])
-        val2 = self.get_operand_value(operands[1])
+        # SUB is 2OP opcode 0x15
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        if isinstance(val1, int) and isinstance(val2, int):
-            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                code.append(0x55)  # SUB opcode
-                code.append(val1 & 0xFF)
-                code.append(val2 & 0xFF)
-                code.append(0x00)  # Store to stack
+        opcode = 0x15 | (op1_type << 6) | (op2_type << 5)
+        code.append(opcode)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -1033,15 +1111,15 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        val1 = self.get_operand_value(operands[0])
-        val2 = self.get_operand_value(operands[1])
+        # MUL is 2OP opcode 0x16
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        if isinstance(val1, int) and isinstance(val2, int):
-            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                code.append(0x56)  # MUL opcode
-                code.append(val1 & 0xFF)
-                code.append(val2 & 0xFF)
-                code.append(0x00)  # Store to stack
+        opcode = 0x16 | (op1_type << 6) | (op2_type << 5)
+        code.append(opcode)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -1051,15 +1129,15 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        val1 = self.get_operand_value(operands[0])
-        val2 = self.get_operand_value(operands[1])
+        # DIV is 2OP opcode 0x17
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        if isinstance(val1, int) and isinstance(val2, int):
-            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                code.append(0x57)  # DIV opcode
-                code.append(val1 & 0xFF)
-                code.append(val2 & 0xFF)
-                code.append(0x00)  # Store to stack
+        opcode = 0x17 | (op1_type << 6) | (op2_type << 5)
+        code.append(opcode)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -1069,15 +1147,15 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        val1 = self.get_operand_value(operands[0])
-        val2 = self.get_operand_value(operands[1])
+        # MOD is 2OP opcode 0x18
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        if isinstance(val1, int) and isinstance(val2, int):
-            if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                code.append(0x58)  # MOD opcode
-                code.append(val1 & 0xFF)
-                code.append(val2 & 0xFF)
-                code.append(0x00)  # Store to stack
+        opcode = 0x18 | (op1_type << 6) | (op2_type << 5)
+        code.append(opcode)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -4491,6 +4569,27 @@ class ImprovedCodeGenerator:
         elif isinstance(node, NumberNode):
             return node.value
         return None
+
+    def build_globals_data(self) -> bytes:
+        """Build the globals table data with initial values.
+
+        Returns:
+            480 bytes (240 words) of globals data with initialized values.
+        """
+        # Globals table is 240 words (480 bytes)
+        # Global N is at offset (N - 0x10) * 2
+        data = bytearray(480)
+
+        for name, var_num in self.globals.items():
+            if var_num >= 0x10 and var_num < 0x100:
+                offset = (var_num - 0x10) * 2
+                if offset < 480:
+                    value = self.global_values.get(name, 0)
+                    # Store as big-endian word
+                    data[offset] = (value >> 8) & 0xFF
+                    data[offset + 1] = value & 0xFF
+
+        return bytes(data)
 
     # ===== Routine Calls =====
 

@@ -720,11 +720,20 @@ class ZILCompiler:
             self.log("String table deduplication enabled")
 
         # Code generation
+        # NOTE: We don't pass abbreviations_table to code generator because
+        # abbreviation encoding in strings requires the abbreviation table to be
+        # properly positioned in the final file, which happens later during assembly.
+        # For now, encode strings without abbreviations for correctness.
         self.log("Generating code...")
-        codegen = ImprovedCodeGenerator(self.version, abbreviations_table=abbreviations_table,
+        codegen = ImprovedCodeGenerator(self.version, abbreviations_table=None,
                                        string_table=string_table)
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
+
+        # Build globals data with initial values
+        globals_data = codegen.build_globals_data()
+        if codegen.global_values:
+            self.log(f"  {len(codegen.global_values)} globals with initial values")
 
         if string_table is not None:
             self.log(f"  String table: {len(string_table)} unique strings")
@@ -1002,6 +1011,7 @@ class ZILCompiler:
             routines_code,
             objects_data,
             dict_data,
+            globals_data=globals_data,
             abbreviations_table=abbreviations_table,
             string_table=string_table
         )
