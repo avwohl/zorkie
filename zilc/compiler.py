@@ -18,11 +18,14 @@ from .zmachine import ZAssembler, ObjectTable, Dictionary
 class ZILCompiler:
     """Main ZIL compiler class."""
 
-    def __init__(self, version: int = 3, verbose: bool = False, enable_string_dedup: bool = False):
+    def __init__(self, version: int = 3, verbose: bool = False, enable_string_dedup: bool = False,
+                 include_paths: Optional[list] = None, lax_brackets: bool = False):
         self.version = version
         self.verbose = verbose
         self.enable_string_dedup = enable_string_dedup
         self.compilation_flags = {}  # ZILF compilation flags
+        self.include_paths = include_paths or []  # Additional paths to search for includes
+        self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
 
     def log(self, message: str):
         """Print log message if verbose mode is enabled."""
@@ -128,8 +131,22 @@ class ZILCompiler:
             if not filename.endswith('.zil'):
                 filename += '.zil'
 
-            # Resolve path relative to base_path
-            file_path = base_path / filename.lower()
+            # Search for file in base_path and include_paths
+            search_paths = [base_path] + [Path(p) for p in self.include_paths]
+            file_path = None
+            for search_path in search_paths:
+                candidate = search_path / filename.lower()
+                if candidate.exists():
+                    file_path = candidate
+                    break
+                # Also try without lowercasing
+                candidate = search_path / filename
+                if candidate.exists():
+                    file_path = candidate
+                    break
+
+            if file_path is None:
+                raise FileNotFoundError(f"IFILE not found: {filename} (searched: {[str(p) for p in search_paths]})")
 
             try:
                 self.log(f"  Including file: {file_path}")
@@ -137,8 +154,8 @@ class ZILCompiler:
                     content = f.read()
                 # Preprocess control characters in included file
                 content = self.preprocess_control_characters(content)
-                # Recursively process nested IFILE directives
-                return self.preprocess_ifiles(content, base_path)
+                # Recursively process nested IFILE directives - use file's parent as new base
+                return self.preprocess_ifiles(content, file_path.parent)
             except FileNotFoundError:
                 raise FileNotFoundError(f"IFILE not found: {file_path}")
 
@@ -224,7 +241,160 @@ class ZILCompiler:
         # Fourth pass: Evaluate %<COND> compile-time conditionals
         source = self._process_compile_cond(source)
 
+        # Fifth pass: Evaluate %<+>, %<->, %<*>, etc. compile-time arithmetic
+        source = self._process_compile_arithmetic(source)
+
+        # Sixth pass: Skip MDL macro definitions (DEFMAC, DEFINE) that we can't process
+        source = self._skip_mdl_macros(source)
+
+        # Seventh pass: If lax_brackets enabled, remove extraneous > brackets
+        if self.lax_brackets:
+            source = self._fix_lax_brackets(source)
+
         return source
+
+    def _skip_mdl_macros(self, source: str) -> str:
+        """
+        Skip MDL macro definitions that we can't process.
+        These include <DEFMAC ...> and <DEFINE ...> blocks.
+        """
+        import re
+        result = []
+        pos = 0
+
+        while pos < len(source):
+            # Look for <DEFMAC or <DEFINE
+            match = re.search(r'<\s*(DEFMAC|DEFINE)\s+', source[pos:], re.IGNORECASE)
+            if not match:
+                result.append(source[pos:])
+                break
+
+            # Add text before match
+            result.append(source[pos:pos + match.start()])
+
+            # Find the matching > for this <DEFMAC or <DEFINE
+            start = pos + match.start()
+            content, end = self._extract_balanced_content(source, start)
+
+            if content:
+                # Skip the macro definition entirely
+                pos = end
+            else:
+                # Can't find matching bracket, skip this character
+                result.append(source[pos + match.start()])
+                pos += match.start() + 1
+
+        return ''.join(result)
+
+    def _fix_lax_brackets(self, source: str) -> str:
+        """
+        Fix bracket imbalances in lax mode.
+        This handles source files like Beyond Zork that have inherent
+        bracket imbalances from historical editing.
+
+        Strategy:
+        1. Parse through tracking depth (ignoring strings)
+        2. Remove any > that would make depth go negative
+        3. Add closing > at end for any unclosed forms
+        """
+        result = []
+        depth = 0
+        i = 0
+        removed_count = 0
+
+        while i < len(source):
+            ch = source[i]
+
+            if ch == '"':
+                # Skip strings entirely - brackets inside don't count
+                result.append(ch)
+                i += 1
+                while i < len(source) and source[i] != '"':
+                    if source[i] == '\\' and i + 1 < len(source):
+                        result.append(source[i])
+                        i += 1
+                    result.append(source[i])
+                    i += 1
+                if i < len(source):
+                    result.append(source[i])  # closing quote
+                    i += 1
+            elif ch == ';':
+                # Check for form comments like ;<...> or ;[...] or ;"..."
+                if i + 1 < len(source):
+                    next_ch = source[i + 1]
+                    if next_ch == '<':
+                        # Skip ;<...> comment
+                        result.append(ch)
+                        i += 1
+                        result.append(source[i])  # <
+                        i += 1
+                        comment_depth = 1
+                        while i < len(source) and comment_depth > 0:
+                            if source[i] == '<':
+                                comment_depth += 1
+                            elif source[i] == '>':
+                                comment_depth -= 1
+                            result.append(source[i])
+                            i += 1
+                        continue
+                    elif next_ch == '[':
+                        # Skip ;[...] comment
+                        result.append(ch)
+                        i += 1
+                        result.append(source[i])  # [
+                        i += 1
+                        comment_depth = 1
+                        while i < len(source) and comment_depth > 0:
+                            if source[i] == '[':
+                                comment_depth += 1
+                            elif source[i] == ']':
+                                comment_depth -= 1
+                            result.append(source[i])
+                            i += 1
+                        continue
+                    elif next_ch == '"':
+                        # Skip ;"..." comment
+                        result.append(ch)
+                        i += 1
+                        result.append(source[i])  # "
+                        i += 1
+                        while i < len(source) and source[i] != '"':
+                            if source[i] == '\\' and i + 1 < len(source):
+                                result.append(source[i])
+                                i += 1
+                            result.append(source[i])
+                            i += 1
+                        if i < len(source):
+                            result.append(source[i])  # closing quote
+                            i += 1
+                        continue
+                result.append(ch)
+                i += 1
+            elif ch == '<':
+                depth += 1
+                result.append(ch)
+                i += 1
+            elif ch == '>':
+                if depth > 0:
+                    depth -= 1
+                    result.append(ch)
+                else:
+                    # Extraneous > - skip it
+                    removed_count += 1
+                i += 1
+            else:
+                result.append(ch)
+                i += 1
+
+        if removed_count > 0:
+            self.log(f"  Lax mode: removed {removed_count} extraneous '>' brackets")
+
+        # Add closing brackets for unclosed forms
+        if depth > 0:
+            self.log(f"  Lax mode: adding {depth} closing '>' brackets for unclosed forms")
+            result.append('\n' + '>' * depth)
+
+        return ''.join(result)
 
     def _process_ifflag(self, source: str) -> str:
         """Process IFFLAG directives with proper bracket balancing."""
@@ -334,6 +504,7 @@ class ZILCompiler:
         """
         Extract content with balanced angle brackets.
         Returns (content, end_position) or (None, start_pos) if not balanced.
+        Properly handles strings - doesn't count <> inside string literals.
         """
         if start_pos >= len(source) or source[start_pos] != '<':
             return None, start_pos
@@ -342,11 +513,24 @@ class ZILCompiler:
         pos = start_pos + 1
 
         while pos < len(source) and depth > 0:
-            if source[pos] == '<':
+            ch = source[pos]
+            if ch == '"':
+                # Skip string content - don't count brackets inside strings
+                pos += 1
+                while pos < len(source) and source[pos] != '"':
+                    if source[pos] == '\\' and pos + 1 < len(source):
+                        pos += 1  # skip escape char
+                    pos += 1
+                if pos < len(source):
+                    pos += 1  # skip closing "
+            elif ch == '<':
                 depth += 1
-            elif source[pos] == '>':
+                pos += 1
+            elif ch == '>':
                 depth -= 1
-            pos += 1
+                pos += 1
+            else:
+                pos += 1
 
         if depth == 0:
             return source[start_pos:pos], pos
@@ -559,6 +743,232 @@ class ZILCompiler:
                 return (parts[0], parts[1])
             else:
                 return (parts[0], '')
+
+    def _process_compile_arithmetic(self, source: str) -> str:
+        """
+        Process compile-time arithmetic expressions.
+        Handles: %<+ x y>, %<- x y>, %<* x y>, %</ x y>, %<MOD x y>, %<ASCII ...>
+        Also handles other compile-time forms like %<LENGTH table> that we can't evaluate.
+
+        Note: %<" is MDL escape for literal quote, not a compile-time form!
+        Similarly %<, %<. etc. are not compile-time forms.
+        """
+        import re
+        result = []
+        pos = 0
+
+        # Valid compile-time operators that start a form
+        # These must be followed by the operator name
+        compile_ops = ('+', '-', '*', '/', 'MOD', 'BAND', 'BOR', 'LSH', 'ASCII', 'LENGTH',
+                       'COND', 'OR', 'AND', 'NOT', 'EQUAL?', '==?', 'N==?', 'G?', 'L?',
+                       'GASSIGNED?', 'ASSIGNED?', 'TYPE?', 'EMPTY?', 'NTH', 'REST',
+                       'MAPF', 'MAPR', 'ILIST', 'IVECTOR', 'ITABLE', 'STRING', 'BYTE',
+                       'FORM', 'CHTYPE', 'PARSE', 'UNPARSE', 'SPNAME', 'PNAME')
+
+        while pos < len(source):
+            # Look for %< (compile-time form)
+            match = re.search(r'%<', source[pos:])
+            if not match:
+                result.append(source[pos:])
+                break
+
+            match_pos = pos + match.start()
+
+            # Check if this is a valid compile-time form
+            # Peek at what comes after %<
+            after_pos = match_pos + 2  # Skip %<
+            # Skip whitespace
+            while after_pos < len(source) and source[after_pos] in ' \t':
+                after_pos += 1
+
+            # Check if what follows looks like a compile-time operator
+            is_compile_form = False
+            if after_pos < len(source):
+                remaining = source[after_pos:after_pos + 20].upper()
+                for op in compile_ops:
+                    if remaining.startswith(op):
+                        # Must be followed by whitespace or delimiter
+                        if len(remaining) == len(op) or not remaining[len(op)].isalnum():
+                            is_compile_form = True
+                            break
+
+            if not is_compile_form:
+                # Not a compile-time form - keep the %< as-is
+                result.append(source[pos:match_pos + 2])  # Include %<
+                pos = match_pos + 2
+                continue
+
+            # Add text before match
+            result.append(source[pos:match_pos])
+
+            # Find the matching > for this %<
+            # Skip the % and start from <
+            start = match_pos + 1  # +1 to skip %
+            content, end = self._extract_balanced_content(source, start)
+
+            if content:
+                # Try to evaluate the expression
+                evaluated = self._evaluate_compile_expr(content)
+                if evaluated is not None:
+                    result.append(str(evaluated))
+                else:
+                    # Can't evaluate - leave placeholder 0 to avoid parse errors
+                    # This is not ideal but allows compilation to continue
+                    result.append('0')
+                pos = end
+            else:
+                # Can't find matching bracket, skip
+                result.append('%')
+                pos = match_pos + 1
+
+        return ''.join(result)
+
+    def _evaluate_compile_expr(self, content: str) -> object:
+        """
+        Evaluate a compile-time expression.
+        Returns the result or None if can't evaluate.
+        Content is like: <+ ,C-TABLE-LENGTH 1>
+        """
+        import re
+
+        # Remove outer <...>
+        content = content.strip()
+        if content.startswith('<') and content.endswith('>'):
+            content = content[1:-1].strip()
+        else:
+            return None
+
+        # Parse operator and operands
+        parts = content.split(None, 1)
+        if not parts:
+            return None
+
+        op = parts[0].upper()
+        args_str = parts[1] if len(parts) > 1 else ''
+
+        # Handle arithmetic operators
+        if op in ('+', '-', '*', '/', 'MOD'):
+            args = self._parse_compile_args(args_str)
+            if args is None:
+                return None
+            try:
+                if op == '+':
+                    return sum(args)
+                elif op == '-':
+                    return args[0] - sum(args[1:]) if len(args) > 1 else -args[0]
+                elif op == '*':
+                    result = 1
+                    for a in args:
+                        result *= a
+                    return result
+                elif op == '/':
+                    return args[0] // args[1] if len(args) > 1 else 0
+                elif op == 'MOD':
+                    return args[0] % args[1] if len(args) > 1 else 0
+            except (TypeError, ValueError, ZeroDivisionError):
+                return None
+
+        # Handle BAND, BOR, BNOT
+        elif op == 'BAND':
+            args = self._parse_compile_args(args_str)
+            if args is None or len(args) < 2:
+                return None
+            result = args[0]
+            for a in args[1:]:
+                result &= a
+            return result
+
+        elif op == 'BOR':
+            args = self._parse_compile_args(args_str)
+            if args is None or len(args) < 2:
+                return None
+            result = args[0]
+            for a in args[1:]:
+                result |= a
+            return result
+
+        # Handle LSH (left shift)
+        elif op == 'LSH':
+            args = self._parse_compile_args(args_str)
+            if args is None or len(args) < 2:
+                return None
+            return args[0] << args[1]
+
+        # Handle LENGTH - we can't evaluate this without knowing the table
+        # Return None to indicate we can't evaluate
+
+        return None
+
+    def _parse_compile_args(self, args_str: str) -> list:
+        """
+        Parse compile-time arguments like ",VAR 1 ,OTHER".
+        Returns list of integers or None if can't parse.
+        """
+        args = []
+        pos = 0
+
+        while pos < len(args_str):
+            # Skip whitespace
+            while pos < len(args_str) and args_str[pos] in ' \t\n\r':
+                pos += 1
+
+            if pos >= len(args_str):
+                break
+
+            # Check for global variable reference ,VAR
+            if args_str[pos] == ',':
+                pos += 1  # skip comma
+                # Read variable name
+                start = pos
+                while pos < len(args_str) and (args_str[pos].isalnum() or args_str[pos] in '-_?'):
+                    pos += 1
+                var_name = args_str[start:pos].upper()
+                if var_name in self.compile_globals:
+                    val = self.compile_globals[var_name]
+                    if isinstance(val, (int, bool)):
+                        args.append(int(val))
+                    else:
+                        return None  # Can't handle non-numeric
+                else:
+                    return None  # Unknown variable
+
+            # Check for number
+            elif args_str[pos].isdigit() or (args_str[pos] == '-' and pos + 1 < len(args_str) and args_str[pos + 1].isdigit()):
+                start = pos
+                if args_str[pos] == '-':
+                    pos += 1
+                while pos < len(args_str) and args_str[pos].isdigit():
+                    pos += 1
+                args.append(int(args_str[start:pos]))
+
+            # Check for nested compile-time form %<...>
+            elif args_str[pos] == '%' and pos + 1 < len(args_str) and args_str[pos + 1] == '<':
+                # Skip % and find matching >
+                pos += 1  # skip %
+                depth = 1
+                start = pos
+                pos += 1  # skip <
+                while pos < len(args_str) and depth > 0:
+                    if args_str[pos] == '<':
+                        depth += 1
+                    elif args_str[pos] == '>':
+                        depth -= 1
+                    pos += 1
+                if depth == 0:
+                    nested_content = args_str[start:pos]
+                    nested_val = self._evaluate_compile_expr(nested_content)
+                    if nested_val is not None:
+                        args.append(nested_val)
+                    else:
+                        return None
+                else:
+                    return None
+
+            else:
+                # Unknown token, can't parse
+                return None
+
+        return args if args else None
 
     def _evaluate_compile_test(self, test: str) -> bool:
         """Evaluate a compile-time test expression."""

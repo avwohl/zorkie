@@ -39,6 +39,7 @@ class TokenType(Enum):
     PERIOD = auto()      # .
     QUOTE = auto()       # ' (quote operator)
     SEMICOLON = auto()   # ; (when used as separator, not comment)
+    PERCENT_LANGLE = auto()  # %< (compile-time evaluation)
 
     # End of file
     EOF = auto()
@@ -123,9 +124,13 @@ class Lexer:
                 self.advance()
             self.advance()  # "
 
-            # Read until closing "
+            # Read until closing " (handle escapes)
             while self.peek() and self.peek() != '"':
-                self.advance()
+                if self.peek() == '\\' and self.peek(1):
+                    self.advance()  # skip backslash
+                    self.advance()  # skip escaped char
+                else:
+                    self.advance()
 
             if self.peek() == '"':
                 self.advance()
@@ -147,6 +152,14 @@ class Lexer:
                 self.advance()
             # Now skip the form
             self.skip_paren_form_comment()
+        elif self.peek(pos) == '[':
+            # Bracket comment: ;[...] - skip entire bracketed form including nested brackets
+            self.advance()  # ;
+            # Skip whitespace
+            while self.peek() and self.peek() in ' \t':
+                self.advance()
+            # Now skip the bracketed form
+            self.skip_bracket_form_comment()
         else:
             # Inline comment: ; comments out next token/word, stops at delimiters or whitespace
             # Skip the semicolon
@@ -159,7 +172,10 @@ class Lexer:
                 self.advance()
 
     def skip_angle_form_comment(self):
-        """Skip an angle-bracket form comment: < ... > with nested angle brackets"""
+        """Skip an angle-bracket form comment: < ... > with nested angle brackets.
+
+        Must handle strings properly - don't count <> inside strings.
+        """
         if self.peek() != '<':
             return
 
@@ -168,17 +184,32 @@ class Lexer:
 
         while depth > 0 and self.peek():
             ch = self.peek()
-            if ch == '<':
+            if ch == '"':
+                # Skip string content - don't count brackets inside strings
+                self.advance()  # opening "
+                while self.peek() and self.peek() != '"':
+                    if self.peek() == '\\' and self.peek(1):
+                        self.advance()  # skip escape char
+                    self.advance()
+                if self.peek() == '"':
+                    self.advance()  # closing "
+            elif ch == '<':
                 depth += 1
+                self.advance()
             elif ch == '>':
                 depth -= 1
-            self.advance()
+                self.advance()
+            else:
+                self.advance()
 
         if depth != 0:
             self.error("Unterminated form comment")
 
     def skip_paren_form_comment(self):
-        """Skip a parenthesis form comment: (...) with nested parentheses"""
+        """Skip a parenthesis form comment: (...) with nested parentheses.
+
+        Must handle strings properly - don't count () inside strings.
+        """
         if self.peek() != '(':
             return
 
@@ -187,14 +218,96 @@ class Lexer:
 
         while depth > 0 and self.peek():
             ch = self.peek()
-            if ch == '(':
+            if ch == '"':
+                # Skip string content - don't count parens inside strings
+                self.advance()  # opening "
+                while self.peek() and self.peek() != '"':
+                    if self.peek() == '\\' and self.peek(1):
+                        self.advance()  # skip escape char
+                    self.advance()
+                if self.peek() == '"':
+                    self.advance()  # closing "
+            elif ch == '(':
                 depth += 1
+                self.advance()
             elif ch == ')':
                 depth -= 1
-            self.advance()
+                self.advance()
+            else:
+                self.advance()
 
         if depth != 0:
             self.error("Unterminated form comment")
+
+    def skip_bracket_form_comment(self):
+        """Skip a bracket form comment: [ ... ] with nested brackets.
+
+        Must handle strings properly - don't count [] inside strings.
+        """
+        if self.peek() != '[':
+            return
+
+        self.advance()  # [
+        depth = 1
+
+        while depth > 0 and self.peek():
+            ch = self.peek()
+            if ch == '"':
+                # Skip string content - don't count brackets inside strings
+                self.advance()  # opening "
+                while self.peek() and self.peek() != '"':
+                    if self.peek() == '\\' and self.peek(1):
+                        self.advance()  # skip escape char
+                    self.advance()
+                if self.peek() == '"':
+                    self.advance()  # closing "
+            elif ch == '[':
+                depth += 1
+                self.advance()
+            elif ch == ']':
+                depth -= 1
+                self.advance()
+            else:
+                self.advance()
+
+        if depth != 0:
+            self.error("Unterminated bracket comment")
+
+    def skip_compile_time_form(self):
+        """Skip a compile-time evaluation form: %<...> with nested angle brackets.
+
+        These forms are evaluated at compile-time by the original ZIL compiler.
+        Since we don't support compile-time evaluation, we skip them entirely.
+        Must handle strings and nested forms properly.
+        """
+        if self.peek() != '<':
+            return
+
+        self.advance()  # <
+        depth = 1
+
+        while depth > 0 and self.peek():
+            ch = self.peek()
+            if ch == '"':
+                # Skip string content - don't count brackets inside strings
+                self.advance()  # opening "
+                while self.peek() and self.peek() != '"':
+                    if self.peek() == '\\' and self.peek(1):
+                        self.advance()  # skip escape char
+                    self.advance()
+                if self.peek() == '"':
+                    self.advance()  # closing "
+            elif ch == '<':
+                depth += 1
+                self.advance()
+            elif ch == '>':
+                depth -= 1
+                self.advance()
+            else:
+                self.advance()
+
+        if depth != 0:
+            self.error("Unterminated compile-time form")
 
     def read_string(self) -> str:
         """Read a string literal."""
@@ -279,9 +392,17 @@ class Lexer:
         return ''.join(chars)
 
     def is_atom_char(self, ch: str) -> bool:
-        """Check if character is valid in an atom."""
+        """Check if character is valid in an atom.
+
+        Note: % is used in German Zork for umlaut encoding (e.g., SKARAB%AUS)
+        Note: : is used in some MDL/ZIL constructs (type annotations)
+        Note: & is used in bitwise operations (BAND, BOR)
+        Note: ^ is used in some MDL constructs
+        Note: ! is used in MDL atoms like ON!-INITIAL, OFF!-INITIAL
+        Note: | is used in TELL-TOKENS and as a delimiter in some contexts
+        """
         return (ch.isalnum() or
-                ch in '-_?+*/=$#;.')
+                ch in '-_?+*/=$#;.%:&^!|')
 
     def tokenize(self) -> List[Token]:
         """Tokenize the entire source code."""
@@ -290,6 +411,15 @@ class Lexer:
 
             if self.pos >= len(self.source):
                 break
+
+            # Handle MDL control character sequences: ^/X (e.g., ^/L = form feed)
+            # These are typically used as page breaks and should be treated as whitespace
+            if self.peek() == '^' and self.peek(1) == '/':
+                self.advance()  # ^
+                self.advance()  # /
+                if self.peek():
+                    self.advance()  # The control character letter
+                continue
 
             # Check for comment (both ;" and ; styles)
             # Special case: ;= is an atom (used in BUZZ words)
@@ -329,10 +459,11 @@ class Lexer:
             line = self.line
             col = self.column
 
-            # Compile-time evaluation: %<...>, %,VAR, %.VAR - skip the %
+            # Compile-time evaluation: %,VAR, %.VAR - skip the %
+            # Note: %<...> forms are handled by compiler preprocessing, not lexer
             if ch == '%':
                 next_ch = self.peek(1)
-                if next_ch in ('<', ',', '.'):
+                if next_ch in (',', '.'):
                     self.advance()  # Skip %
                     # Fall through to handle the next character
                     ch = self.peek()
@@ -434,10 +565,51 @@ class Lexer:
                 value = self.read_number()
                 self.tokens.append(Token(TokenType.NUMBER, value, line, col))
 
-            # Hex number ($1A3F) - only if $ is followed by hex digit
+            # Hex number ($1A3F) - only if $ is followed by hex digits and nothing else
+            # Check if it's truly a hex number vs an atom like $BUZZ
             elif ch == '$' and self.peek(1) and self.peek(1) in '0123456789ABCDEFabcdef':
-                value = self.read_number()
-                self.tokens.append(Token(TokenType.NUMBER, value, line, col))
+                # Look ahead to see if this is a pure hex number or an atom
+                pos = 1
+                while self.peek(pos) and self.peek(pos) in '0123456789ABCDEFabcdef':
+                    pos += 1
+                # If followed by other atom characters (like 'Z' in $BUZZ), it's an atom
+                if self.peek(pos) and self.is_atom_char(self.peek(pos)) and self.peek(pos) not in '0123456789ABCDEFabcdef':
+                    # It's an atom starting with $
+                    self.advance()  # $
+                    name = '$' + self.read_atom()
+                    self.tokens.append(Token(TokenType.ATOM, name, line, col))
+                else:
+                    # Pure hex number
+                    value = self.read_number()
+                    self.tokens.append(Token(TokenType.NUMBER, value, line, col))
+
+            # Base-prefixed number (#2 binary, #8 octal, etc.) or MDL type specifier (#SEMI, etc.)
+            elif ch == '#':
+                self.advance()  # #
+                # Check if followed by a digit (base specifier) or an atom (type specifier)
+                if self.peek() and self.peek().isdigit():
+                    base = 0
+                    while self.peek() and self.peek().isdigit():
+                        base = base * 10 + int(self.advance())
+                    # Skip whitespace between base and number
+                    while self.peek() and self.peek() in ' \t':
+                        self.advance()
+                    # Now read the number digits
+                    num_str = ''
+                    while self.peek() and (self.peek().isdigit() or self.peek().isalpha()):
+                        num_str += self.advance()
+                    try:
+                        value = int(num_str, base) if num_str else 0
+                        self.tokens.append(Token(TokenType.NUMBER, value, line, col))
+                    except ValueError:
+                        # If it's not a valid number in that base, treat as 0
+                        self.tokens.append(Token(TokenType.NUMBER, 0, line, col))
+                else:
+                    # It's a type specifier like #SEMI - read as an atom with # prefix
+                    name = '#'
+                    if self.peek() and (self.peek().isalpha() or self.peek() in '-_'):
+                        name += self.read_atom()
+                    self.tokens.append(Token(TokenType.ATOM, name, line, col))
 
             # Special case: ! escapes for STRING form (!\", !\\, !=, !\`, etc.)
             elif ch == '!':
@@ -469,7 +641,9 @@ class Lexer:
                 self.tokens.append(Token(TokenType.ATOM, value, line, col))
 
             # Atom/Identifier
-            elif ch.isalpha() or ch in '-_?+*/<>=$#;':
+            # Note: : can start atoms for type annotations (e.g., :FIX, :DECL)
+            # Note: | is used in TELL-TOKENS and other MDL constructs
+            elif ch.isalpha() or ch in '-_?+*/<>=$#;:|':
                 value = self.read_atom()
                 self.tokens.append(Token(TokenType.ATOM, value, line, col))
 
@@ -477,6 +651,21 @@ class Lexer:
             elif ch == "'":
                 self.advance()
                 self.tokens.append(Token(TokenType.QUOTE, "'", line, col))
+
+            # Quasi-quote operator (backtick) - used in ZILF macros
+            elif ch == '`':
+                self.advance()
+                self.tokens.append(Token(TokenType.ATOM, '`', line, col))
+
+            # Unquote operator (tilde) - used in ZILF macros with quasi-quote
+            elif ch == '~':
+                self.advance()
+                # Check for ~! which is splice-unquote
+                if self.peek() == '!':
+                    self.advance()
+                    self.tokens.append(Token(TokenType.ATOM, '~!', line, col))
+                else:
+                    self.tokens.append(Token(TokenType.ATOM, '~', line, col))
 
             else:
                 self.error(f"Unexpected character: {ch!r}")

@@ -112,6 +112,12 @@ class Parser:
             # Skip standalone backslash (page break marker)
             self.advance()
             return None
+        elif self.current_token.type == TokenType.ATOM:
+            # MDL compilation switches and other bare atoms at top level
+            # Examples: ON!-INITIAL, OFF!-INITIAL
+            # These are compile-time directives that we can ignore
+            self.advance()
+            return None
         elif self.current_token.type == TokenType.RANGLE:
             # Skip stray closing brackets (may result from complex macro expansions)
             self.advance()
@@ -119,6 +125,31 @@ class Parser:
         elif self.current_token.type == TokenType.RPAREN:
             # Skip stray closing parens (may result from complex macro/preprocessing)
             self.advance()
+            return None
+        elif self.current_token.type == TokenType.QUOTE:
+            # Quoted form at top level: '< ... > or '(...)
+            # This is MDL data that we can skip
+            self.advance()  # skip '
+            if self.current_token.type == TokenType.LANGLE:
+                # Skip the quoted angle form
+                depth = 1
+                self.advance()  # skip <
+                while depth > 0 and self.current_token.type != TokenType.EOF:
+                    if self.current_token.type == TokenType.LANGLE:
+                        depth += 1
+                    elif self.current_token.type == TokenType.RANGLE:
+                        depth -= 1
+                    self.advance()
+            elif self.current_token.type == TokenType.LPAREN:
+                # Skip the quoted paren form
+                depth = 1
+                self.advance()  # skip (
+                while depth > 0 and self.current_token.type != TokenType.EOF:
+                    if self.current_token.type == TokenType.LPAREN:
+                        depth += 1
+                    elif self.current_token.type == TokenType.RPAREN:
+                        depth -= 1
+                    self.advance()
             return None
         else:
             self.error(f"Unexpected token at top level: {self.current_token.type.name}")
@@ -369,6 +400,12 @@ class Parser:
         elif token.type == TokenType.RPAREN:
             # This shouldn't happen - probably a parse error earlier
             self.error(f"Unexpected closing parenthesis - may indicate parsing error in enclosing form")
+
+        elif token.type == TokenType.RANGLE:
+            # Stray > - skip it and return None
+            # This happens with source files like Beyond Zork that have bracket imbalances
+            self.advance()
+            return None
 
         else:
             self.error(f"Unexpected token in expression: {token.type.name}")
@@ -687,8 +724,11 @@ class Parser:
         return ConstantNode(name, value, line, col)
 
     def parse_propdef(self, line: int, col: int):
-        """Parse PROPDEF property definition."""
-        # <PROPDEF name default-value>
+        """Parse PROPDEF property definition.
+
+        Simple format: <PROPDEF name default-value>
+        Complex MDL format: <PROPDEF name <> (...) (...) ...> - skip these
+        """
         from .ast_nodes import PropdefNode
 
         if self.current_token.type != TokenType.ATOM:
@@ -699,7 +739,38 @@ class Parser:
         # Default value (usually a number)
         default_value = None
         if self.current_token.type != TokenType.RANGLE:
-            default_value = self.parse_expression()
+            # Check for complex MDL-style PROPDEF with parenthesized definitions
+            # These have format like: <PROPDEF DIRECTIONS <> (DIR TO R:ROOM = ...) ...>
+            # We detect this by seeing if the next tokens form a pattern list
+            if self.current_token.type == TokenType.LANGLE:
+                # Could be <> (empty) or a complex form
+                # Peek to see if it's <> followed by LPAREN
+                next_val = self.current_token.value
+                self.advance()  # skip <
+                if self.current_token.type == TokenType.RANGLE:
+                    self.advance()  # skip >
+                    if self.current_token.type == TokenType.LPAREN:
+                        # Complex MDL PROPDEF - skip until matching RANGLE
+                        depth = 1  # We're inside the outer <PROPDEF>
+                        while depth > 0 and self.current_token.type != TokenType.EOF:
+                            if self.current_token.type == TokenType.LANGLE:
+                                depth += 1
+                            elif self.current_token.type == TokenType.RANGLE:
+                                depth -= 1
+                                if depth == 0:
+                                    break
+                            self.advance()
+                        # Return None to skip this complex PROPDEF
+                        return None
+                    else:
+                        # It's <> (empty/false), treat as default value
+                        default_value = None
+                else:
+                    # It's something else - parse as expression
+                    # Put back the < we consumed by parsing from current state
+                    default_value = self.parse_form(line, col)
+            else:
+                default_value = self.parse_expression()
 
         return PropdefNode(name, default_value, line, col)
 
@@ -890,15 +961,20 @@ class Parser:
 
             # Parse condition
             condition = self.parse_expression()
+            if condition is None:
+                # Skip None results (from stray brackets)
+                continue
 
             # Parse actions
             actions = []
-            while self.current_token.type != TokenType.RPAREN:
-                if self.current_token.type == TokenType.EOF:
-                    self.error("Unclosed COND clause")
-                actions.append(self.parse_expression())
+            while self.current_token.type not in (TokenType.RPAREN, TokenType.RANGLE, TokenType.EOF):
+                expr = self.parse_expression()
+                if expr is not None:  # Skip None results (from stray brackets)
+                    actions.append(expr)
 
-            self.expect(TokenType.RPAREN)
+            if self.current_token.type == TokenType.RPAREN:
+                self.advance()
+            # Tolerate EOF or RANGLE instead of RPAREN for broken source
             clauses.append((condition, actions))
 
         return CondNode(clauses, line, col)
