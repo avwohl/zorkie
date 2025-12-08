@@ -28,7 +28,7 @@ class AbbreviationsTable:
 
     def analyze_strings(self, strings: List[str], max_abbrevs: int = 96) -> None:
         """
-        Analyze a collection of strings and select best abbreviations.
+        Analyze a collection of strings and select best non-overlapping abbreviations.
 
         Args:
             strings: List of all strings from the game
@@ -49,21 +49,33 @@ class AbbreviationsTable:
         # Calculate savings for each substring
         candidates = []
         for substr, count in substring_counts.items():
-            if count >= 3:  # Only consider frequently occurring substrings
+            if count >= 2:  # Lower threshold for more candidates
                 savings = self._calculate_savings(substr, count)
                 if savings > 0:
                     candidates.append((savings, count, substr))
 
-        # Sort by savings and take top N
+        # Sort by savings (best first)
         candidates.sort(reverse=True)
 
-        # Select top abbreviations
+        # Select non-overlapping abbreviations using greedy strategy
         self.abbreviations = []
         self.lookup = {}
 
-        for i, (savings, count, substr) in enumerate(candidates[:max_abbrevs]):
-            self.abbreviations.append(substr)
-            self.lookup[substr] = i
+        for savings, count, substr in candidates:
+            # Check if this candidate overlaps with any already-selected abbreviation
+            overlaps = False
+            for existing in self.abbreviations:
+                if existing in substr or substr in existing:
+                    overlaps = True
+                    break
+
+            if not overlaps:
+                idx = len(self.abbreviations)
+                self.abbreviations.append(substr)
+                self.lookup[substr] = idx
+
+                if len(self.abbreviations) >= max_abbrevs:
+                    break
 
     def _calculate_savings(self, substr: str, count: int) -> float:
         """

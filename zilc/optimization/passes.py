@@ -190,13 +190,87 @@ class PropertyOptimizationPass(OptimizationPass):
 
     - Remove unused properties
     - Compact property data
-    - Deduplicate property values
+    - Deduplicate identical property values
     """
 
     def run(self, compilation_data: Dict) -> Dict:
         self.log("Property Optimization Pass")
-        # TODO: Implement property optimization
+
+        program = compilation_data.get('program')
+        if not program:
+            return compilation_data
+
+        # Collect all property values from objects and rooms
+        all_objects = list(program.objects) + list(program.rooms)
+
+        # Track property values: (prop_name, value_repr) -> list of (obj_name, value)
+        property_values: Dict[str, List[Tuple[str, Any]]] = {}
+        # Track identical values: value_repr -> list of (obj_name, prop_name)
+        value_usage: Dict[str, List[Tuple[str, str]]] = {}
+
+        for obj in all_objects:
+            for prop_name, prop_value in obj.properties.items():
+                # Get a hashable representation of the value
+                value_repr = self._value_repr(prop_value)
+
+                if value_repr not in value_usage:
+                    value_usage[value_repr] = []
+                value_usage[value_repr].append((obj.name, prop_name))
+
+        # Find duplicate values
+        duplicates = {k: v for k, v in value_usage.items() if len(v) > 1}
+
+        total_props = sum(len(obj.properties) for obj in all_objects)
+        unique_values = len(value_usage)
+        duplicate_count = sum(len(v) - 1 for v in duplicates.values())
+
+        self.log(f"  Total properties: {total_props}")
+        self.log(f"  Unique values: {unique_values}")
+        self.log(f"  Duplicates: {duplicate_count}")
+
+        if duplicates:
+            self.log(f"  Top duplicated values:")
+            sorted_dups = sorted(duplicates.items(), key=lambda x: len(x[1]), reverse=True)[:5]
+            for value_repr, usages in sorted_dups:
+                # Truncate for display
+                display = value_repr[:40] + '...' if len(value_repr) > 40 else value_repr
+                self.log(f"    {display}: {len(usages)} uses")
+
+        # Build deduplication map for property values
+        # This would be used during object table building to share identical values
+        dedup_map = {}
+        for value_repr, usages in duplicates.items():
+            if len(usages) >= 2:
+                # Use the first occurrence as the canonical value
+                canonical = usages[0]
+                for usage in usages[1:]:
+                    dedup_map[(usage[0], usage[1])] = canonical
+
+        self.stats = {
+            'total_properties': total_props,
+            'unique_values': unique_values,
+            'duplicates': duplicate_count,
+            'dedup_candidates': len(dedup_map)
+        }
+
+        # Store dedup map for use during object table generation
+        compilation_data['property_dedup_map'] = dedup_map
+
         return compilation_data
+
+    def _value_repr(self, value: Any) -> str:
+        """Get a hashable string representation of a property value."""
+        if hasattr(value, 'value'):
+            # AST node with value attribute
+            return f"{type(value).__name__}:{value.value}"
+        elif isinstance(value, (list, tuple)):
+            # List of values
+            return f"list:[{','.join(self._value_repr(v) for v in value)}]"
+        elif isinstance(value, dict):
+            # Dict (shouldn't happen often)
+            return f"dict:{sorted(value.items())}"
+        else:
+            return str(value)
 
 
 class AbbreviationOptimizationPass(OptimizationPass):

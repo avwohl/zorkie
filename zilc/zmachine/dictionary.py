@@ -74,9 +74,11 @@ class Dictionary:
             result.append(sep)
 
         # Entry length
-        # V1-3: 4 bytes text + n bytes data (we use 4 total)
-        # V4+: 6 bytes text + n bytes data (we use 6 total)
-        entry_length = 4 if self.version <= 3 else 6
+        # V1-3: 4 bytes text + 3 bytes data = 7 bytes total
+        # V4+: 6 bytes text + 3 bytes data = 9 bytes total
+        text_bytes = 4 if self.version <= 3 else 6
+        data_bytes = 3  # Standard data bytes for parser info
+        entry_length = text_bytes + data_bytes
         result.append(entry_length)
 
         # Deduplicate by encoded form (not just string form)
@@ -96,5 +98,36 @@ class Dictionary:
             encoded = self.encoder.encode_dictionary_word(word)
             for w in encoded:
                 result.extend(struct.pack('>H', w))
+
+            # Add 3 data bytes for each entry
+            # Byte 1: lexical type flags
+            # Bytes 2-3: parser info (verb number, etc.)
+            word_type = self.word_types.get(word, 'unknown')
+
+            # Set type flags (bit positions match Infocom convention)
+            type_byte = 0
+            if word_type == 'noun':
+                type_byte |= 0x80  # Bit 7: noun
+            elif word_type == 'verb':
+                type_byte |= 0x40  # Bit 6: verb
+            elif word_type == 'adjective':
+                type_byte |= 0x20  # Bit 5: adjective
+            elif word_type == 'direction':
+                type_byte |= 0x10  # Bit 4: direction
+            elif word_type == 'preposition':
+                type_byte |= 0x08  # Bit 3: preposition
+            elif word_type == 'buzz':
+                type_byte |= 0x04  # Bit 2: buzz word (noise word)
+            elif word_type == 'synonym':
+                type_byte |= 0x80  # Synonym words act as nouns
+
+            result.append(type_byte)
+
+            # Bytes 2-3: additional parser data
+            # For nouns, this could be the object number
+            # For verbs, this could be the verb number
+            # For now, use 0 (parser will rely on SYNTAX tables)
+            obj_num = self.word_objects.get(word, 0)
+            result.extend(struct.pack('>H', obj_num & 0xFFFF))
 
         return bytes(result)

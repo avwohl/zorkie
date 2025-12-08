@@ -612,6 +612,7 @@ class Lexer:
                     self.tokens.append(Token(TokenType.ATOM, name, line, col))
 
             # Special case: ! escapes for STRING form (!\", !\\, !=, !\`, etc.)
+            # Also handles !< for MDL splice-form operator
             elif ch == '!':
                 chars = [self.advance()]  # Read !
                 # Check for escape patterns: !\X where X is any char
@@ -621,14 +622,25 @@ class Lexer:
                     # Read the escaped character (could be anything)
                     if self.peek():
                         chars.append(self.advance())
+                    value = ''.join(chars)
+                    self.tokens.append(Token(TokenType.ATOM, value, line, col))
                 elif self.peek() == ',':
                     # !,VAR pattern - just the ! (VAR will be read separately)
-                    pass
+                    self.tokens.append(Token(TokenType.ATOM, '!', line, col))
+                elif self.peek() == '<':
+                    # !< is MDL splice-form operator - emit ! and let < be read as LANGLE
+                    # This allows !<MAPF ...> to be parsed as splice of a form
+                    self.tokens.append(Token(TokenType.ATOM, '!', line, col))
+                elif self.peek() == '.':
+                    # !.VAR pattern - splice local variable - emit just !
+                    self.tokens.append(Token(TokenType.ATOM, '!', line, col))
                 elif self.peek():
                     # Any other character after !
                     chars.append(self.advance())
-                value = ''.join(chars)
-                self.tokens.append(Token(TokenType.ATOM, value, line, col))
+                    value = ''.join(chars)
+                    self.tokens.append(Token(TokenType.ATOM, value, line, col))
+                else:
+                    self.tokens.append(Token(TokenType.ATOM, '!', line, col))
 
             # Backslash (character constant or escape)
             elif ch == '\\':

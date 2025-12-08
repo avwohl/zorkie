@@ -244,7 +244,13 @@ class ZILCompiler:
         # Fifth pass: Evaluate %<+>, %<->, %<*>, etc. compile-time arithmetic
         source = self._process_compile_arithmetic(source)
 
-        # Sixth pass: Skip MDL macro definitions (DEFMAC, DEFINE) that we can't process
+        # Sixth pass: Strip #DECL type declarations (MDL feature not needed for compilation)
+        source = self._strip_decl(source)
+
+        # Seventh pass: Process #SPLICE directives (MDL splicing)
+        source = self._process_splice(source)
+
+        # Eighth pass: Skip MDL macro definitions (DEFMAC, DEFINE) that we can't process
         source = self._skip_mdl_macros(source)
 
         # Seventh pass: If lax_brackets enabled, remove extraneous > brackets
@@ -253,18 +259,23 @@ class ZILCompiler:
 
         return source
 
-    def _skip_mdl_macros(self, source: str) -> str:
+    def _strip_decl(self, source: str) -> str:
         """
-        Skip MDL macro definitions that we can't process.
-        These include <DEFMAC ...> and <DEFINE ...> blocks.
+        Strip #DECL type declarations.
+
+        #DECL is an MDL type annotation feature used by ZILF for type checking
+        but not needed for Z-machine compilation. Format:
+            #DECL ((VAR) TYPE ...)
+
+        We remove entire #DECL blocks.
         """
         import re
         result = []
         pos = 0
 
         while pos < len(source):
-            # Look for <DEFMAC or <DEFINE
-            match = re.search(r'<\s*(DEFMAC|DEFINE)\s+', source[pos:], re.IGNORECASE)
+            # Look for #DECL
+            match = re.search(r'#DECL\s*\(', source[pos:], re.IGNORECASE)
             if not match:
                 result.append(source[pos:])
                 break
@@ -272,12 +283,139 @@ class ZILCompiler:
             # Add text before match
             result.append(source[pos:pos + match.start()])
 
-            # Find the matching > for this <DEFMAC or <DEFINE
+            # Find the matching ) for this #DECL (
+            start = pos + match.start() + len('#DECL')
+            # Skip whitespace to find the (
+            while start < len(source) and source[start] in ' \t\n':
+                start += 1
+
+            if start < len(source) and source[start] == '(':
+                # Find matching )
+                depth = 1
+                end = start + 1
+                while end < len(source) and depth > 0:
+                    if source[end] == '(':
+                        depth += 1
+                    elif source[end] == ')':
+                        depth -= 1
+                    end += 1
+                pos = end
+            else:
+                # No opening paren found, skip just the #DECL
+                result.append('#DECL')
+                pos = pos + match.start() + len('#DECL')
+
+        return ''.join(result)
+
+    def _process_splice(self, source: str) -> str:
+        """
+        Process #SPLICE directives.
+
+        #SPLICE is used in MDL/ZILF for splicing expressions into lists.
+        - #SPLICE () - splices nothing (returns empty string)
+        - #SPLICE (expr1 expr2 ...) - splices the expressions without surrounding parens
+
+        Common usage in ZILF:
+        <VERSION? (ZIP ...) (ELSE #SPLICE ())>  - include nothing in ELSE case
+
+        Also handles: #SPLICE <expr> for single expressions
+        """
+        import re
+        result = []
+        pos = 0
+
+        while pos < len(source):
+            # Look for #SPLICE
+            match = re.search(r'#SPLICE\s*', source[pos:], re.IGNORECASE)
+            if not match:
+                result.append(source[pos:])
+                break
+
+            # Add text before match
+            result.append(source[pos:pos + match.start()])
+
+            splice_start = pos + match.start()
+            after_splice = splice_start + match.end() - match.start()
+
+            # Check what follows #SPLICE
+            if after_splice < len(source):
+                next_char = source[after_splice]
+
+                if next_char == '(':
+                    # #SPLICE (...) - extract content of parens
+                    depth = 1
+                    content_start = after_splice + 1
+                    end = content_start
+
+                    while end < len(source) and depth > 0:
+                        if source[end] == '(':
+                            depth += 1
+                        elif source[end] == ')':
+                            depth -= 1
+                        end += 1
+
+                    if depth == 0:
+                        # Extract content (without parens)
+                        content = source[content_start:end-1].strip()
+                        # If empty, splice nothing; otherwise splice the content
+                        result.append(content)
+                        pos = end
+                    else:
+                        # Unbalanced - skip the #SPLICE and continue
+                        result.append('#SPLICE')
+                        pos = after_splice
+
+                elif next_char == '<':
+                    # #SPLICE <expr> - extract the angle-bracket form
+                    content, end = self._extract_balanced_content(source, after_splice)
+                    if content:
+                        # Splice the form directly
+                        result.append(content)
+                        pos = end
+                    else:
+                        result.append('#SPLICE')
+                        pos = after_splice
+                else:
+                    # Unknown format - keep as is
+                    result.append('#SPLICE')
+                    pos = after_splice
+            else:
+                # #SPLICE at end of file
+                result.append('#SPLICE')
+                pos = after_splice
+
+        return ''.join(result)
+
+    def _skip_mdl_macros(self, source: str) -> str:
+        """
+        Skip MDL compile-time definitions that we can't process.
+
+        DEFMAC macros are now supported with quasiquote expansion, so we keep them.
+        DEFINE forms are compile-time functions that we skip.
+
+        Note: Quasiquote (`) and unquote (~, ~!) are now supported in DEFMAC
+        macro expansion.
+        """
+        import re
+        result = []
+        pos = 0
+
+        while pos < len(source):
+            # Only skip <DEFINE (not DEFMAC - we now support those)
+            match = re.search(r'<\s*DEFINE\s+', source[pos:], re.IGNORECASE)
+            if not match:
+                result.append(source[pos:])
+                break
+
+            # Add text before match
+            result.append(source[pos:pos + match.start()])
+
+            # Find the matching > for this <DEFINE
             start = pos + match.start()
             content, end = self._extract_balanced_content(source, start)
 
             if content:
-                # Skip the macro definition entirely
+                # Skip the DEFINE definition entirely
                 pos = end
             else:
                 # Can't find matching bracket, skip this character
@@ -981,7 +1119,7 @@ class ZILCompiler:
         # - <EQUAL? ...>
         # - etc.
 
-        if test.upper() == 'T':
+        if test.upper() in ('T', 'ELSE', 'OTHERWISE'):
             return True
 
         if test.upper() == '<>':
@@ -1006,6 +1144,63 @@ class ZILCompiler:
 
         # Default: can't evaluate, return False
         return False
+
+    def _build_action_tables(self, program) -> dict:
+        """Build ACTIONS and PREACTIONS tables from SYNTAX definitions.
+
+        Creates mappings from action numbers to routine names, which will
+        be resolved to routine addresses during code generation.
+
+        Returns dict with:
+            'actions': list of (action_num, routine_name) pairs
+            'preactions': list of (action_num, routine_name) pairs
+            'verb_constants': dict of V?VERB -> action_num
+        """
+        if not program.syntax:
+            return None
+
+        actions = {}  # routine_name -> action_num
+        preactions = {}  # routine_name -> action_num
+        verb_constants = {}  # V?VERB -> action_num
+
+        action_num = 1  # Start from 1 (0 is often reserved)
+
+        for syntax_def in program.syntax:
+            if not syntax_def.routine:
+                continue
+
+            # Parse routine field: "V-ACTION" or "V-ACTION PRE-ACTION"
+            parts = syntax_def.routine.split()
+            action_routine = parts[0] if parts else None
+            preaction_routine = parts[1] if len(parts) > 1 else None
+
+            if action_routine and action_routine not in actions:
+                actions[action_routine] = action_num
+
+                # Create V?VERB constant from verb pattern
+                if syntax_def.pattern:
+                    verb_word = syntax_def.pattern[0]
+                    if isinstance(verb_word, str):
+                        const_name = f'V?{verb_word.upper()}'
+                        if const_name not in verb_constants:
+                            verb_constants[const_name] = action_num
+
+                action_num += 1
+
+            if preaction_routine and preaction_routine not in preactions:
+                # Preactions share action numbers with their main action
+                if action_routine in actions:
+                    preactions[preaction_routine] = actions[action_routine]
+
+        # Store for later use during code generation
+        self._action_table = {
+            'actions': [(num, name) for name, num in sorted(actions.items(), key=lambda x: x[1])],
+            'preactions': [(num, name) for name, num in sorted(preactions.items(), key=lambda x: x[1])],
+            'verb_constants': verb_constants,
+            'action_to_routine': {v: k for k, v in actions.items()},
+        }
+
+        return self._action_table
 
     def compile_string(self, source: str, filename: str = "<input>") -> bytes:
         """
@@ -1059,6 +1254,11 @@ class ZILCompiler:
         if program.version:
             self.version = program.version
             self.log(f"  Target version: {self.version}")
+
+        # Build action tables from SYNTAX definitions
+        action_table_info = self._build_action_tables(program)
+        if action_table_info:
+            self.log(f"  Built ACTIONS table with {len(action_table_info['actions'])} entries")
 
         # Build abbreviations table (V2+)
         abbreviations_table = None
@@ -1114,11 +1314,10 @@ class ZILCompiler:
 
             self.log(f"  Collected {len(all_strings)} strings")
 
-            # Build abbreviations table
-            # Generate more candidates than needed (1000) to allow overlap elimination
+            # Build abbreviations table (now directly generates non-overlapping abbreviations)
             abbreviations_table = AbbreviationsTable()
-            abbreviations_table.analyze_strings(all_strings, max_abbrevs=1000)
-            self.log(f"  Generated {len(abbreviations_table)} abbreviation candidates")
+            abbreviations_table.analyze_strings(all_strings, max_abbrevs=96)
+            self.log(f"  Generated {len(abbreviations_table)} non-overlapping abbreviations")
 
         # Create string table for deduplication (optional - controlled by flag)
         string_table = None
@@ -1130,15 +1329,31 @@ class ZILCompiler:
             self.log("String table deduplication enabled")
 
         # Code generation
-        # NOTE: We don't pass abbreviations_table to code generator because
-        # abbreviation encoding in strings requires the abbreviation table to be
-        # properly positioned in the final file, which happens later during assembly.
-        # For now, encode strings without abbreviations for correctness.
+        # Pass abbreviations_table to enable string compression.
+        # The abbreviation indices (Z-chars 1-3 + index) are stable after analyze_strings().
+        # The assembler positions the actual abbreviation strings later.
         self.log("Generating code...")
-        codegen = ImprovedCodeGenerator(self.version, abbreviations_table=None,
-                                       string_table=string_table)
+        codegen = ImprovedCodeGenerator(self.version, abbreviations_table=abbreviations_table,
+                                       string_table=string_table,
+                                       action_table=action_table_info)
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
+
+        # Get routine call fixups for address resolution
+        routine_fixups = codegen.get_routine_fixups()
+        if routine_fixups:
+            self.log(f"  {len(routine_fixups)} routine call fixups")
+
+        # Get table routine fixups (for ACTIONS table, etc.)
+        table_routine_fixups = codegen.get_table_routine_fixups()
+        if table_routine_fixups:
+            self.log(f"  {len(table_routine_fixups)} table routine fixups")
+
+        # Get table data and offsets
+        table_data = codegen.get_table_data() if codegen.tables else b''
+        table_offsets = codegen.get_table_offsets() if codegen.tables else {}
+        if table_data:
+            self.log(f"  {len(codegen.tables)} tables ({len(table_data)} bytes)")
 
         # Build globals data with initial values
         globals_data = codegen.build_globals_data()
@@ -1152,9 +1367,15 @@ class ZILCompiler:
         self.log("Building object table...")
         obj_table = ObjectTable(self.version, text_encoder=codegen.encoder)
 
+        # Track flag bit assignments - auto-assign if not defined as constants
+        flag_bit_map = {}  # flag name -> bit number
+        next_flag_bit = 0
+        max_attributes = 32 if self.version <= 3 else 48
+
         # Helper to convert FLAGS to attribute bitmask
         def flags_to_attributes(flags):
             """Convert FLAGS list to attribute bitmask."""
+            nonlocal next_flag_bit
             attr_mask = 0
 
             # Handle single flag or list of flags
@@ -1178,10 +1399,23 @@ class ZILCompiler:
                 return 0
 
             for flag in flags:
-                # Try to get flag number from constants
+                # Try to get flag number from constants first
                 if flag in codegen.constants:
                     bit_num = codegen.constants[flag]
-                    attr_mask |= (1 << bit_num)
+                    attr_mask |= (1 << (31 - bit_num) if self.version <= 3 else (47 - bit_num))
+                elif flag in flag_bit_map:
+                    # Already auto-assigned
+                    bit_num = flag_bit_map[flag]
+                    attr_mask |= (1 << (31 - bit_num) if self.version <= 3 else (47 - bit_num))
+                else:
+                    # Auto-assign new bit number
+                    if next_flag_bit < max_attributes:
+                        flag_bit_map[flag] = next_flag_bit
+                        self.log(f"  Auto-assigned FLAG {flag} -> bit {next_flag_bit}")
+                        attr_mask |= (1 << (31 - next_flag_bit) if self.version <= 3 else (47 - next_flag_bit))
+                        next_flag_bit += 1
+                    else:
+                        self.log(f"  Warning: Too many flags, ignoring {flag}")
             return attr_mask
 
         # Build property mapping from PROPDEF declarations
@@ -1211,7 +1445,7 @@ class ZILCompiler:
                         props[prop_num] = value.value
                     else:
                         props[prop_num] = value
-                elif key not in ['FLAGS', 'SYNONYM', 'ADJECTIVE']:
+                elif key not in ['FLAGS', 'SYNONYM', 'ADJECTIVE', 'IN', 'LOC']:
                     # Unknown property, assign next number
                     if key not in prop_map:
                         prop_map[key] = next_prop_num
@@ -1225,27 +1459,105 @@ class ZILCompiler:
 
             return props
 
-        # Add objects with properties
-        for obj in program.objects:
-            attributes = flags_to_attributes(obj.properties.get('FLAGS', []))
-            properties = extract_properties(obj)
-            obj_table.add_object(
-                name=obj.name,
-                attributes=attributes,
-                properties=properties
-            )
+        # Build object name -> number mapping first (objects are 1-indexed)
+        # Rooms and objects share the same number space
+        all_objects = []  # List of (name, node, is_room)
+        obj_name_to_num = {}
+        obj_num = 1
 
-        # Add rooms (which are also objects)
+        for obj in program.objects:
+            obj_name_to_num[obj.name] = obj_num
+            all_objects.append((obj.name, obj, False))
+            obj_num += 1
+
         for room in program.rooms:
-            attributes = flags_to_attributes(room.properties.get('FLAGS', []))
-            properties = extract_properties(room)
+            obj_name_to_num[room.name] = obj_num
+            all_objects.append((room.name, room, True))
+            obj_num += 1
+
+        self.log(f"  {len(all_objects)} objects/rooms total")
+
+        # Helper to get object number from IN property value
+        def get_parent_num(in_value):
+            """Extract parent object number from IN property value."""
+            from .parser.ast_nodes import AtomNode, FormNode
+            if in_value is None:
+                return 0
+            # Handle AtomNode
+            if isinstance(in_value, AtomNode):
+                parent_name = in_value.value
+            elif isinstance(in_value, str):
+                parent_name = in_value
+            elif isinstance(in_value, list) and len(in_value) > 0:
+                # Take first element if it's a list
+                first = in_value[0]
+                if isinstance(first, AtomNode):
+                    parent_name = first.value
+                elif isinstance(first, str):
+                    parent_name = first
+                else:
+                    return 0
+            else:
+                return 0
+
+            # Look up parent by name
+            return obj_name_to_num.get(parent_name, 0)
+
+        # Build parent relationships
+        parent_of = {}  # obj_num -> parent_num
+        for name, node, is_room in all_objects:
+            obj_num = obj_name_to_num[name]
+            # Check for IN or LOC property
+            in_value = node.properties.get('IN') or node.properties.get('LOC')
+            parent_num = get_parent_num(in_value)
+            parent_of[obj_num] = parent_num
+
+        # Build child lists (parent -> list of children in order)
+        children_of = {}  # parent_num -> [child_nums...]
+        for obj_num, parent_num in parent_of.items():
+            if parent_num not in children_of:
+                children_of[parent_num] = []
+            children_of[parent_num].append(obj_num)
+
+        # Build sibling chains and first-child pointers
+        sibling_of = {}  # obj_num -> next_sibling_num
+        child_of = {}    # parent_num -> first_child_num
+
+        for parent_num, child_list in children_of.items():
+            if child_list:
+                # First child
+                child_of[parent_num] = child_list[0]
+                # Build sibling chain
+                for i in range(len(child_list) - 1):
+                    sibling_of[child_list[i]] = child_list[i + 1]
+                # Last child has no sibling
+                sibling_of[child_list[-1]] = 0
+
+        # Add objects with properties and tree structure
+        for name, node, is_room in all_objects:
+            obj_num = obj_name_to_num[name]
+            attributes = flags_to_attributes(node.properties.get('FLAGS', []))
+            properties = extract_properties(node)
             obj_table.add_object(
-                name=room.name,
+                name=name,
+                parent=parent_of.get(obj_num, 0),
+                sibling=sibling_of.get(obj_num, 0),
+                child=child_of.get(obj_num, 0),
                 attributes=attributes,
                 properties=properties
             )
 
         objects_data = obj_table.build()
+
+        # Register flag bit assignments with codegen for FSET/FCLEAR/FSET? opcodes
+        for flag_name, bit_num in flag_bit_map.items():
+            codegen.constants[flag_name] = bit_num
+
+        # Register object numbers with codegen for object references in code
+        for obj_name, obj_num in obj_name_to_num.items():
+            codegen.objects[obj_name] = obj_num
+
+        self.log(f"  Registered {len(flag_bit_map)} flags, {len(obj_name_to_num)} objects")
 
         # Build dictionary with vocabulary from objects
         self.log("Building dictionary...")
@@ -1375,20 +1687,23 @@ class ZILCompiler:
         dict_data = dictionary.build()
 
         # Run optimization passes before assembly
+        # Note: AbbreviationOptimizationPass is now run earlier, before code generation
         self.log("Running optimization passes...")
-        from .optimization.passes import OptimizationPipeline, StringDeduplicationPass, AbbreviationOptimizationPass
+        from .optimization.passes import OptimizationPipeline, StringDeduplicationPass, PropertyOptimizationPass
 
         compilation_data = {
             'routines_code': routines_code,
             'objects_data': objects_data,
             'dictionary_data': dict_data,
             'abbreviations_table': abbreviations_table,
-            'program': program
+            'program': program,
+            'table_data': table_data,
+            'table_offsets': table_offsets
         }
 
         pipeline = OptimizationPipeline(verbose=self.verbose)
         pipeline.add_pass(StringDeduplicationPass)
-        pipeline.add_pass(AbbreviationOptimizationPass)
+        pipeline.add_pass(PropertyOptimizationPass)
 
         compilation_data = pipeline.run(compilation_data)
 
@@ -1397,6 +1712,8 @@ class ZILCompiler:
         objects_data = compilation_data['objects_data']
         dict_data = compilation_data['dictionary_data']
         abbreviations_table = compilation_data.get('abbreviations_table', abbreviations_table)
+        table_data = compilation_data.get('table_data', b'')
+        table_offsets = compilation_data.get('table_offsets', {})
 
         # Log optimization statistics
         if 'optimization_stats' in compilation_data:
@@ -1423,7 +1740,11 @@ class ZILCompiler:
             dict_data,
             globals_data=globals_data,
             abbreviations_table=abbreviations_table,
-            string_table=string_table
+            string_table=string_table,
+            table_data=table_data,
+            table_offsets=table_offsets,
+            routine_fixups=routine_fixups,
+            table_routine_fixups=table_routine_fixups
         )
 
         return story

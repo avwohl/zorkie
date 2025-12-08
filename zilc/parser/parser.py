@@ -311,6 +311,46 @@ class Parser:
                 # These will be added to the program as if they were top-level
                 return selected_bodies if selected_bodies else None
 
+            elif op_name == "NEWTYPE":
+                # NEWTYPE type-name base-type type-spec
+                # Example: <NEWTYPE RSEC VECTOR '!<VECTOR ATOM ...>>
+                # This is a compile-time type definition - we store it but don't generate code
+                node = self.parse_newtype(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "OFFSET":
+                # OFFSET index type-name field-type
+                # Example: <OFFSET 1 RSEC ATOM>
+                # Returns the index as a compile-time constant
+                node = self.parse_offset(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name in ("PACKAGE", "ENDPACKAGE"):
+                # MDL module system - skip these directives
+                # Parse any arguments and discard
+                while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+                    self.parse_expression()
+                self.expect(TokenType.RANGLE)
+                return None
+
+            elif op_name == "ENTRY":
+                # ENTRY symbol1 symbol2 ... - module exports
+                # Parse and discard
+                while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+                    self.parse_expression()
+                self.expect(TokenType.RANGLE)
+                return None
+
+            elif op_name == "USE":
+                # USE "module-name" - module import
+                # Parse and discard
+                while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+                    self.parse_expression()
+                self.expect(TokenType.RANGLE)
+                return None
+
             elif op_name == "BUZZ":
                 node = self.parse_buzz(line, col)
                 self.expect(TokenType.RANGLE)
@@ -328,14 +368,22 @@ class Parser:
                 return node
 
             elif op_name == "COND":
-                node = self.parse_cond(line, col)
-                self.expect(TokenType.RANGLE)
-                return node
+                # Only use special COND parsing if followed by LPAREN
+                # (allows quasiquote templates like `<COND ~!.CLAUSES>)
+                if self.current_token.type == TokenType.LPAREN:
+                    node = self.parse_cond(line, col)
+                    self.expect(TokenType.RANGLE)
+                    return node
+                # Fall through to generic form handling
 
             elif op_name == "REPEAT":
-                node = self.parse_repeat(line, col)
-                self.expect(TokenType.RANGLE)
-                return node
+                # Only use special REPEAT parsing if followed by LPAREN
+                # (allows quasiquote templates like `<REPEAT ~!.STUFF>)
+                if self.current_token.type == TokenType.LPAREN:
+                    node = self.parse_repeat(line, col)
+                    self.expect(TokenType.RANGLE)
+                    return node
+                # Fall through to generic form handling
 
         # Parse operands for generic form
         operands = []
@@ -358,6 +406,52 @@ class Parser:
             # Create a QUOTE form
             quote_atom = AtomNode("QUOTE", line, col)
             return FormNode(quote_atom, [quoted_expr], line, col)
+
+        # Handle quasiquote operator: `EXPR becomes QuasiquoteNode
+        if token.type == TokenType.ATOM and token.value == '`':
+            self.advance()
+            quoted_expr = self.parse_expression()
+            return QuasiquoteNode(quoted_expr, line, col)
+
+        # Handle unquote operator: ~EXPR becomes UnquoteNode
+        if token.type == TokenType.ATOM and token.value == '~':
+            self.advance()
+            unquoted_expr = self.parse_expression()
+            return UnquoteNode(unquoted_expr, line, col)
+
+        # Handle splice-unquote operator: ~!EXPR becomes SpliceUnquoteNode
+        if token.type == TokenType.ATOM and token.value == '~!':
+            self.advance()
+            spliced_expr = self.parse_expression()
+            return SpliceUnquoteNode(spliced_expr, line, col)
+
+        # Handle MDL splice operator: !EXPR becomes SpliceUnquoteNode
+        # This is the MDL syntax for splicing (equivalent to ~! in ZILF)
+        # Used in macro bodies like <FORM PROG () !<MAPF ...>>
+        if token.type == TokenType.ATOM and token.value == '!':
+            self.advance()
+            spliced_expr = self.parse_expression()
+            return SpliceUnquoteNode(spliced_expr, line, col)
+
+        # Handle bare comma: ,EXPR becomes <GVAL EXPR> (computed global reference)
+        # This is for cases like ,~<PARSE ...> where the global name is computed
+        if token.type == TokenType.COMMA:
+            self.advance()
+            # Parse the expression that follows
+            computed_expr = self.parse_expression()
+            # Wrap in a GVAL form (get global value)
+            gval_atom = AtomNode("GVAL", line, col)
+            return FormNode(gval_atom, [computed_expr], line, col)
+
+        # Handle bare period: .EXPR becomes <LVAL EXPR> (computed local reference)
+        # This is for cases like .~.VAR where the local name is computed
+        if token.type == TokenType.PERIOD:
+            self.advance()
+            # Parse the expression that follows
+            computed_expr = self.parse_expression()
+            # Wrap in a LVAL form (get local value)
+            lval_atom = AtomNode("LVAL", line, col)
+            return FormNode(lval_atom, [computed_expr], line, col)
 
         if token.type == TokenType.LANGLE:
             # Check for empty form <>
@@ -846,18 +940,25 @@ class Parser:
                     params.append((param_name, is_quoted, False, aux_mode))
                     self.advance()
                 elif self.current_token.type == TokenType.LPAREN:
-                    # AUX variable with default value: (VAR default)
+                    # Variable with default value: (VAR default) or ('VAR default)
                     self.advance()  # (
+
+                    # Check for quoted parameter name inside parens
+                    param_is_quoted = False
+                    if self.current_token.type == TokenType.QUOTE:
+                        param_is_quoted = True
+                        self.advance()
+
                     if self.current_token.type != TokenType.ATOM:
-                        self.error("Expected variable name in AUX binding")
+                        self.error("Expected variable name in binding")
                     param_name = self.current_token.value
                     self.advance()
 
                     # Parse default value (we'll store it but won't use it yet)
-                    # For now, just skip it
                     default_val = self.parse_expression()
 
-                    params.append((param_name, False, False, True))
+                    # Params with defaults are treated as AUX-like (optional)
+                    params.append((param_name, param_is_quoted, False, True))
                     self.expect(TokenType.RPAREN)
                 else:
                     self.error(f"Unexpected token in parameter list: {self.current_token.type}")
@@ -1000,29 +1101,52 @@ class Parser:
         if self.current_token.type == TokenType.LPAREN:
             self.advance()  # (
 
-            # Parse variable bindings - can be (var init) or just var
+            # Parse variable bindings - can be (var init), just var, or expressions
+            # In quasiquote contexts, bindings can be unquote expressions like ~.VAR
             while self.current_token.type != TokenType.RPAREN:
                 if self.current_token.type == TokenType.LPAREN:
-                    # (var init) form
+                    # (var init) form or (unquote-expr) for quasiquote
                     self.advance()  # (
 
-                    # Expect variable name
-                    if self.current_token.type != TokenType.ATOM:
-                        self.error(f"Expected variable name in REPEAT binding, got {self.current_token.type}")
+                    # Check for unquote expression like (~.VAR)
+                    if self.current_token.type == TokenType.ATOM and self.current_token.value in ('~', '~!'):
+                        # This is an unquote expression in the binding
+                        # Parse it as an expression and use it as the binding
+                        self.pos -= 1  # Back up to re-parse with (
+                        self.current_token = self.tokens[self.pos - 1] if self.pos > 0 else None
+                        self.advance()  # Get back to (
+                        binding_expr = self.parse_expression()
+                        bindings.append((binding_expr, None))  # Store expr instead of name
+                    elif self.current_token.type == TokenType.ATOM:
+                        # Normal (var init) form
+                        var_name = self.current_token.value
+                        self.advance()
 
-                    var_name = self.current_token.value
-                    self.advance()
+                        # Parse initial value
+                        init_value = self.parse_expression()
 
-                    # Parse initial value
-                    init_value = self.parse_expression()
-
-                    self.expect(TokenType.RPAREN)
-                    bindings.append((var_name, init_value))
+                        self.expect(TokenType.RPAREN)
+                        bindings.append((var_name, init_value))
+                    else:
+                        # Could be a complex expression binding
+                        binding_expr = self.parse_expression()
+                        self.expect(TokenType.RPAREN)
+                        bindings.append((binding_expr, None))
                 elif self.current_token.type == TokenType.ATOM:
-                    # Plain var form (no initialization)
-                    var_name = self.current_token.value
-                    self.advance()
-                    bindings.append((var_name, None))
+                    atom_val = self.current_token.value
+                    # Check for unquote: ~EXPR
+                    if atom_val in ('~', '~!'):
+                        binding_expr = self.parse_expression()
+                        bindings.append((binding_expr, None))
+                    else:
+                        # Plain var form (no initialization)
+                        var_name = self.current_token.value
+                        self.advance()
+                        bindings.append((var_name, None))
+                elif self.current_token.type == TokenType.LOCAL_VAR:
+                    # Local variable reference in binding (.VAR) - for quasiquote expansion
+                    binding_expr = self.parse_expression()
+                    bindings.append((binding_expr, None))
                 else:
                     self.error(f"Expected variable binding in REPEAT, got {self.current_token.type}")
 
@@ -1056,6 +1180,70 @@ class Parser:
             body.append(self.parse_expression())
 
         return RepeatNode(bindings, condition, body, line, col)
+
+    def parse_newtype(self, line: int, col: int):
+        """Parse NEWTYPE type definition.
+
+        Syntax: <NEWTYPE type-name base-type type-spec>
+
+        Example: <NEWTYPE RSEC VECTOR '!<VECTOR ATOM <OR '* FIX> ...>>
+
+        This is a compile-time MDL construct. We parse and store it but
+        it doesn't generate runtime code. It defines a new type based on
+        a primitive type (usually VECTOR) with specific field types.
+        """
+        from .ast_nodes import ConstantNode, NumberNode
+
+        # Parse type name
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected type name in NEWTYPE")
+        type_name = self.current_token.value
+        self.advance()
+
+        # Parse base type (usually VECTOR, LIST, etc.)
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected base type in NEWTYPE")
+        base_type = self.current_token.value
+        self.advance()
+
+        # Skip the type specification - it's MDL type info we don't use
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            self.parse_expression()
+
+        # Return as a constant that represents the type
+        # Value 0 is used as a placeholder - real MDL would track type info
+        return ConstantNode(type_name, NumberNode(0, line, col), line, col)
+
+    def parse_offset(self, line: int, col: int):
+        """Parse OFFSET structure field accessor.
+
+        Syntax: <OFFSET index type-name field-type>
+
+        Example: <SETG RSEC-RTN <OFFSET 1 RSEC ATOM>>
+
+        Returns the index as a number - used to access fields in typed structures.
+        In Z-machine terms, this is just a constant index into a table/vector.
+        """
+        from .ast_nodes import NumberNode
+
+        # Parse index
+        if self.current_token.type != TokenType.NUMBER:
+            self.error("Expected index number in OFFSET")
+        index = self.current_token.value
+        self.advance()
+
+        # Parse type name (we track but don't use for code generation)
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected type name in OFFSET")
+        # type_name = self.current_token.value  # Not used in Z-machine code
+        self.advance()
+
+        # Skip field type specification
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            self.parse_expression()
+
+        # Return the index as a number node - this is what gets used at runtime
+        return NumberNode(index, line, col)
 
 
 def parse(tokens: List[Token], filename: str = "<input>") -> Program:

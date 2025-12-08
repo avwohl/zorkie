@@ -70,6 +70,43 @@ class ZAssembler:
         """Calculate story file checksum (sum of all bytes except header)."""
         return sum(data[0x40:]) & 0xFFFF
 
+    def _resolve_table_placeholders(self, data: bytes, table_base_addr: int,
+                                       table_offsets: dict) -> bytes:
+        """
+        Resolve table address placeholders in data.
+
+        Scans for 16-bit values in range 0xFF00-0xFFFF which represent table
+        indices, and replaces them with actual table addresses.
+
+        Args:
+            data: Bytes to scan (typically globals_data)
+            table_base_addr: Base address where tables are placed in memory
+            table_offsets: Dict mapping table index to offset within table data
+
+        Returns:
+            Modified data with actual table addresses
+        """
+        if not table_offsets:
+            return data
+
+        result = bytearray(data)
+
+        # Scan for 16-bit table placeholders (0xFF00 | table_index)
+        # Globals are stored as big-endian 16-bit words
+        for i in range(0, len(result) - 1, 2):
+            word = (result[i] << 8) | result[i + 1]
+            # Check if this is a table placeholder (0xFF00-0xFFFF)
+            if word >= 0xFF00 and word <= 0xFFFF:
+                table_index = word & 0x00FF
+                if table_index in table_offsets:
+                    # Calculate actual table address
+                    actual_addr = table_base_addr + table_offsets[table_index]
+                    # Write back as big-endian
+                    result[i] = (actual_addr >> 8) & 0xFF
+                    result[i + 1] = actual_addr & 0xFF
+
+        return bytes(result)
+
     def _resolve_string_markers(self, routines: bytes, string_table) -> bytes:
         """
         Resolve string table markers in routine bytecode.
@@ -129,9 +166,52 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_routine_fixups(self, routines: bytes, routine_fixups: list) -> bytes:
+        """
+        Resolve routine call fixups by patching addresses.
+
+        Each fixup is (code_offset, routine_offset) where:
+        - code_offset: Position in routines to patch (2 bytes)
+        - routine_offset: Byte offset of target routine within routines
+
+        Args:
+            routines: Routine bytecode with placeholder addresses
+            routine_fixups: List of fixup tuples
+
+        Returns:
+            Patched routine bytecode
+        """
+        if not routine_fixups:
+            return routines
+
+        result = bytearray(routines)
+
+        for code_offset, routine_offset in routine_fixups:
+            # Calculate actual byte address of routine
+            actual_addr = self.high_mem_base + routine_offset
+
+            # Convert to packed address based on version
+            if self.version <= 3:
+                packed_addr = actual_addr // 2
+            elif self.version <= 7:
+                packed_addr = actual_addr // 4
+            else:
+                packed_addr = actual_addr // 8
+
+            # Patch the 16-bit address
+            if code_offset + 1 < len(result):
+                result[code_offset] = (packed_addr >> 8) & 0xFF
+                result[code_offset + 1] = packed_addr & 0xFF
+
+        return bytes(result)
+
     def build_story_file(self, routines: bytes, objects: bytes = b'',
                         dictionary: bytes = b'', globals_data: bytes = b'',
-                        abbreviations_table=None, string_table=None) -> bytes:
+                        abbreviations_table=None, string_table=None,
+                        table_data: bytes = b'',
+                        table_offsets: dict = None,
+                        routine_fixups: list = None,
+                        table_routine_fixups: list = None) -> bytes:
         """
         Build complete story file.
 
@@ -142,10 +222,18 @@ class ZAssembler:
             globals_data: Global variables data
             abbreviations_table: AbbreviationsTable instance (optional)
             string_table: StringTable instance (optional, for deduplication)
+            table_data: TABLE/LTABLE/ITABLE data (optional)
+            table_offsets: Dict mapping table index to offset within table_data
+            routine_fixups: List of (code_offset, routine_offset) for call address patching
+            table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
 
         Returns:
             Complete story file as bytes
         """
+        # Initialize table_offsets if not provided
+        if table_offsets is None:
+            table_offsets = {}
+
         # Start with header
         story = self.create_header()
 
@@ -156,6 +244,40 @@ class ZAssembler:
         if not globals_data:
             # Default: 240 globals initialized to 0
             globals_data = bytes(480)  # 240 * 2 bytes
+
+        # First, calculate where tables will be placed so we can resolve addresses.
+        # We need to do a "dry run" to calculate table_base_addr before patching globals.
+        # Calculate sizes of: globals, abbreviations, objects, dictionary
+        calc_addr = 0x40  # After header
+        calc_addr += len(globals_data)  # globals
+        calc_addr = (calc_addr + 1) // 2 * 2  # pad to word boundary
+
+        # Abbreviations size (if present)
+        abbrev_encoded = False
+        if abbreviations_table and self.version >= 2 and len(abbreviations_table) > 0:
+            from .text_encoding import ZTextEncoder
+            text_encoder = ZTextEncoder(self.version)
+            abbreviations_table.encode_abbreviations(text_encoder)
+            abbrev_encoded = True
+            calc_addr += 192  # 96 word addresses table
+            for encoded_string in abbreviations_table.encoded_strings:
+                calc_addr += len(encoded_string)
+            calc_addr = (calc_addr + 1) // 2 * 2  # pad
+
+        calc_addr = (calc_addr + 1) // 2 * 2  # pad
+        calc_addr += len(objects) if objects else 0  # objects
+        calc_addr = (calc_addr + 1) // 2 * 2  # pad
+        calc_addr += len(dictionary) if dictionary else 0  # dictionary
+        calc_addr = (calc_addr + 1) // 2 * 2  # pad
+
+        # NOW we know where tables will be placed
+        table_base_addr = calc_addr
+
+        # Patch globals_data with actual table addresses
+        if table_data and table_offsets:
+            globals_data = self._resolve_table_placeholders(
+                globals_data, table_base_addr, table_offsets
+            )
 
         globals_addr = current_addr
         story.extend(globals_data)
@@ -170,10 +292,11 @@ class ZAssembler:
         abbrev_addr = 0
         abbrev_strings_addr = 0
         if abbreviations_table and self.version >= 2 and len(abbreviations_table) > 0:
-            # Encode abbreviation strings first
-            from .text_encoding import ZTextEncoder
-            text_encoder = ZTextEncoder(self.version)
-            abbreviations_table.encode_abbreviations(text_encoder)
+            # Encode abbreviation strings if not already done in calculation pass
+            if not abbrev_encoded:
+                from .text_encoding import ZTextEncoder
+                text_encoder = ZTextEncoder(self.version)
+                abbreviations_table.encode_abbreviations(text_encoder)
 
             # Abbreviations table comes first (96 word addresses)
             abbrev_addr = current_addr
@@ -251,10 +374,21 @@ class ZAssembler:
             story.extend(dictionary)
             current_addr += len(dictionary)
 
-        # Align to even boundary for high memory
+        # Align to even boundary
         while len(story) % 2 != 0:
             story.append(0)
             current_addr += 1
+
+        # Add table data (static memory, before high memory)
+        table_base_addr = current_addr
+        if table_data:
+            story.extend(table_data)
+            current_addr += len(table_data)
+
+            # Align to even boundary
+            while len(story) % 2 != 0:
+                story.append(0)
+                current_addr += 1
 
         # Mark start of high memory
         self.high_mem_base = len(story)
@@ -264,6 +398,27 @@ class ZAssembler:
             while self.high_mem_base % 8 != 0:
                 story.append(0)
                 self.high_mem_base = len(story)
+
+        # Resolve table routine fixups (for ACTIONS table packed addresses)
+        # Now that we know high_mem_base, patch table data with routine addresses
+        if table_routine_fixups and table_data:
+            for table_offset, routine_offset in table_routine_fixups:
+                # Calculate actual byte address of routine
+                actual_addr = self.high_mem_base + routine_offset
+
+                # Convert to packed address based on version
+                if self.version <= 3:
+                    packed_addr = actual_addr // 2
+                elif self.version <= 7:
+                    packed_addr = actual_addr // 4
+                else:
+                    packed_addr = actual_addr // 8
+
+                # Patch the table data in the story (at table_base_addr + table_offset)
+                story_offset = table_base_addr + table_offset
+                if story_offset + 1 < len(story):
+                    story[story_offset] = (packed_addr >> 8) & 0xFF
+                    story[story_offset + 1] = packed_addr & 0xFF
 
         # If string table is present, add string table after routines and resolve markers
         if string_table is not None:
@@ -279,6 +434,10 @@ class ZAssembler:
 
             # Resolve string table markers in routines
             routines = self._resolve_string_markers(routines, string_table)
+
+        # Resolve routine call fixups (patch call addresses)
+        if routine_fixups:
+            routines = self._resolve_routine_fixups(routines, routine_fixups)
 
         # Add routines
         story.extend(routines)

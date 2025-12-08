@@ -48,6 +48,11 @@ class NodeType(Enum):
     PARAM_LIST = auto()    # Routine parameters
     MACRO = auto()         # <DEFMAC ...>
 
+    # Quasiquote (MDL/ZILF metaprogramming)
+    QUASIQUOTE = auto()    # ` (backtick) - template expression
+    UNQUOTE = auto()       # ~ (tilde) - evaluate and insert
+    SPLICE_UNQUOTE = auto() # ~! - evaluate and splice list
+
 
 @dataclass
 class ASTNode:
@@ -291,6 +296,51 @@ class SynonymNode(ASTNode):
 
     def __repr__(self):
         return f"Synonym({len(self.words)} words)"
+
+
+class QuasiquoteNode(ASTNode):
+    """Quasiquote (backtick) expression.
+
+    Represents a template that can contain unquoted expressions.
+    In MDL/ZILF: `<FORM A ~X B> creates a form where X is evaluated
+    and its value inserted.
+    """
+    def __init__(self, expr: ASTNode, line: int = 0, column: int = 0):
+        super().__init__(NodeType.QUASIQUOTE, line, column)
+        self.expr = expr  # The quasiquoted expression
+
+    def __repr__(self):
+        return f"Quasiquote({self.expr})"
+
+
+class UnquoteNode(ASTNode):
+    """Unquote (tilde) expression.
+
+    Represents an expression within a quasiquote that should be
+    evaluated and its value inserted.
+    In MDL/ZILF: ~X within a quasiquote evaluates X.
+    """
+    def __init__(self, expr: ASTNode, line: int = 0, column: int = 0):
+        super().__init__(NodeType.UNQUOTE, line, column)
+        self.expr = expr  # The expression to evaluate
+
+    def __repr__(self):
+        return f"Unquote({self.expr})"
+
+
+class SpliceUnquoteNode(ASTNode):
+    """Splice-unquote (~!) expression.
+
+    Represents an expression within a quasiquote that should be
+    evaluated and its elements spliced into the surrounding list.
+    In MDL/ZILF: ~!X evaluates X and splices the result.
+    """
+    def __init__(self, expr: ASTNode, line: int = 0, column: int = 0):
+        super().__init__(NodeType.SPLICE_UNQUOTE, line, column)
+        self.expr = expr  # The expression to evaluate and splice
+
+    def __repr__(self):
+        return f"SpliceUnquote({self.expr})"
 
 
 @dataclass
