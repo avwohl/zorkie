@@ -449,25 +449,22 @@ class Lexer:
                     # Fall through to atom handling below
                     pass
                 # Check if this could be a ZILF separator:
-                # Inside parentheses (but not angle brackets) AND not followed by comment indicators (" < ()
-                # Skip whitespace to check what comes after
+                # Inside parentheses (but not angle brackets) AND immediately followed by identifier
+                # ZILF separator is ;WORD (no space) - e.g., <SYNONYM FOO ;BAR BAZ>
+                # If there's whitespace after ;, it's a comment, not a separator
                 elif self.paren_depth > 0 and self.angle_depth == 0:
-                    pos = 1
-                    while self.peek(pos) and self.peek(pos) in ' \t':
-                        pos += 1
-                    peek_after = self.peek(pos)
-                    # If followed by comment indicators, treat as comment
-                    # Include ',' because ;,VAR is a common pattern for commented-out global refs
-                    # Include '.' because ;.VAR is a common pattern for commented-out local refs
-                    if peek_after in ('"', '<', '(', None, '\n', ',', '.'):
-                        self.skip_comment()
-                        continue
-                    # Otherwise, it's a ZILF separator
-                    else:
+                    peek_after = self.peek(1)
+                    # If immediately followed by alphanumeric (no whitespace), it's a ZILF separator
+                    # e.g., ;INSIDE, ;INTO, ;AUF
+                    if peek_after and peek_after.isalnum():
                         line = self.line
                         col = self.column
                         self.advance()  # Skip the semicolon
                         self.tokens.append(Token(TokenType.SEMICOLON, ';', line, col))
+                        continue
+                    # Otherwise (whitespace, quotes, etc.), it's a comment
+                    else:
+                        self.skip_comment()
                         continue
                 # Otherwise it's a comment
                 else:
