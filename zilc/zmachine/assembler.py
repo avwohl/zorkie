@@ -524,6 +524,13 @@ class ZAssembler:
 
         # Update file length
         file_length = len(story) // divisor
+        if file_length > 65535:
+            max_size = 65535 * divisor
+            raise ValueError(
+                f"Story file too large for Z-machine version {self.version}. "
+                f"File is {len(story)} bytes, maximum is {max_size} bytes ({max_size // 1024}KB). "
+                f"Try compiling with a higher version (--version 6 allows up to 512KB)."
+            )
         struct.pack_into('>H', story, 0x1A, file_length)
 
         self.memory = bytearray(story)
