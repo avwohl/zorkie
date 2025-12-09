@@ -244,6 +244,9 @@ class ZILCompiler:
         # Fifth pass: Evaluate %<+>, %<->, %<*>, etc. compile-time arithmetic
         source = self._process_compile_arithmetic(source)
 
+        # Strip any remaining %<...> forms (DEBUG-CODE, etc.) that we can't evaluate
+        source = self._strip_compile_forms(source)
+
         # Sixth pass: Strip #DECL type declarations (MDL feature not needed for compilation)
         source = self._strip_decl(source)
 
@@ -642,7 +645,7 @@ class ZILCompiler:
         """
         Extract content with balanced angle brackets.
         Returns (content, end_position) or (None, start_pos) if not balanced.
-        Properly handles strings - doesn't count <> inside string literals.
+        Properly handles strings and character literals - doesn't count <> inside them.
         """
         if start_pos >= len(source) or source[start_pos] != '<':
             return None, start_pos
@@ -661,6 +664,16 @@ class ZILCompiler:
                     pos += 1
                 if pos < len(source):
                     pos += 1  # skip closing "
+            elif ch == '!':
+                # Character literal: !\X or !<char> - skip the next character(s)
+                # This handles !\> (literal >) which shouldn't close brackets
+                pos += 1
+                if pos < len(source) and source[pos] == '\\':
+                    pos += 1  # skip \
+                    if pos < len(source):
+                        pos += 1  # skip the escaped char
+                elif pos < len(source):
+                    pos += 1  # skip any char after !
             elif ch == '<':
                 depth += 1
                 pos += 1
@@ -961,6 +974,52 @@ class ZILCompiler:
 
         return ''.join(result)
 
+    def _strip_compile_forms(self, source: str) -> str:
+        """
+        Strip any remaining %<...> compile-time forms that we couldn't evaluate.
+        These are forms like %<DEBUG-CODE ...> that the previous passes didn't handle.
+        At the top level, we strip them entirely.
+        Inside another form, we replace with 0 placeholder.
+        """
+        import re
+        result = []
+        pos = 0
+
+        while pos < len(source):
+            # Look for %<
+            match = re.search(r'%<', source[pos:])
+            if not match:
+                result.append(source[pos:])
+                break
+
+            match_pos = pos + match.start()
+
+            # Add text before match
+            result.append(source[pos:match_pos])
+
+            # Figure out if we're inside a form by checking for unclosed < before this position
+            # Count angle brackets in what we've collected so far
+            collected = ''.join(result)
+            angle_depth = collected.count('<') - collected.count('>')
+
+            # Skip the % and start from <
+            start = match_pos + 1  # +1 to skip %
+            content, end = self._extract_balanced_content(source, start)
+
+            if content:
+                # Strip the form - if at top level (angle_depth == 0), remove entirely
+                # If inside a form (angle_depth > 0), replace with 0 placeholder
+                if angle_depth > 0:
+                    result.append('0')
+                # else: discard entirely
+                pos = end
+            else:
+                # Can't find matching bracket, keep the %
+                result.append('%')
+                pos = match_pos + 1
+
+        return ''.join(result)
+
     def _evaluate_compile_expr(self, content: str) -> object:
         """
         Evaluate a compile-time expression.
@@ -1145,6 +1204,126 @@ class ZILCompiler:
         # Default: can't evaluate, return False
         return False
 
+    def _build_symbol_tables(self, program) -> dict:
+        """Pre-scan program to build flag and property symbol tables.
+
+        This must run before code generation so codegen has access to:
+        - Flag bit assignments (TOUCHBIT, FIGHTBIT, etc.)
+        - Property number assignments (P?LDESC, P?STRENGTH, etc.)
+        - Parser constants (PS?OBJECT, PS?VERB, etc.)
+
+        Returns dict with:
+            'flags': dict of flag_name -> bit_number
+            'properties': dict of P?name -> property_number
+            'parser_constants': dict of PS?name -> bit_value
+        """
+        from .parser.ast_nodes import AtomNode
+
+        # Standard flag assignments (matching common Infocom conventions)
+        # Users can override via CONSTANT declarations
+        flags = {}
+        next_flag_bit = 0
+        max_attributes = 32 if self.version <= 3 else 48
+
+        # Collect all flags from objects and rooms
+        all_flags = set()
+        for obj in program.objects + program.rooms:
+            if 'FLAGS' in obj.properties:
+                flags_prop = obj.properties['FLAGS']
+                if isinstance(flags_prop, AtomNode):
+                    all_flags.add(flags_prop.value)
+                elif isinstance(flags_prop, (list, tuple)):
+                    for f in flags_prop:
+                        if isinstance(f, AtomNode):
+                            all_flags.add(f.value)
+                        elif isinstance(f, str):
+                            all_flags.add(f)
+
+        # Check if flags are already defined as constants
+        defined_constants = {c.name: c.value for c in program.constants
+                           if hasattr(c, 'value') and isinstance(c.value, int)}
+
+        # Assign bit numbers to flags
+        for flag in sorted(all_flags):
+            if flag in defined_constants:
+                flags[flag] = defined_constants[flag]
+            else:
+                if next_flag_bit < max_attributes:
+                    flags[flag] = next_flag_bit
+                    next_flag_bit += 1
+
+        # Standard property assignments
+        properties = {
+            'P?DESC': 1,
+            'P?LDESC': 2,
+            'P?FDESC': 3,
+            'P?ACTION': 4,
+            'P?SYNONYM': 5,
+            'P?ADJECTIVE': 6,
+            'P?STRENGTH': 7,
+            'P?SIZE': 8,
+            'P?CAPACITY': 9,
+            'P?VALUE': 10,
+            'P?TVALUE': 11,
+            # Additional standard properties
+            'P?GLOBAL': 12,      # Global objects list
+            'P?PSEUDO': 13,      # Pseudo-object properties
+            'P?TEXT': 14,        # Text description
+            'P?VTYPE': 15,       # Vehicle type
+        }
+
+        # Add direction properties
+        directions = ['NORTH', 'SOUTH', 'EAST', 'WEST', 'NE', 'NW', 'SE', 'SW',
+                     'UP', 'DOWN', 'IN', 'OUT', 'LAND']
+        next_prop = 16  # Start after standard properties (1-15)
+        for d in directions:
+            properties[f'P?{d}'] = next_prop
+            next_prop += 1
+
+        # Collect custom properties from PROPDEF declarations
+        for propdef in program.propdefs:
+            prop_name = f'P?{propdef.name}'
+            if prop_name not in properties:
+                properties[prop_name] = next_prop
+                next_prop += 1
+
+        # Parser part-of-speech constants (matching dictionary flag bits)
+        parser_constants = {
+            'PS?OBJECT': 0x80,      # Bit 7: noun/object
+            'PS?VERB': 0x40,        # Bit 6: verb
+            'PS?ADJECTIVE': 0x20,   # Bit 5: adjective
+            'PS?DIRECTION': 0x10,   # Bit 4: direction
+            'PS?PREPOSITION': 0x08, # Bit 3: preposition
+            'PS?BUZZ-WORD': 0x04,   # Bit 2: buzz word
+            # P1? constants for first/second part of speech slot
+            'P1?OBJECT': 0,
+            'P1?VERB': 0,
+            'P1?ADJECTIVE': 1,
+            'P1?DIRECTION': 2,
+            'P1?PREPOSITION': 3,
+            # W?* word constants - placeholders, should be dictionary addresses
+            # TODO: These need to be resolved to actual dictionary word addresses
+            # during assembly when the dictionary is built
+            'W?QUOTE': 0,
+            'W?THEN': 0,
+            'W?THE': 0,
+            'W?A': 0,
+            'W?AN': 0,
+            'W?PERIOD': 0,
+            'W?COMMA': 0,
+            'W?INTNUM': 0,  # Special token for integers in input
+            # Action constants - placeholders
+            'ACT?TELL': 0,
+            # Global parser table references - placeholders
+            'VERBS': 0,
+        }
+
+        return {
+            'flags': flags,
+            'properties': properties,
+            'parser_constants': parser_constants,
+        }
+
     def _build_action_tables(self, program) -> dict:
         """Build ACTIONS and PREACTIONS tables from SYNTAX definitions.
 
@@ -1255,6 +1434,10 @@ class ZILCompiler:
             self.version = program.version
             self.log(f"  Target version: {self.version}")
 
+        # Build symbol tables (flags, properties, parser constants)
+        symbol_tables = self._build_symbol_tables(program)
+        self.log(f"  Pre-scanned {len(symbol_tables['flags'])} flags, {len(symbol_tables['properties'])} properties")
+
         # Build action tables from SYNTAX definitions
         action_table_info = self._build_action_tables(program)
         if action_table_info:
@@ -1335,7 +1518,8 @@ class ZILCompiler:
         self.log("Generating code...")
         codegen = ImprovedCodeGenerator(self.version, abbreviations_table=abbreviations_table,
                                        string_table=string_table,
-                                       action_table=action_table_info)
+                                       action_table=action_table_info,
+                                       symbol_tables=symbol_tables)
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
 
@@ -1348,6 +1532,18 @@ class ZILCompiler:
         table_routine_fixups = codegen.get_table_routine_fixups()
         if table_routine_fixups:
             self.log(f"  {len(table_routine_fixups)} table routine fixups")
+
+        # Report missing routines
+        missing_routines = codegen.get_missing_routines()
+        if missing_routines:
+            self.log(f"  WARNING: {len(missing_routines)} missing routines (will use null address):")
+            for routine_name in sorted(missing_routines):
+                self.log(f"    - {routine_name}")
+
+        # Report codegen warnings
+        codegen_warnings = codegen.get_warnings()
+        if codegen_warnings:
+            self.log(f"  {len(codegen_warnings)} code generation warnings (see stderr)")
 
         # Get table data and offsets
         table_data = codegen.get_table_data() if codegen.tables else b''

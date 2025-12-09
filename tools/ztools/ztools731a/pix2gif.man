@@ -1,0 +1,27 @@
+4mpix2gif24m(1)			 General Commands Manual		 4mpix2gif24m(1)
+
+1mNAME0m
+       pix2gif - converts infocom MG1/EG1 picture files to separate GIF files
+
+1mSYNOPSIS0m
+       1mpix2gif 22mpicture-file
+
+1mDESCRIPTION0m
+       1mPix2gif  22mis	 a program extracting the individual images from an Infocom
+       picture file.  Picture files only relate to V6 story files.
+
+1mOPTIONS0m
+       1mpix2gif does not take any command-line options.  22mYou must  provide	ex‐
+       actly  one  argument:  the  name (or path) of an infocom format picture
+       file.
+
+1mSEE ALSO0m
+       1mcheck22m(1), 1minfodump22m(1), 1minforead22m(1), 1mtxd22m(1)
+
+1mAUTHOR0m
+       Mark Howell 13 September 1992 howell_ma@movies.enet.dec.com
+
+1mCURRENT MAINTAINER0m
+       Matthew Russotto russotto@pond.com
+
+Ztools 7.3.1			 November 1998			    4mpix2gif24m(1)

@@ -163,6 +163,8 @@ class MDLEvaluator:
         elif op_name == 'ERROR':
             # Compile-time error - ignore for now
             return None
+        elif op_name == 'ASSIGNED?':
+            return self._eval_assigned(operands, env)
 
         # Unknown form - return as-is (will be processed at runtime)
         return form
@@ -640,6 +642,28 @@ class MDLEvaluator:
                 parts.append(str(val))
         return ''.join(parts)
 
+    def _eval_assigned(self, operands: List[ASTNode], env: Dict[str, Any]) -> bool:
+        """Evaluate ASSIGNED? (check if variable has a value).
+
+        In macro context, this checks if an OPTIONAL parameter was provided.
+        Returns True if the variable exists in the environment and has a non-None value.
+        """
+        if not operands:
+            return False
+
+        var_name = operands[0]
+        if isinstance(var_name, AtomNode):
+            name = var_name.value.upper()
+        elif isinstance(var_name, LocalVarNode):
+            name = var_name.name.upper()
+        else:
+            return False
+
+        # Check if the variable exists in the environment and is not None
+        if name in env:
+            return env[name] is not None
+        return False
+
     def _expand_quasiquote(self, node: ASTNode, env: Dict[str, Any]) -> Any:
         """Expand quasiquoted expression."""
         if isinstance(node, UnquoteNode):
@@ -779,7 +803,16 @@ class MacroExpander:
 
         Detects MAPF/MAPR with FUNCTION forms and evaluates them
         using the MDLEvaluator, converting the results back to AST nodes.
+        Also handles COND with compile-time predicates like ASSIGNED?.
         """
+        if isinstance(node, CondNode):
+            # Evaluate COND at compile time if it contains ASSIGNED? or other
+            # compile-time predicates
+            result = self.mdl_evaluator.evaluate(node, bindings)
+            if isinstance(result, ASTNode):
+                return self._evaluate_mdl(result, bindings)
+            return self._convert_to_ast(result)
+
         if not isinstance(node, FormNode):
             return node
 
@@ -787,6 +820,14 @@ class MacroExpander:
             return node
 
         op_name = node.operator.value.upper()
+
+        # Check for COND that might need compile-time evaluation
+        if op_name == 'COND':
+            # Evaluate COND at compile time using MDL evaluator
+            result = self.mdl_evaluator.evaluate(node, bindings)
+            if isinstance(result, ASTNode):
+                return self._evaluate_mdl(result, bindings)
+            return self._convert_to_ast(result)
 
         # Check for MAPF/MAPR that need compile-time evaluation
         if op_name in ('MAPF', 'MAPR'):
@@ -1115,10 +1156,11 @@ class MacroExpander:
     # These macros use MDL compile-time operations (MAPF, FUNCTION, etc.) that
     # we can't execute, so we rely on the code generator's built-in support
     # NOTE: TELL is now handled via MDL evaluation during macro expansion
+    # NOTE: ASSIGNED? is now evaluated in macros to support OPTIONAL parameters
     NATIVE_OPERATIONS = frozenset({
         'PRINT', 'PRINTI', 'CRLF', 'PRINTN', 'PRINTD', 'PRINTC',
         'COND', 'REPEAT', 'PROG', 'BIND', 'DO', 'MAP', 'MAPF', 'MAPR',
-        'VERB?', 'DLESS?', 'IGRTR?', 'EQUAL?', 'FSET?', 'IN?', 'ASSIGNED?',
+        'VERB?', 'DLESS?', 'IGRTR?', 'EQUAL?', 'FSET?', 'IN?',
         'OBJECT', 'ROOM',  # Object/room definitions are handled by compiler
     })
 

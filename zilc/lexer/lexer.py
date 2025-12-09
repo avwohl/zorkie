@@ -413,13 +413,30 @@ class Lexer:
                 break
 
             # Handle MDL control character sequences: ^/X (e.g., ^/L = form feed)
+            # Also handle ^<ctrl-char> where the control char is literal (e.g., ^\x0c for form feed)
+            # Also handle ^\X format where \X is a backslash-escaped letter (e.g., ^\L = form feed)
             # These are typically used as page breaks and should be treated as whitespace
-            if self.peek() == '^' and self.peek(1) == '/':
-                self.advance()  # ^
-                self.advance()  # /
-                if self.peek():
-                    self.advance()  # The control character letter
-                continue
+            if self.peek() == '^':
+                next_ch = self.peek(1)
+                if next_ch == '/':
+                    # ^/X format
+                    self.advance()  # ^
+                    self.advance()  # /
+                    if self.peek():
+                        self.advance()  # The control character letter
+                    continue
+                elif next_ch == '\\':
+                    # ^\X format (backslash-escaped letter, e.g., ^\L for form feed)
+                    self.advance()  # ^
+                    self.advance()  # \
+                    if self.peek():
+                        self.advance()  # The control character letter
+                    continue
+                elif next_ch and ord(next_ch) < 32:
+                    # ^<ctrl-char> format (literal control character)
+                    self.advance()  # ^
+                    self.advance()  # The control character
+                    continue
 
             # Check for comment (both ;" and ; styles)
             # Special case: ;= is an atom (used in BUZZ words)
@@ -440,7 +457,9 @@ class Lexer:
                         pos += 1
                     peek_after = self.peek(pos)
                     # If followed by comment indicators, treat as comment
-                    if peek_after in ('"', '<', '(', None, '\n'):
+                    # Include ',' because ;,VAR is a common pattern for commented-out global refs
+                    # Include '.' because ;.VAR is a common pattern for commented-out local refs
+                    if peek_after in ('"', '<', '(', None, '\n', ',', '.'):
                         self.skip_comment()
                         continue
                     # Otherwise, it's a ZILF separator
@@ -652,6 +671,27 @@ class Lexer:
                 value = ''.join(chars)
                 self.tokens.append(Token(TokenType.ATOM, value, line, col))
 
+            # Octal number: *digits* (e.g., *3777* = 2047 decimal)
+            # Must be checked before general atom handling since * is a valid atom char
+            elif ch == '*' and self.peek(1) and self.peek(1).isdigit():
+                self.advance()  # Skip opening *
+                num_str = ''
+                while self.peek() and self.peek().isdigit():
+                    num_str += self.advance()
+                if self.peek() == '*':
+                    self.advance()  # Skip closing *
+                    try:
+                        value = int(num_str, 8)  # Parse as octal
+                        self.tokens.append(Token(TokenType.NUMBER, value, line, col))
+                    except ValueError:
+                        self.error(f"Invalid octal number: *{num_str}*")
+                else:
+                    # Not a valid *digits* pattern, treat as atom
+                    value = '*' + num_str
+                    while self.peek() and self.is_atom_char(self.peek()):
+                        value += self.advance()
+                    self.tokens.append(Token(TokenType.ATOM, value, line, col))
+
             # Atom/Identifier
             # Note: : can start atoms for type annotations (e.g., :FIX, :DECL)
             # Note: | is used in TELL-TOKENS and other MDL constructs
@@ -678,6 +718,47 @@ class Lexer:
                     self.tokens.append(Token(TokenType.ATOM, '~!', line, col))
                 else:
                     self.tokens.append(Token(TokenType.ATOM, '~', line, col))
+
+            # Compile-time conditional: %< ... > (reader macro)
+            # This is used for DEBUG-CODE and similar conditionals
+            # At top level (angle_depth=0), these conditionally include/exclude code, so skip entirely
+            # Inside a form (angle_depth>0), these evaluate to a value, emit placeholder 0
+            elif ch == '%' and self.peek(1) == '<':
+                line = self.line
+                col = self.column
+                inside_form = self.angle_depth > 0 or self.paren_depth > 0
+                self.advance()  # Skip %
+                self.advance()  # Skip <
+                # Skip the entire form including nested angle brackets
+                # Must handle: strings with escapes, !\X character literals, nested () and <>
+                depth = 1
+                while depth > 0 and self.pos < len(self.source):
+                    c = self.advance()
+                    if c == '<':
+                        depth += 1
+                    elif c == '>':
+                        depth -= 1
+                    elif c == '!':
+                        # Character literal: !\X or !<char> - skip the next character
+                        # This handles !\> (literal >) which shouldn't close brackets
+                        if self.peek() == '\\' and self.pos + 1 < len(self.source):
+                            self.advance()  # skip \
+                            self.advance()  # skip the escaped char
+                        elif self.peek():
+                            self.advance()  # skip any char after !
+                    elif c == '"':
+                        # Skip string contents
+                        while self.pos < len(self.source):
+                            sc = self.advance()
+                            if sc == '"':
+                                break
+                            elif sc == '\\' and self.pos < len(self.source):
+                                self.advance()
+                # If inside a form, emit a placeholder value of 0
+                # This allows constructs like <CONSTANT NAME %<COND ...>> to parse correctly
+                # At top level, skip entirely (the conditional block is excluded)
+                if inside_form:
+                    self.tokens.append(Token(TokenType.NUMBER, 0, line, col))
 
             else:
                 self.error(f"Unexpected character: {ch!r}")

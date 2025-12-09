@@ -380,7 +380,10 @@ class ZAssembler:
             current_addr += 1
 
         # Add table data (static memory, before high memory)
+        # Static memory starts here - it contains read-only data like tables
         table_base_addr = current_addr
+        self.static_mem_base = current_addr  # Save for header
+
         if table_data:
             story.extend(table_data)
             current_addr += len(table_data)
@@ -390,7 +393,7 @@ class ZAssembler:
                 story.append(0)
                 current_addr += 1
 
-        # Mark start of high memory
+        # Mark start of high memory (where code begins)
         self.high_mem_base = len(story)
 
         # For V6+, high memory must be aligned to 8-byte boundary for packed addresses
@@ -490,7 +493,7 @@ class ZAssembler:
         struct.pack_into('>H', story, 0x08, dict_addr)  # Dictionary address
         struct.pack_into('>H', story, 0x0A, objects_addr)  # Object table address
         struct.pack_into('>H', story, 0x0C, globals_addr)  # Globals address
-        struct.pack_into('>H', story, 0x0E, current_addr)  # Static memory base
+        struct.pack_into('>H', story, 0x0E, self.static_mem_base)  # Static memory base
         if abbrev_addr > 0:
             struct.pack_into('>H', story, 0x18, abbrev_addr)  # Abbreviations table address
 

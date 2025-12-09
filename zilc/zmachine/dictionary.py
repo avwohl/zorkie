@@ -6,6 +6,7 @@ Builds the dictionary table with word separators and encoded words.
 
 from typing import List, Set, Dict
 import struct
+import sys
 from .text_encoding import ZTextEncoder
 
 
@@ -110,16 +111,20 @@ class Dictionary:
                 type_byte |= 0x80  # Bit 7: noun
             elif word_type == 'verb':
                 type_byte |= 0x40  # Bit 6: verb
-            elif word_type == 'adjective':
+            elif word_type in ('adjective', 'adj'):
                 type_byte |= 0x20  # Bit 5: adjective
-            elif word_type == 'direction':
+            elif word_type in ('direction', 'dir'):
                 type_byte |= 0x10  # Bit 4: direction
-            elif word_type == 'preposition':
+            elif word_type in ('preposition', 'prep'):
                 type_byte |= 0x08  # Bit 3: preposition
             elif word_type == 'buzz':
                 type_byte |= 0x04  # Bit 2: buzz word (noise word)
             elif word_type == 'synonym':
                 type_byte |= 0x80  # Synonym words act as nouns
+            elif word_type != 'unknown':
+                # Warn about unrecognized word types (but not 'unknown' which is the default)
+                print(f"[dictionary] Warning: Unrecognized word type '{word_type}' for word '{word}' - using no flags",
+                      file=sys.stderr)
 
             result.append(type_byte)
 

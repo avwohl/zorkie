@@ -1,0 +1,57 @@
+4minfodump24m(1)		 General Commands Manual		4minfodump24m(1)
+
+1mNAME0m
+       infodump - data file dumper for infocom format game files
+
+1mSYNOPSIS0m
+       1minfodump  22m[	 -iamostgdf  ]	[  1m-c 4m22mn24m ] [ 1m-w 4m22mn24m ] [ 1m-u 4m22mfile24m ] story-file [
+       story-file... ]
+
+1mDESCRIPTION0m
+       1mInfodump 22mis a program for displaying the contents of an Infocom  format
+       story file.  It works for V1 to V8 games, modulo the limitations listed
+       below.
+
+1mOPTIONS0m
+       The following options are supported
+
+       1m-i    22mShow	game information in the story file header.  This is the de‐
+	     fault operation for 1minfodump22m: if not	switches  are  given,  then
+	     only the header will be displayed.
+
+       1m-a    22mShow abbreviations.
+
+       1m-m    22mShow the data file map.
+
+       1m-o    22mDisplay information about all objects defined in the story file.
+
+       1m-t    22mShow	the  object tree, with names of contained objects displayed
+	     indented from the name of the containing object.
+
+       1m-g    22mShow the verb grammar.
+
+       1m-d    22mShow the story dictionary
+
+       1m-f    22mEnable all of the above options (-a, -m, -o, -t, -g and -d)
+
+       1m-s    22mDisplay Inform symbolic names in object and grammar displays.
+
+       1m-c 4m22mn24m  The numbers of columns to use when displaying the dictionary.
+
+       1m-w 4m22mn24m  Specifies the display width, used  to  determine	 where	to  word
+	     wrap.  If 4mn24m is 0, then no wrapping will be performed.
+
+       1m-u 4m22mfile0m
+	     Display symbols from file in object and grammar displays.	Use of
+	     this option implies -s.
+
+1mSEE ALSO0m
+       1mcheck22m(1), 1minforead22m(1), 1mpix2gif22m(1), 1mtxd22m(1)
+
+1mAUTHOR0m
+       Mark Howell 28 August 1992 howell_ma@movies.enet.dec.com
+
+1mCURRENT MAINTAINER0m
+       Matthew Russotto russotto@pond.com
+
+Ztools 7.3.1			 November 1998			   4minfodump24m(1)

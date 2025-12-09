@@ -51,6 +51,7 @@ class Parser:
     def parse(self) -> Program:
         """Parse the entire program."""
         program = Program()
+        self._extra_forms = []  # For forms extracted from parenthesized groups
 
         while self.current_token.type != TokenType.EOF:
             node = self.parse_top_level()
@@ -65,6 +66,12 @@ class Parser:
                     self._add_node_to_program(program, n)
             else:
                 self._add_node_to_program(program, node)
+
+            # Process any extra forms from parenthesized groups
+            while self._extra_forms:
+                extra = self._extra_forms.pop(0)
+                if extra:
+                    self._add_node_to_program(program, extra)
 
         return program
 
@@ -124,6 +131,50 @@ class Parser:
             return None
         elif self.current_token.type == TokenType.RPAREN:
             # Skip stray closing parens (may result from complex macro/preprocessing)
+            self.advance()
+            return None
+        elif self.current_token.type == TokenType.LPAREN:
+            # Parenthesized forms at top level (result from %<COND> splicing)
+            # These are like: (<GLOBAL NAME VALUE> <GLOBAL NAME2 VALUE2>)
+            # Parse the contents as if they were top-level forms
+            self.advance()  # skip (
+            results = []
+            while self.current_token.type != TokenType.RPAREN and self.current_token.type != TokenType.EOF:
+                if self.current_token.type == TokenType.LANGLE:
+                    form = self.parse_form()
+                    if form:
+                        results.append(form)
+                else:
+                    # Skip unexpected tokens inside parens
+                    self.advance()
+            if self.current_token.type == TokenType.RPAREN:
+                self.advance()  # skip )
+            # Return forms to be added to program - but parse_top_level expects single result
+            # Store extra forms for later processing
+            if results:
+                if len(results) == 1:
+                    return results[0]
+                else:
+                    # Multiple forms - store extras for processing
+                    self._extra_forms = getattr(self, '_extra_forms', [])
+                    self._extra_forms.extend(results[1:])
+                    return results[0]
+            return None
+        elif self.current_token.type == TokenType.LBRACKET:
+            # Skip bracket forms at top level - these are visual separators or MDL comments
+            # In ZILCH source, [ on its own line is a page/section break
+            self.advance()
+            # If followed by content and closing bracket, skip the whole thing
+            depth = 1
+            while depth > 0 and self.current_token.type != TokenType.EOF:
+                if self.current_token.type == TokenType.LBRACKET:
+                    depth += 1
+                elif self.current_token.type == TokenType.RBRACKET:
+                    depth -= 1
+                self.advance()
+            return None
+        elif self.current_token.type == TokenType.RBRACKET:
+            # Skip stray closing bracket
             self.advance()
             return None
         elif self.current_token.type == TokenType.QUOTE:
@@ -197,13 +248,13 @@ class Parser:
                 version_num = self.parse_expression()
                 # Handle VERSION ZIP (Z-code Interpreter Program) = version 3
                 if isinstance(version_num, AtomNode):
-                    if version_num.value == "ZIP":
+                    if version_num.value.upper() == "ZIP":
                         version_value = 3
-                    elif version_num.value == "EZIP":
+                    elif version_num.value.upper() == "EZIP":
                         version_value = 4
-                    elif version_num.value == "XZIP":
+                    elif version_num.value.upper() == "XZIP":
                         version_value = 5
-                    elif version_num.value == "YZIP":
+                    elif version_num.value.upper() == "YZIP":
                         version_value = 6
                     else:
                         self.error(f"Unknown version name: {version_num.value}")
@@ -211,6 +262,9 @@ class Parser:
                     version_value = version_num.value
                 else:
                     self.error("VERSION requires a number or version name (ZIP/EZIP/XZIP/YZIP)")
+                # Skip any additional arguments (e.g., TIME in <VERSION ZIP TIME>)
+                while self.current_token.type != TokenType.RANGLE:
+                    self.advance()
                 self.expect(TokenType.RANGLE)
                 return VersionNode(version_value, line, col)
 
@@ -779,15 +833,28 @@ class Parser:
     def parse_global(self, line: int, col: int) -> GlobalNode:
         """Parse GLOBAL definition."""
         # <GLOBAL name initial-value>
+        # ZILF format: <GLOBAL name:TYPE initial-value> - strip :TYPE annotation
 
         if self.current_token.type != TokenType.ATOM:
             self.error("Expected global variable name")
         name = self.current_token.value
+        # Strip ZILF type annotation (e.g., NAME:OBJECT -> NAME)
+        if ':' in name:
+            name = name.split(':')[0]
         self.advance()
 
         initial_value = None
         if self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
             initial_value = self.parse_expression()
+
+        # ZILF extended format: <GLOBAL name:TYPE initial-value <> <> type-flags>
+        # Skip any additional parameters after the initial value
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            if self.current_token.type == TokenType.LANGLE:
+                # Skip empty forms <> or other forms
+                self.parse_expression()
+            else:
+                self.advance()  # Skip atoms like BYTE
 
         return GlobalNode(name, initial_value, line, col)
 
@@ -1034,16 +1101,36 @@ class Parser:
                 size = self.current_token.value
                 self.advance()
 
-        # Check for flags (BYTE), (PURE), etc.
+        # Check for flags (BYTE), (PURE), (PATTERN (BYTE WORD)), etc.
+        # Flags can be simple atoms or nested patterns like (PATTERN (BYTE [REST WORD]))
         if self.current_token.type == TokenType.LPAREN:
             self.advance()
-            while self.current_token.type != TokenType.RPAREN:
-                if self.current_token.type == TokenType.ATOM:
-                    flags.append(self.current_token.value)
+            paren_depth = 1
+            while paren_depth > 0 and self.current_token.type != TokenType.EOF:
+                if self.current_token.type == TokenType.RPAREN:
+                    paren_depth -= 1
+                    if paren_depth > 0:
+                        self.advance()
+                elif self.current_token.type == TokenType.LPAREN:
+                    paren_depth += 1
                     self.advance()
+                elif self.current_token.type == TokenType.ATOM:
+                    # Only collect top-level atoms as flags (BYTE, PURE, PATTERN, etc.)
+                    if paren_depth == 1:
+                        flags.append(self.current_token.value)
+                    self.advance()
+                elif self.current_token.type == TokenType.LBRACKET:
+                    # Skip bracketed patterns like [REST WORD]
+                    self.advance()
+                    while self.current_token.type not in (TokenType.RBRACKET, TokenType.EOF):
+                        self.advance()
+                    if self.current_token.type == TokenType.RBRACKET:
+                        self.advance()
                 else:
-                    self.error("Expected flag name")
-            self.expect(TokenType.RPAREN)
+                    # Skip other tokens inside nested patterns
+                    self.advance()
+            if self.current_token.type == TokenType.RPAREN:
+                self.advance()  # consume final )
 
         # Parse table values
         while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):

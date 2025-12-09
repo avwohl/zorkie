@@ -1,0 +1,41 @@
+4mtxd24m(1)			 General Commands Manual		     4mtxd24m(1)
+
+1mNAME0m
+       txd - Z code disassembler for Infocom game files
+
+1mSYNOPSIS0m
+       1mtxd 22m[ -adgns ] [ 1m-w 4m22mn24m ] [ 1m-u 4m22mfile24m ] [ 1m-S 4m22mn24m ] story-file
+
+1mDESCRIPTION0m
+       1mTxd  22mis  a	program for disassembling an Infocom format story file.	 It
+       can handle all version of the story file format (V1 through V8).
+
+1mOPTIONS0m
+       1mtxd 22msupports the following options:
+
+       1m-a	 22mgenerate alternate syntax used by Inform.
+
+       1m-d	 22mdump hex of opcodes and data.
+
+       1m-g	 22mturn off grammar for action routines.
+
+       1m-n	 22muse addresses instead of labels
+
+       1m-w 4m22mn24m	 display width (0 = no wrap)
+
+       1m-s	 22mSymbolic mode (Inform 6+ only)
+
+       1m-u 4m22mfile24m Read user symbol table, implies -s for Inform games
+
+       1m-S 4m22mn24m	 Dump high strings only, starting at address 4mn0m
+
+1mSEE ALSO0m
+       1mcheck22m(1), 1minfodump22m(1), 1minforead22m(1), 1mpix2gif22m(1)
+
+1mAUTHOR0m
+       Mark Howell 25 August 1992 howell_ma@movies.enet.dec.com
+
+1mCURRENT MAINTAINER0m
+       Matthew Russotto russotto@pond.com
+
+Ztools 7.3.1			 November 1998				4mtxd24m(1)

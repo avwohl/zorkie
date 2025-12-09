@@ -1,0 +1,29 @@
+4mcheck24m(1)			 General Commands Manual		   4mcheck24m(1)
+
+1mNAME0m
+       check - integrity checker for infocom format story files
+
+1mSYNOPSIS0m
+       1mcheck 22mstory-file [ new-story-file ]
+
+1mDESCRIPTION0m
+       1mCheck	22mis  a program for checking the integrity of Infocom format story
+       files.  It can optionally generate a new story  file  by	 trimming  the
+       original to the optimal length.
+
+1mOPTIONS0m
+       There are no command-line options for 1mcheck .0m
+
+       If  a  second  argument	is  given,  it	is treated as the name for the
+       trimmed story file.
+
+1mSEE ALSO0m
+       1minfodump22m(1), 1minforead22m(1), 1mpix2gif22m(1), 1mtxd22m(1)
+
+1mAUTHOR0m
+       Mark Howell 7 August 1993 howell_ma@movies.enet.dec.com
+
+1mCURRENT MAINTAINER0m
+       Matthew Russotto russotto@pond.com
+
+Ztools 7.3.1			 November 1998			      4mcheck24m(1)

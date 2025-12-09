@@ -7,6 +7,7 @@ opcodes and better handles ZIL language constructs.
 
 from typing import List, Dict, Any, Optional, Tuple
 import struct
+import sys
 
 from ..parser.ast_nodes import *
 from ..zmachine.opcodes import OpcodeTable, OperandType
@@ -17,7 +18,7 @@ class ImprovedCodeGenerator:
     """Enhanced code generator with extensive opcode support."""
 
     def __init__(self, version: int = 3, abbreviations_table=None, string_table=None,
-                 action_table=None):
+                 action_table=None, symbol_tables=None):
         self.version = version
         self.abbreviations_table = abbreviations_table
         self.string_table = string_table
@@ -34,6 +35,18 @@ class ImprovedCodeGenerator:
         self.objects: Dict[str, int] = {}  # Object name -> number
         self.interrupts: Dict[str, int] = {}  # Interrupt name -> structure address
 
+        # Add pre-scanned symbols (flags, properties, parser constants)
+        if symbol_tables:
+            # Add flag constants (TOUCHBIT, FIGHTBIT, etc.)
+            for flag_name, bit_num in symbol_tables.get('flags', {}).items():
+                self.constants[flag_name] = bit_num
+            # Add property constants (P?LDESC, P?STRENGTH, etc.)
+            for prop_name, prop_num in symbol_tables.get('properties', {}).items():
+                self.constants[prop_name] = prop_num
+            # Add parser constants (PS?OBJECT, PS?VERB, etc.)
+            for const_name, const_val in symbol_tables.get('parser_constants', {}).items():
+                self.constants[const_name] = const_val
+
         # Version capabilities
         self._init_version_features()
 
@@ -41,7 +54,8 @@ class ImprovedCodeGenerator:
         self.code = bytearray()
         self.next_global = 0x10
         self.next_object = 1
-        self.next_interrupt_addr = 0x1000  # Start interrupts at a fixed address
+        # Interrupt/daemon tracking - maps name to table index for address resolution
+        self._interrupt_table_indices: Dict[str, int] = {}  # int_name -> table index
 
         # Labels for branching
         self.labels: Dict[str, int] = {}
@@ -62,6 +76,13 @@ class ImprovedCodeGenerator:
         # Placeholders are encoded as 0xFD + index (high byte) + index (low byte)
         self._routine_placeholders: Dict[int, str] = {}
         self._next_placeholder_index = 0
+
+        # Track missing routines (referenced but not defined)
+        self._missing_routines: set = set()
+
+        # Warning/error tracking
+        self._warnings: List[str] = []
+        self._current_routine: str = "<global>"  # Track current routine for context
 
         # Built-in constants
         self.constants['T'] = 1
@@ -120,7 +141,30 @@ class ImprovedCodeGenerator:
             'V?SAVE': 30,
             'V?RESTORE': 31,
             'V?RESTART': 32,
-            # Add more as needed
+            # Additional verb constants
+            'V?INFLATE': 33,
+            'V?DEFLATE': 34,
+            'V?WALK-TO': 35,
+            'V?WALK': 36,
+            'V?GO': 37,
+            'V?ENTER': 38,
+            'V?EXIT': 39,
+            'V?UNLOCK': 40,
+            'V?LOCK': 41,
+            'V?TIE': 42,
+            'V?UNTIE': 43,
+            'V?GIVE': 44,
+            'V?THROW': 45,
+            'V?WAVE': 46,
+            'V?RAISE': 47,
+            'V?LOWER': 48,
+            'V?DIG': 49,
+            'V?FILL': 50,
+            'V?EMPTY': 51,
+            'V?TELL': 52,
+            'V?ASK': 53,
+            'V?LIGHT': 54,
+            'V?EXTINGUISH': 55,
         }
 
         # Add verb constants to constant table
@@ -141,6 +185,22 @@ class ImprovedCodeGenerator:
         self.v4_opcodes = self.version >= 4
         self.v5_opcodes = self.version >= 5
         self.v6_opcodes = self.version >= 6
+
+    def _warn(self, message: str):
+        """Record a warning message with current context."""
+        full_msg = f"[codegen] Warning in {self._current_routine}: {message}"
+        self._warnings.append(full_msg)
+        print(full_msg, file=sys.stderr)
+
+    def _error(self, message: str):
+        """Record an error message with current context."""
+        full_msg = f"[codegen] Error in {self._current_routine}: {message}"
+        self._warnings.append(full_msg)
+        print(full_msg, file=sys.stderr)
+
+    def get_warnings(self) -> List[str]:
+        """Return all warnings generated during code generation."""
+        return self._warnings.copy()
 
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
@@ -175,8 +235,27 @@ class ImprovedCodeGenerator:
             self.objects[room.name] = self.next_object
             self.next_object += 1
 
-        # Generate routines
+        # Pre-populate routine names so we can detect user-defined routines
+        # during code generation (before their offsets are known)
+        self._routine_names = {routine.name for routine in program.routines}
+
+        # Generate routines - GO must be first as it's the entry point
+        # First, find the GO routine and put it at the front
+        go_routine = None
+        other_routines = []
         for routine_node in program.routines:
+            if routine_node.name == 'GO':
+                go_routine = routine_node
+            else:
+                other_routines.append(routine_node)
+
+        # Generate GO first (if found), then other routines
+        routines_to_generate = []
+        if go_routine:
+            routines_to_generate.append(go_routine)
+        routines_to_generate.extend(other_routines)
+
+        for routine_node in routines_to_generate:
             self.generate_routine(routine_node)
 
         # Generate ACTIONS table data
@@ -242,6 +321,9 @@ class ImprovedCodeGenerator:
         Scans the generated code for placeholder markers (0xFD + index)
         and returns (byte_offset, routine_byte_offset) pairs.
 
+        For missing routines, uses offset 0 which will result in address 0x0000
+        (a safe null routine address).
+
         Returns list of (byte_offset_in_code, routine_byte_offset) pairs.
         The assembler should convert routine_byte_offset to packed address
         using high_mem_base and patch at byte_offset_in_code.
@@ -258,6 +340,10 @@ class ImprovedCodeGenerator:
                     if routine_name in self.routines:
                         routine_offset = self.routines[routine_name]
                         fixups.append((i, routine_offset))
+                    else:
+                        # Missing routine - track it and use offset 0
+                        self._missing_routines.add(routine_name)
+                        fixups.append((i, 0))  # Will become 0x0000
             i += 1
 
         return fixups
@@ -267,6 +353,8 @@ class ImprovedCodeGenerator:
 
         Scans table data for placeholder markers (0xFD + index) and returns
         (byte_offset_in_table_data, routine_byte_offset) pairs.
+
+        For missing routines, uses offset 0 which will result in address 0x0000.
 
         Returns list of (byte_offset_in_tables, routine_byte_offset) pairs.
         The assembler should convert routine_byte_offset to packed address
@@ -285,9 +373,21 @@ class ImprovedCodeGenerator:
                     if routine_name in self.routines:
                         routine_offset = self.routines[routine_name]
                         fixups.append((i, routine_offset))
+                    else:
+                        # Missing routine - track it and use offset 0
+                        self._missing_routines.add(routine_name)
+                        fixups.append((i, 0))  # Will become 0x0000
             i += 1
 
         return fixups
+
+    def get_missing_routines(self) -> set:
+        """Get set of routine names that were called but not defined.
+
+        Returns:
+            Set of routine names that are missing.
+        """
+        return self._missing_routines
 
     def eval_constant(self, const_node: ConstantNode):
         """Evaluate and store a constant."""
@@ -310,6 +410,7 @@ class ImprovedCodeGenerator:
 
     def generate_routine(self, routine: RoutineNode) -> bytes:
         """Generate bytecode for a routine."""
+        self._current_routine = routine.name  # Track for warnings
         routine_start = len(self.code)
         routine_code = bytearray()
 
@@ -809,15 +910,32 @@ class ImprovedCodeGenerator:
             return self.gen_apply(form.operands)
 
         # Daemon/Interrupt system
+        # NOTE: QUEUE, INT, DEQUEUE, ENABLE, DISABLE are typically implemented
+        # as ZIL library routines (see gclock.zil, events.zil), not compiler built-ins.
+        # If the user has defined these routines, use them instead of the built-ins.
+        # The built-in implementations are problematic because they store data in
+        # static memory, which cannot be modified at runtime.
+        # We check _routine_names (populated before generation) rather than
+        # self.routines (populated during generation) to handle forward references.
         elif op_name == 'QUEUE':
+            if hasattr(self, '_routine_names') and 'QUEUE' in self._routine_names:
+                return self.gen_routine_call('QUEUE', form.operands)
             return self.gen_queue(form.operands)
         elif op_name == 'INT':
+            if hasattr(self, '_routine_names') and 'INT' in self._routine_names:
+                return self.gen_routine_call('INT', form.operands)
             return self.gen_int(form.operands)
         elif op_name == 'DEQUEUE':
+            if hasattr(self, '_routine_names') and 'DEQUEUE' in self._routine_names:
+                return self.gen_routine_call('DEQUEUE', form.operands)
             return self.gen_dequeue(form.operands)
         elif op_name == 'ENABLE':
+            if hasattr(self, '_routine_names') and 'ENABLE' in self._routine_names:
+                return self.gen_routine_call('ENABLE', form.operands)
             return self.gen_enable(form.operands)
         elif op_name == 'DISABLE':
+            if hasattr(self, '_routine_names') and 'DISABLE' in self._routine_names:
+                return self.gen_routine_call('DISABLE', form.operands)
             return self.gen_disable(form.operands)
 
         # List/table operations
@@ -878,6 +996,8 @@ class ImprovedCodeGenerator:
                 # Likely a routine call
                 return self.gen_routine_call(form.operator.value, form.operands)
 
+        # Unrecognized operation - warn and return empty
+        self._warn(f"Unrecognized operation '{op_name}' - no code generated")
         return b''
 
     # ===== Table Node Helpers =====
@@ -1010,7 +1130,7 @@ class ImprovedCodeGenerator:
         """
         if not self.loop_stack:
             # No active loop - can't generate AGAIN
-            # Return empty bytes (will effectively be a no-op)
+            self._warn("AGAIN used outside of loop - ignored")
             return b''
 
         # Get the innermost loop context
@@ -1163,6 +1283,7 @@ class ImprovedCodeGenerator:
     def gen_print_num(self, operands: List[ASTNode]) -> bytes:
         """Generate PRINT_NUM (print signed number)."""
         if not operands:
+            self._warn("PRINT_NUM requires an operand")
             return b''
 
         code = bytearray()
@@ -1345,7 +1466,9 @@ class ImprovedCodeGenerator:
 
     def gen_set(self, operands: List[ASTNode], is_global: bool = False) -> bytes:
         """Generate SET/SETG (variable assignment)."""
+        op_name = 'SETG' if is_global else 'SET'
         if len(operands) < 2:
+            self._warn(f"{op_name} requires 2 operands (variable, value)")
             return b''
 
         var_node = operands[0]
@@ -1359,8 +1482,12 @@ class ImprovedCodeGenerator:
                     self.globals[var_node.value] = var_num
                     self.next_global += 1
             else:
-                var_num = self.locals.get(var_node.value, 1)
+                var_num = self.locals.get(var_node.value)
+                if var_num is None:
+                    self._warn(f"{op_name}: Local variable '{var_node.value}' not declared")
+                    return b''
         else:
+            self._warn(f"{op_name}: First operand must be a variable name")
             return b''
 
         code = bytearray()
@@ -1391,7 +1518,7 @@ class ImprovedCodeGenerator:
             # For now, store the table index as a placeholder
             # The assembler will need to patch this with actual address
             # STORE var placeholder_address
-            code.append(0x4D)  # 2OP:0x0D STORE (long form, both small constants)
+            code.append(0x0D)  # 2OP:0x0D STORE (long form, small/small: 00 0 0 1101)
             code.append(var_num & 0xFF)
             code.append(table_index & 0xFF)  # Placeholder
         else:
@@ -1530,12 +1657,22 @@ class ImprovedCodeGenerator:
         if isinstance(node, NumberNode):
             return (0, node.value)  # Small constant
         elif isinstance(node, GlobalVarNode):
-            # ,VARNAME syntax - global variable reference
-            var_num = self.globals.get(node.name, 0x10)
-            return (1, var_num)  # Variable
+            # ,VARNAME syntax - can be global variable, object, or constant
+            if node.name in self.globals:
+                return (1, self.globals[node.name])  # Global variable
+            elif node.name in self.objects:
+                return (0, self.objects[node.name])  # Object number (constant)
+            elif node.name in self.constants:
+                return (0, self.constants[node.name])  # Constant
+            else:
+                self._warn(f"Unknown global/object '{node.name}' - using default")
+                return (1, 0x10)  # Default to variable 0x10
         elif isinstance(node, LocalVarNode):
             # .VARNAME syntax - local variable reference
-            var_num = self.locals.get(node.name, 1)
+            var_num = self.locals.get(node.name)
+            if var_num is None:
+                self._warn(f"Unknown local variable '{node.name}' - using default")
+                var_num = 1
             return (1, var_num)  # Variable
         elif isinstance(node, TableNode):
             # Table literal - generate table and return placeholder address
@@ -1546,15 +1683,44 @@ class ImprovedCodeGenerator:
             # Check if it's a known constant
             if node.value in self.constants:
                 return (0, self.constants[node.value])
+            # Check if it's an object/room name
+            elif node.value in self.objects:
+                return (0, self.objects[node.value])
             # Check if it's a global variable
             elif node.value in self.globals:
                 return (1, self.globals[node.value])
             # Check if it's a local variable
             elif node.value in self.locals:
                 return (1, self.locals[node.value])
-            # Default to small constant 0
+            # Check if it's a routine name (for routine address references like I-CANDLES)
+            elif hasattr(self, '_routine_names') and node.value in self._routine_names:
+                # Create a placeholder for the routine address
+                placeholder_idx = self._next_placeholder_index
+                self._routine_placeholders[placeholder_idx] = node.value
+                self._next_placeholder_index += 1
+                # Return large constant placeholder (0xFD00 | index)
+                # This will be resolved by get_routine_fixups()
+                return (0, 0xFD00 | placeholder_idx)
+            # Unknown atom - warn and default to 0
+            self._warn(f"Unknown identifier '{node.value}' - using 0")
+            return (0, 0)
+        elif isinstance(node, FormNode):
+            # FormNode as operand - this typically means the calling code
+            # should have evaluated it first. Return 0 (stack) since the
+            # result should have been pushed to the stack.
+            # Don't warn - this is expected when nested forms are used
+            return (1, 0)  # Variable 0 = stack
+        elif isinstance(node, CondNode):
+            # CondNode as operand - COND can be used as an expression
+            # The calling code should evaluate it first, result will be on stack
+            return (1, 0)  # Variable 0 = stack
+        elif isinstance(node, StringNode):
+            # StringNode as operand - this should have been handled by the caller
+            # or be used in a string context. Return 0 as placeholder.
+            # Don't warn - some contexts legitimately pass strings
             return (0, 0)
         else:
+            self._warn(f"Cannot determine operand type for {type(node).__name__} - using 0")
             return (0, 0)
 
     def gen_sub(self, operands: List[ASTNode]) -> bytes:
@@ -7411,7 +7577,7 @@ class ImprovedCodeGenerator:
 
             if isinstance(value, int) and 0 <= value <= 255:
                 # STORE variable small_constant
-                code.append(0x2D)  # STORE opcode (long form, small/small)
+                code.append(0x0D)  # STORE opcode 13 (long form, small/small: 00 0 0 1101)
                 code.append(var_num & 0xFF)
                 code.append(value & 0xFF)
 
@@ -7733,25 +7899,46 @@ class ImprovedCodeGenerator:
 
         <PUT table index value> writes value to table[index].
         Uses Z-machine STOREW instruction.
+
+        If any operand is a FormNode, generate that form's code first
+        (which puts result on stack) then use stack as the operand.
         """
         if len(operands) < 3:
             return b''
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-        op3_type, op3_val = self._get_operand_type_and_value(operands[2])
+        # Process each operand - FormNodes need code generation first
+        op_types = []
+        op_vals = []
+
+        for i, op in enumerate(operands[:3]):
+            if isinstance(op, FormNode):
+                # Generate code for nested form - result goes to stack
+                inner_code = self.generate_form(op)
+                code.extend(inner_code)
+                # Use stack (variable 0) as the operand
+                op_types.append(1)  # variable type
+                op_vals.append(0x00)  # stack
+            else:
+                op_type, op_val = self._get_operand_type_and_value(op)
+                op_types.append(op_type)
+                op_vals.append(op_val)
 
         # STOREW is VAR opcode 0x01
         code.append(0xE1)  # VAR form, opcode 0x01
         # Type byte: 2 bits per operand, 00=large, 01=small, 10=var, 11=omitted
-        type_byte = ((op1_type + 1) << 6) | ((op2_type + 1) << 4) | ((op3_type + 1) << 2) | 0x03
+        # 00=large const (2 bytes), 01=small const (1 byte), 10=variable (1 byte), 11=omitted
+        # Our op_types: 0=small const, 1=variable
+        # Map: small(0)->01, var(1)->10
+        def map_type(t):
+            return 0b01 if t == 0 else 0b10
+
+        type_byte = (map_type(op_types[0]) << 6) | (map_type(op_types[1]) << 4) | (map_type(op_types[2]) << 2) | 0x03
         code.append(type_byte)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(op3_val & 0xFF)
+        code.append(op_vals[0] & 0xFF)
+        code.append(op_vals[1] & 0xFF)
+        code.append(op_vals[2] & 0xFF)
 
         return bytes(code)
 
@@ -9737,8 +9924,8 @@ class ImprovedCodeGenerator:
                 room = self.globals.get(room_node.name, 0x10)
 
         if isinstance(room, int):
-            # STORE is 2OP opcode 0x0D
-            code.append(0x2D)  # Short form
+            # STORE is 2OP opcode 0x0D (long form small/small: 00 0 0 1101)
+            code.append(0x0D)  # Long form, both operands small
             code.append(here_var & 0xFF)
             code.append(room & 0xFF)
 
@@ -9949,17 +10136,26 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     # ===== Daemon/Interrupt System =====
+    #
+    # WARNING: The built-in QUEUE/ENABLE/DISABLE implementations have a known issue:
+    # they store interrupt structures in static memory, which cannot be modified at
+    # runtime. Games should use library routines (like gclock.zil or events.zil)
+    # instead. The codegen now checks for user-defined routines first.
 
     def gen_queue(self, operands: List[ASTNode]) -> bytes:
         """Generate QUEUE (schedule interrupt/daemon).
+
+        WARNING: This built-in implementation stores data in static memory,
+        which cannot be modified at runtime. Consider using library routines
+        (gclock.zil or events.zil) instead.
 
         <QUEUE I-NAME tick-count> schedules a routine to run after tick-count turns.
         - tick-count > 0: One-shot interrupt (fire once, then disable)
         - tick-count = -1: Daemon (fire every turn)
         - tick-count = 0: Fire next turn
 
-        Creates an 8-byte interrupt structure:
-          Offset 0: Routine address (word, packed)
+        Creates an 8-byte interrupt structure in table data:
+          Offset 0: Routine address (word, packed) - placeholder for fixup
           Offset 2: Tick count (word, signed)
           Offset 4: Enabled flag (word, 0=disabled 1=enabled)
           Offset 6: Reserved (word)
@@ -9969,8 +10165,12 @@ class ImprovedCodeGenerator:
             operands[1]: Tick count
 
         Returns:
-            bytes: Address of interrupt structure
+            bytes: Code that pushes address of interrupt structure
         """
+        import sys
+        print("Warning: Using built-in QUEUE implementation which stores data in "
+              "static memory. Consider defining a QUEUE routine in your ZIL code "
+              "(see gclock.zil or events.zil).", file=sys.stderr)
         if len(operands) < 2:
             return b''
 
@@ -9980,27 +10180,64 @@ class ImprovedCodeGenerator:
         if isinstance(operands[0], AtomNode):
             int_name = operands[0].value
             tick_count = self.get_operand_value(operands[1])
+            if not isinstance(tick_count, int):
+                tick_count = -1  # Default to daemon if tick count is variable
 
-            # Allocate space for this interrupt (8 bytes)
-            int_addr = self.next_interrupt_addr
-            self.interrupts[int_name] = int_addr
-            self.next_interrupt_addr += 8
-
-            # For now, return the interrupt structure address as a constant
-            # In a full implementation, this would:
-            # 1. Allocate static memory for the structure
-            # 2. Store routine address (packed)
-            # 3. Store tick count
-            # 4. Store enabled=1
-
-            # Return the address of the interrupt structure
-            if int_addr <= 255:
-                code.append(0x01)  # Small constant form
-                code.append(int_addr & 0xFF)
+            # Check if we already have this interrupt
+            if int_name in self._interrupt_table_indices:
+                # Return existing interrupt address
+                table_idx = self._interrupt_table_indices[int_name]
             else:
-                # For larger addresses, we'd need to use a different encoding
-                code.append(0x01)
-                code.append(int_addr & 0xFF)
+                # Create 8-byte interrupt structure as a table
+                int_data = bytearray(8)
+
+                # Offset 0-1: Routine address placeholder (0xFD + index)
+                # The routine name should match the interrupt name (e.g., I-FIGHT)
+                placeholder_idx = self._next_placeholder_index
+                self._routine_placeholders[placeholder_idx] = int_name
+                self._next_placeholder_index += 1
+                int_data[0] = 0xFD
+                int_data[1] = placeholder_idx & 0xFF
+
+                # Offset 2-3: Tick count (signed 16-bit)
+                int_data[2] = (tick_count >> 8) & 0xFF
+                int_data[3] = tick_count & 0xFF
+
+                # Offset 4-5: Enabled flag (1 = enabled)
+                int_data[4] = 0x00
+                int_data[5] = 0x01
+
+                # Offset 6-7: Reserved
+                int_data[6] = 0x00
+                int_data[7] = 0x00
+
+                # Store as a table and track offset
+                table_id = f"_INT_{int_name}"
+                table_idx = len(self.tables)
+                self.table_offsets[table_idx] = self._table_data_size  # Track offset
+                self._table_data_size += len(int_data)  # Update running total
+                self.tables.append((table_id, bytes(int_data), False))
+                self._interrupt_table_indices[int_name] = table_idx
+
+                # Also track in interrupts dict for INT lookup
+                self.interrupts[int_name] = table_idx
+
+            # Allocate a global variable to hold this interrupt's address
+            # The global will be initialized with the table address by the assembler
+            global_name = f"_INT_ADDR_{int_name}"
+            if global_name not in self.globals:
+                self.globals[global_name] = self.next_global
+                # Store placeholder for table address (0xFF00 | table_idx)
+                self.global_values[global_name] = 0xFF00 | table_idx
+                self.next_global += 1
+
+            global_num = self.globals[global_name]
+
+            # Return code that pushes the global value to stack
+            # PUSH (variable) - VAR opcode 0x08
+            code.append(0xE8)  # VAR form, opcode 0x08 (PUSH)
+            code.append(0x8F)  # Type byte: variable, rest omitted
+            code.append(global_num)  # Global variable number
 
         return bytes(code)
 
@@ -10013,7 +10250,7 @@ class ImprovedCodeGenerator:
             operands[0]: Interrupt name
 
         Returns:
-            bytes: Address of interrupt structure
+            bytes: Code that pushes address of interrupt structure
         """
         if not operands:
             return b''
@@ -10024,19 +10261,24 @@ class ImprovedCodeGenerator:
         if isinstance(operands[0], AtomNode):
             int_name = operands[0].value
 
-            if int_name in self.interrupts:
-                int_addr = self.interrupts[int_name]
-
-                # Return the address
-                if int_addr <= 255:
-                    code.append(0x01)  # Small constant
-                    code.append(int_addr & 0xFF)
+            if int_name in self._interrupt_table_indices:
+                # Get the global that holds the interrupt address
+                global_name = f"_INT_ADDR_{int_name}"
+                if global_name in self.globals:
+                    global_num = self.globals[global_name]
+                    # PUSH (variable) - VAR opcode 0x08
+                    code.append(0xE8)  # VAR form, opcode 0x08 (PUSH)
+                    code.append(0x8F)  # Type byte: variable, rest omitted
+                    code.append(global_num)  # Global variable number
                 else:
-                    code.append(0x01)
-                    code.append(int_addr & 0xFF)
+                    # Global wasn't allocated (shouldn't happen) - push 0
+                    code.append(0xE8)  # PUSH
+                    code.append(0x5F)  # Small constant type
+                    code.append(0x00)
             else:
                 # Interrupt not found - return 0
-                code.append(0x01)
+                code.append(0xE8)  # PUSH
+                code.append(0x5F)  # Small constant type
                 code.append(0x00)
 
         return bytes(code)
@@ -10044,56 +10286,96 @@ class ImprovedCodeGenerator:
     def gen_dequeue(self, operands: List[ASTNode]) -> bytes:
         """Generate DEQUEUE (remove/disable interrupt).
 
+        WARNING: This built-in implementation attempts to write to static memory,
+        which will fail at runtime. Consider using library routines instead.
+
         <DEQUEUE interrupt-addr> disables an interrupt.
-        Sets the enabled flag (offset 4) to 0.
+        Sets the enabled flag (offset 2, word index) to 0.
 
         Args:
-            operands[0]: Interrupt structure address
+            operands[0]: Interrupt structure address (or nested form that returns it)
 
         Returns:
             bytes: Z-machine code (STOREW to set enabled=0)
         """
+        import sys
+        print("Warning: Using built-in DEQUEUE implementation which attempts to write "
+              "to static memory. This will fail at runtime. Consider defining a "
+              "DEQUEUE routine in your ZIL code.", file=sys.stderr)
         if not operands:
             return b''
 
         code = bytearray()
-        int_addr = self.get_operand_value(operands[0])
 
-        if isinstance(int_addr, int):
-            # STOREW int_addr 4 0  (set enabled flag to 0)
+        # If the operand is a nested form, evaluate it first
+        if isinstance(operands[0], FormNode):
+            # Generate code for the nested form - result goes to stack
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Now use stack (variable 0x00) as the base address
+            # STOREW (SP) 2 0  (set enabled flag at word offset 2 to 0)
             code.append(0xE1)  # VAR form, STOREW
-            code.append(0x15)  # Type byte: 3 small constants
-            code.append(int_addr & 0xFF)
-            code.append(0x04)  # Offset 4 (enabled flag)
+            code.append(0x97)  # Type byte: 10 01 01 11 = var, small, small, omit
+            code.append(0x00)  # Stack (variable 0)
+            code.append(0x02)  # Word offset 2 (enabled flag)
             code.append(0x00)  # Value 0 (disabled)
+        else:
+            int_addr = self.get_operand_value(operands[0])
+            if isinstance(int_addr, int):
+                # STOREW int_addr 2 0  (set enabled flag to 0)
+                code.append(0xE1)  # VAR form, STOREW
+                code.append(0x57)  # Type byte: 01 01 01 11 = small, small, small, omit
+                code.append(int_addr & 0xFF)
+                code.append(0x02)  # Word offset 2 (enabled flag)
+                code.append(0x00)  # Value 0 (disabled)
 
         return bytes(code)
 
     def gen_enable(self, operands: List[ASTNode]) -> bytes:
         """Generate ENABLE (enable interrupt).
 
+        WARNING: This built-in implementation attempts to write to static memory,
+        which will fail at runtime. Consider using library routines instead.
+
         <ENABLE interrupt-addr> enables an interrupt.
-        Sets the enabled flag (offset 4) to 1.
+        Sets the enabled flag (offset 2, word index) to 1.
 
         Args:
-            operands[0]: Interrupt structure address
+            operands[0]: Interrupt structure address (or nested form that returns it)
 
         Returns:
             bytes: Z-machine code (STOREW to set enabled=1)
         """
+        import sys
+        print("Warning: Using built-in ENABLE implementation which attempts to write "
+              "to static memory. This will fail at runtime. Consider defining an "
+              "ENABLE routine in your ZIL code.", file=sys.stderr)
         if not operands:
             return b''
 
         code = bytearray()
-        int_addr = self.get_operand_value(operands[0])
 
-        if isinstance(int_addr, int):
-            # STOREW int_addr 4 1  (set enabled flag to 1)
+        # If the operand is a nested form, evaluate it first
+        if isinstance(operands[0], FormNode):
+            # Generate code for the nested form - result goes to stack
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Now use stack (variable 0x00) as the base address
+            # STOREW (SP) 2 1  (set enabled flag at word offset 2 to 1)
             code.append(0xE1)  # VAR form, STOREW
-            code.append(0x15)  # Type byte: 3 small constants
-            code.append(int_addr & 0xFF)
-            code.append(0x04)  # Offset 4 (enabled flag)
+            code.append(0x97)  # Type byte: 10 01 01 11 = var, small, small, omit
+            code.append(0x00)  # Stack (variable 0)
+            code.append(0x02)  # Word offset 2 (enabled flag)
             code.append(0x01)  # Value 1 (enabled)
+        else:
+            int_addr = self.get_operand_value(operands[0])
+            if isinstance(int_addr, int):
+                # STOREW int_addr 2 1  (set enabled flag to 1)
+                code.append(0xE1)  # VAR form, STOREW
+                code.append(0x57)  # Type byte: 01 01 01 11 = small, small, small, omit
+                code.append(int_addr & 0xFF)
+                code.append(0x02)  # Word offset 2 (enabled flag)
+                code.append(0x01)  # Value 1 (enabled)
 
         return bytes(code)
 
@@ -10213,19 +10495,29 @@ class ImprovedCodeGenerator:
 
         # Store the table for later assembly
         table_id = f"_TABLE_{self.table_counter}"
+        table_idx = len(self.tables)  # Use current length as index
+        self.table_offsets[table_idx] = self._table_data_size  # Track offset
+        self._table_data_size += len(table_data)  # Update running total
         self.table_counter += 1
         self.tables.append((table_id, bytes(table_data), is_pure))
 
-        # Return code that will be replaced with actual address during assembly
-        # For now, we push a placeholder that will be fixed up
-        # The address will be determined when the assembler places tables in memory
+        # Allocate a global variable to hold this table's address
+        # The global will be initialized with a placeholder that gets resolved by the assembler
+        global_name = f"_TBL_ADDR_{table_idx}"
+        if global_name not in self.globals:
+            self.globals[global_name] = self.next_global
+            # Store placeholder for table address (0xFF00 | table_idx)
+            self.global_values[global_name] = 0xFF00 | table_idx
+            self.next_global += 1
+
+        global_num = self.globals[global_name]
+
+        # Return code that pushes the global value (table address) to stack
+        # PUSH (variable) - VAR opcode 0x08
         code = bytearray()
-        # Use a marker that the assembler can recognize and patch
-        # We'll store the table index as a large constant for now
-        # The assembler will replace this with the actual packed address
-        code.append(0x8F)  # 1OP large constant form
-        code.append((len(self.tables) - 1) >> 8)  # Table index as placeholder
-        code.append((len(self.tables) - 1) & 0xFF)
+        code.append(0xE8)  # VAR form, opcode 0x08 (PUSH)
+        code.append(0x8F)  # Type byte: variable, rest omitted
+        code.append(global_num)  # Global variable number
 
         return bytes(code)
 
