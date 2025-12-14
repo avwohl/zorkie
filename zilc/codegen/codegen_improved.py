@@ -5389,16 +5389,33 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_back(self, operands: List[ASTNode]) -> bytes:
-        """Generate BACK (erase to beginning of line).
+        """Generate BACK (alias for SUB with default second operand of 1).
 
-        <BACK> moves cursor back and erases from current position to start of line.
-        V3 approximation: print newline to go to next line.
+        BACK is a convenient alias for subtraction:
+        - <BACK x> = x - 1
+        - <BACK x y> = x - y
+
+        With no operands, falls back to screen operation (erase to beginning of line).
+
+        Args:
+            operands[0]: first value (optional)
+            operands[1]: second value (optional, defaults to 1)
 
         Returns:
-            bytes: Z-machine code for line erase
+            bytes: Z-machine code (SUB instruction or newline for screen op)
         """
-        # BACK in V3: just print newline as approximation
-        return self.gen_newline()
+        if not operands:
+            # No operands - screen operation (erase to beginning of line)
+            # V3 approximation: print newline
+            return self.gen_newline()
+
+        # If only one operand, default second operand to 1
+        if len(operands) == 1:
+            one_node = NumberNode(1)
+            return self._gen_2op_store(0x15, operands[0], one_node)
+        else:
+            # Two operands - normal SUB
+            return self._gen_2op_store(0x15, operands[0], operands[1])
 
     def gen_display(self, operands: List[ASTNode]) -> bytes:
         """Generate DISPLAY (update status line).
@@ -9922,86 +9939,29 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_rest(self, operands: List[ASTNode]) -> bytes:
-        """Generate REST (pointer arithmetic on tables).
+        """Generate REST (alias for ADD with default second operand of 1).
 
-        REST takes a table address and an offset, returning address + (offset * 2).
-        Used for list/table traversal.
+        REST is a convenient alias for addition:
+        - <REST x> = x + 1
+        - <REST x y> = x + y
 
         Args:
-            operands[0]: table/array address
-            operands[1]: offset (optional, defaults to 1 for list tail)
+            operands[0]: first value
+            operands[1]: second value (optional, defaults to 1)
 
         Returns:
-            bytes: Z-machine code (ADD to compute new address)
+            bytes: Z-machine code (ADD instruction)
         """
         if not operands:
             return b''
 
-        code = bytearray()
-        table_node = operands[0]
-        offset_node = operands[1] if len(operands) > 1 else None
-
-        # Handle table operand
-        table_type, table_val = self._get_operand_type_and_value(table_node)
-
-        # If table is a form expression, evaluate it first
-        if isinstance(table_node, FormNode):
-            expr_code = self.generate_statement(table_node)
-            if expr_code:
-                code.extend(expr_code)
-                table_type = 1  # Variable (stack)
-                table_val = 0   # Stack
-
-        # Handle offset operand
-        if offset_node is None:
-            # Default offset of 2 (skip 1 word element)
-            offset_type = 0
-            offset_val = 2
-        elif isinstance(offset_node, FormNode):
-            # Complex expression - evaluate it then multiply by 2
-            expr_code = self.generate_statement(offset_node)
-            if expr_code:
-                code.extend(expr_code)
-                # Multiply stack by 2 using ADD stack stack -> stack
-                code.append(0xD4)  # ADD VAR form
-                code.append(0x9F)  # var, var, omit, omit
-                code.append(0x00)  # Stack
-                code.append(0x00)  # Stack
-                code.append(0x00)  # Store to stack
-                offset_type = 1  # Variable (stack result)
-                offset_val = 0   # Stack
+        # If only one operand, default second operand to 1
+        if len(operands) == 1:
+            one_node = NumberNode(1)
+            return self._gen_2op_store(0x14, operands[0], one_node)
         else:
-            offset_type, offset_val = self._get_operand_type_and_value(offset_node)
-            if isinstance(offset_val, int):
-                offset_val = offset_val * 2  # Convert word offset to byte offset
-
-        # REST returns table_address + byte_offset
-        # ADD is 2OP opcode 0x14
-        if table_type == 0 and offset_type == 0:
-            # Both constants
-            code.append(0x14)  # Long form, small/small
-            code.append(table_val & 0xFF)
-            code.append(offset_val & 0xFF)
-        elif table_type == 1 and offset_type == 0:
-            # Variable + constant
-            code.append(0x54)  # Long form, var/small
-            code.append(table_val & 0xFF)
-            code.append(offset_val & 0xFF)
-        elif table_type == 0 and offset_type == 1:
-            # Constant + variable
-            code.append(0x34)  # Long form, small/var
-            code.append(table_val & 0xFF)
-            code.append(offset_val & 0xFF)
-        else:
-            # Both variables - use VAR form
-            code.append(0xD4)  # ADD VAR form
-            code.append(0xAF)  # var, var, omit, omit
-            code.append(table_val & 0xFF)
-            code.append(offset_val & 0xFF)
-
-        code.append(0x00)  # Store to stack
-
-        return bytes(code)
+            # Two operands - normal ADD
+            return self._gen_2op_store(0x14, operands[0], operands[1])
 
     def gen_jigs_up(self, operands: List[ASTNode]) -> bytes:
         """Generate JIGS-UP (game over with message).
