@@ -65,6 +65,11 @@ class ImprovedCodeGenerator:
         # Each entry is a dict with 'start_offset', 'code_ref' for nested loops
         self.loop_stack: List[Dict[str, Any]] = []
 
+        # Block scope tracking for PROG/REPEAT/BIND block-scoped RETURN
+        # Each entry tracks: code_buffer, return_placeholders, block_type
+        # RETURN inside a block jumps to block exit, not routine exit
+        self.block_stack: List[Dict[str, Any]] = []
+
         # Table storage for TABLE/LTABLE/ITABLE
         # Each table is (name/id, bytes, is_pure)
         self.tables: List[Tuple[str, bytes, bool]] = []
@@ -439,11 +444,40 @@ class ImprovedCodeGenerator:
             stmt_code = self.generate_statement(stmt)
             routine_code.extend(stmt_code)
 
+        # Add implicit return if the routine doesn't end with a terminating instruction
+        # This ensures all routines have a valid return path
+        if not self._ends_with_terminator(routine.body):
+            # RET_POPPED (0OP opcode 8) returns whatever is on the stack (or 0 if empty)
+            # 0OP format: bits 7-6 = 10, bits 5-4 = 11 (no operand), bits 3-0 = opcode
+            # 0xB8 = 10 11 1000 = RET_POPPED
+            routine_code.append(0xB8)  # RET_POPPED
+
         # Store routine address for later reference
         self.routines[routine.name] = routine_start
 
         self.code.extend(routine_code)
         return bytes(routine_code)
+
+    def _ends_with_terminator(self, body: List[ASTNode]) -> bool:
+        """Check if a routine body ends with a terminating instruction."""
+        if not body:
+            return False
+
+        last_stmt = body[-1]
+
+        if isinstance(last_stmt, FormNode) and isinstance(last_stmt.operator, AtomNode):
+            op_name = last_stmt.operator.value.upper()
+            # These operations terminate the routine or loop
+            if op_name in ('RTRUE', 'RFALSE', 'RETURN', 'QUIT', 'RESTART', 'AGAIN', 'RFATAL'):
+                return True
+
+        # COND might terminate if all branches terminate
+        if isinstance(last_stmt, CondNode):
+            # Check if COND has a T clause and all branches terminate
+            # For now, be conservative and say COND doesn't terminate
+            pass
+
+        return False
 
     def generate_statement(self, node: ASTNode) -> bytes:
         """Generate code for a statement."""
@@ -1098,7 +1132,19 @@ class ImprovedCodeGenerator:
         return bytes([0xB1])  # Same as RFALSE
 
     def gen_return(self, operands: List[ASTNode]) -> bytes:
-        """Generate RETURN value."""
+        """Generate RETURN value.
+
+        If inside a PROG/REPEAT/BIND block, RETURN exits the block (not the routine).
+        The block's result is set to the return value.
+
+        If not inside a block, RETURN exits the routine normally.
+        """
+        # Check if we're inside a block scope
+        if self.block_stack:
+            # Block-scoped return: jump to block exit
+            return self._gen_block_return(operands)
+
+        # Routine-level return
         if not operands:
             return self.gen_rtrue()
 
@@ -1106,12 +1152,64 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # RET is 1OP opcode 0x0B
-        # 0x8B = small constant, 0x9B = variable
+        # Short form 1OP: bits 7-6 = 10, bits 5-4 = operand type, bits 3-0 = opcode
+        # Operand types: 00 = large const (2 bytes), 01 = small const (1 byte), 10 = variable
+        # 0x8B = 10 00 1011 = large constant
+        # 0x9B = 10 01 1011 = small constant
+        # 0xAB = 10 10 1011 = variable
         if op_type == 1:  # Variable
+            code.append(0xAB)
+        elif op_val >= 0 and op_val <= 255:  # Small constant
             code.append(0x9B)
-        else:  # Constant
+        else:  # Large constant
             code.append(0x8B)
+            code.append((op_val >> 8) & 0xFF)
         code.append(op_val & 0xFF)
+
+        return bytes(code)
+
+    def _gen_block_return(self, operands: List[ASTNode]) -> bytes:
+        """Generate a block-scoped RETURN (exits block, not routine).
+
+        This stores the return value to the block's result variable,
+        then generates a JUMP placeholder that will be patched to
+        jump to the block's exit point.
+        """
+        block_ctx = self.block_stack[-1]
+        code = bytearray()
+
+        # Get return value (default to 1/TRUE if none specified)
+        if operands:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
+        else:
+            op_type, op_val = 0, 1  # Small constant 1 (TRUE)
+
+        # Store value to block's result variable (which is the stack, var 0)
+        # Note: STORE opcode to stack (var 0) causes issues with dfrotz, so we use
+        # ADD 0, value -> result_var instead, which achieves the same effect.
+        result_var = block_ctx['result_var']
+        # ADD is opcode 20 (0x14). Long form encoding:
+        # Bit 7: 0 (long form)
+        # Bit 6: operand 1 type (0=small const, 1=variable)
+        # Bit 5: operand 2 type (0=small const, 1=variable)
+        # Bits 4-0: opcode (20 = 10100)
+        if op_type == 1:  # Variable operand - ADD 0, var -> result
+            # Both small const + var: 0 01 10100 = 0x34
+            code.extend([0x34, 0x00, op_val, result_var])
+        else:  # Constant operand - ADD 0, const -> result
+            if op_val < 256:
+                # Both small const: 0 00 10100 = 0x14
+                code.extend([0x14, 0x00, op_val & 0xFF, result_var])
+            else:
+                # Large constant - use VAR form for ADD
+                # 0xD4 = VAR form ADD (11 0 10100)
+                # Type byte: 01 00 11 11 = 0x4F (small const 0, large const value)
+                code.extend([0xD4, 0x4F, 0x00, (op_val >> 8) & 0xFF, op_val & 0xFF, result_var])
+
+        # Generate JUMP placeholder (will be patched to jump to block exit)
+        # We use 0x8C (JUMP) with special marker bytes 0xFF 0xBB
+        # The block's patching code will scan for this pattern and fix the offset
+        code.extend([0x8C, 0xFF, 0xBB])  # JUMP with placeholder offset
 
         return bytes(code)
 
@@ -1289,12 +1387,26 @@ class ImprovedCodeGenerator:
         code = bytearray()
         operand = operands[0]
 
-        # If operand is a nested form, evaluate it first (result goes to stack)
+        # If operand is a nested expression, evaluate it first (result goes to stack)
         if isinstance(operand, FormNode):
             # Generate code for the expression (pushes result to stack)
             expr_code = self.generate_form(operand)
             code.extend(expr_code)
             # Now print from stack (variable 0)
+            op_type = 1  # Variable
+            op_val = 0   # Stack
+        elif isinstance(operand, RepeatNode):
+            # Generate REPEAT code (result goes to stack via RETURN)
+            # Construct operands list: [bindings, body_stmts...]
+            repeat_operands = [operand.bindings] + operand.body
+            expr_code = self.gen_repeat(repeat_operands)
+            code.extend(expr_code)
+            op_type = 1  # Variable
+            op_val = 0   # Stack
+        elif isinstance(operand, CondNode):
+            # Generate COND code (result goes to stack)
+            expr_code = self.gen_cond(operand.clauses)
+            code.extend(expr_code)
             op_type = 1  # Variable
             op_val = 0   # Stack
         else:
@@ -1632,21 +1744,124 @@ class ImprovedCodeGenerator:
         if len(operands) < 2:
             return b''
 
+        # ADD is 2OP opcode 0x14 (20 decimal)
+        return self._gen_2op_store(0x14, operands[0], operands[1])
+
+    def _gen_2op_store(self, opcode_num: int, op1_node: ASTNode, op2_node: ASTNode, store_var: int = 0) -> bytes:
+        """Generate a 2OP instruction with store, handling all operand types correctly.
+
+        Args:
+            opcode_num: The opcode number (0-31)
+            op1_node: First operand AST node
+            op2_node: Second operand AST node
+            store_var: Variable to store result (0 = stack)
+
+        Returns:
+            Bytecode for the instruction
+        """
         code = bytearray()
-        # ADD is 2OP opcode 0x14
-        # Determine operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # Build opcode byte: bits 6-5 are operand types, bits 4-0 are opcode
-        # Type: 0 = small constant, 1 = variable
-        opcode = 0x14 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Store to stack
+        # Get operand info
+        op1_type, op1_val = self._get_operand_type_and_value_ext(op1_node)
+        op2_type, op2_val = self._get_operand_type_and_value_ext(op2_node)
 
+        # Check if we can use long form (both operands are small const or variable)
+        # Long form only supports: small constant (0-255) or variable
+        can_use_long = (op1_type in (1, 2) and op2_type in (1, 2))
+
+        if can_use_long:
+            # Long form: 0 op1_type op2_type opcode_num[4:0]
+            # op1_type: bit 6 (0=small, 1=var)
+            # op2_type: bit 5 (0=small, 1=var)
+            op1_bit = 1 if op1_type == 2 else 0  # 2=var -> 1, 1=small -> 0
+            op2_bit = 1 if op2_type == 2 else 0
+            opcode_byte = (op1_bit << 6) | (op2_bit << 5) | opcode_num
+            code.append(opcode_byte)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
+        else:
+            # Variable form: 11 0 opcode_num[4:0] = 0xC0 | opcode_num
+            code.append(0xC0 | opcode_num)
+            # Operand type byte: 2 bits per operand, 00=large, 01=small, 10=var, 11=omit
+            type_byte = (op1_type << 6) | (op2_type << 4) | 0x0F  # 0x0F = remaining slots omitted
+            code.append(type_byte)
+            # Add operands based on type
+            if op1_type == 0:  # Large constant
+                code.append((op1_val >> 8) & 0xFF)
+                code.append(op1_val & 0xFF)
+            else:  # Small constant or variable
+                code.append(op1_val & 0xFF)
+            if op2_type == 0:  # Large constant
+                code.append((op2_val >> 8) & 0xFF)
+                code.append(op2_val & 0xFF)
+            else:  # Small constant or variable
+                code.append(op2_val & 0xFF)
+
+        code.append(store_var)  # Store result
         return bytes(code)
+
+    def _get_operand_type_and_value_ext(self, node: ASTNode) -> Tuple[int, int]:
+        """Get extended operand type and value for VAR form encoding.
+
+        Returns:
+            Tuple of (type, value) where type is:
+            - 0 = large constant (2 bytes)
+            - 1 = small constant (1 byte, 0-255)
+            - 2 = variable
+        """
+        if isinstance(node, NumberNode):
+            val = node.value
+            # Handle signed 16-bit range
+            if val < 0:
+                val = (1 << 16) + val  # Convert to unsigned 16-bit
+            # Small constant: 0-255 unsigned
+            if 0 <= node.value <= 255:
+                return (1, val)  # Small constant
+            else:
+                return (0, val)  # Large constant
+        elif isinstance(node, GlobalVarNode):
+            if node.name in self.globals:
+                return (2, self.globals[node.name])  # Variable
+            elif node.name in self.objects:
+                obj_num = self.objects[node.name]
+                if 0 <= obj_num <= 255:
+                    return (1, obj_num)
+                else:
+                    return (0, obj_num)
+            elif node.name in self.constants:
+                const_val = self.constants[node.name]
+                if 0 <= const_val <= 255:
+                    return (1, const_val)
+                else:
+                    return (0, const_val)
+            else:
+                self._warn(f"Unknown global/object '{node.name}' - using default")
+                return (2, 0x10)
+        elif isinstance(node, LocalVarNode):
+            var_num = self.locals.get(node.name, 1)
+            return (2, var_num)
+        elif isinstance(node, TableNode):
+            table_id = self._add_table(node)
+            return (0, table_id)  # Table addresses are typically large
+        elif isinstance(node, AtomNode):
+            if node.value in self.constants:
+                const_val = self.constants[node.value]
+                if 0 <= const_val <= 255:
+                    return (1, const_val)
+                else:
+                    return (0, const_val)
+            elif node.value in self.objects:
+                obj_num = self.objects[node.value]
+                if 0 <= obj_num <= 255:
+                    return (1, obj_num)
+                else:
+                    return (0, obj_num)
+            elif node.value in self.globals:
+                return (2, self.globals[node.value])
+            else:
+                return (1, 0)  # Unknown, default to small constant 0
+        else:
+            return (1, 0)  # Default
 
     def _get_operand_type_and_value(self, node: ASTNode) -> Tuple[int, int]:
         """Get operand type (0=small const, 1=variable) and value/var number.
@@ -1714,6 +1929,10 @@ class ImprovedCodeGenerator:
             # CondNode as operand - COND can be used as an expression
             # The calling code should evaluate it first, result will be on stack
             return (1, 0)  # Variable 0 = stack
+        elif isinstance(node, RepeatNode):
+            # RepeatNode as operand - REPEAT returns a value via RETURN
+            # The calling code should evaluate it first, result will be on stack
+            return (1, 0)  # Variable 0 = stack
         elif isinstance(node, StringNode):
             # StringNode as operand - this should have been handled by the caller
             # or be used in a string context. Return 0 as placeholder.
@@ -1732,83 +1951,38 @@ class ImprovedCodeGenerator:
         if len(operands) < 1:
             return b''
 
-        code = bytearray()
-
         if len(operands) == 1:
             # Negation: 0 - value
-            op_type, op_val = self._get_operand_type_and_value(operands[0])
-            # SUB 0 value -> stack
-            opcode = 0x15 | (0 << 6) | (op_type << 5)  # First op is small const (0)
-            code.append(opcode)
-            code.append(0x00)  # First operand: 0
-            code.append(op_val & 0xFF)
-            code.append(0x00)  # Store to stack
+            # Create a synthetic NumberNode for 0
+            zero_node = NumberNode(0)
+            return self._gen_2op_store(0x15, zero_node, operands[0])
         else:
-            # Normal subtraction
-            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-
-            opcode = 0x15 | (op1_type << 6) | (op2_type << 5)
-            code.append(opcode)
-            code.append(op1_val & 0xFF)
-            code.append(op2_val & 0xFF)
-            code.append(0x00)  # Store to stack
-
-        return bytes(code)
+            # SUB is 2OP opcode 0x15 (21 decimal)
+            return self._gen_2op_store(0x15, operands[0], operands[1])
 
     def gen_mul(self, operands: List[ASTNode]) -> bytes:
         """Generate MUL instruction."""
         if len(operands) < 2:
             return b''
 
-        code = bytearray()
-        # MUL is 2OP opcode 0x16
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-
-        opcode = 0x16 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Store to stack
-
-        return bytes(code)
+        # MUL is 2OP opcode 0x16 (22 decimal)
+        return self._gen_2op_store(0x16, operands[0], operands[1])
 
     def gen_div(self, operands: List[ASTNode]) -> bytes:
         """Generate DIV instruction."""
         if len(operands) < 2:
             return b''
 
-        code = bytearray()
-        # DIV is 2OP opcode 0x17
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-
-        opcode = 0x17 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Store to stack
-
-        return bytes(code)
+        # DIV is 2OP opcode 0x17 (23 decimal)
+        return self._gen_2op_store(0x17, operands[0], operands[1])
 
     def gen_mod(self, operands: List[ASTNode]) -> bytes:
         """Generate MOD instruction."""
         if len(operands) < 2:
             return b''
 
-        code = bytearray()
-        # MOD is 2OP opcode 0x18
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-
-        opcode = 0x18 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Store to stack
-
-        return bytes(code)
+        # MOD is 2OP opcode 0x18 (24 decimal)
+        return self._gen_2op_store(0x18, operands[0], operands[1])
 
     def gen_add1(self, operands: List[ASTNode]) -> bytes:
         """Generate 1+ (add 1 to value).
@@ -6360,6 +6534,8 @@ class ImprovedCodeGenerator:
         <PROG bindings body...> executes body statements sequentially.
         First operand can be empty list () or list of bindings.
         Remaining operands are statements to execute in order.
+        RETURN inside PROG exits the block (not the routine) and provides
+        the block's result value.
 
         Example: <PROG () <SETG X 1> <SETG Y 2> <RETURN 3>>
 
@@ -6379,12 +6555,48 @@ class ImprovedCodeGenerator:
         # Process bindings if present (operands[0])
         # For now, we skip bindings - they would be handled by parser
 
-        # Generate code for each statement in sequence
-        for i in range(1, len(operands)):
-            stmt = operands[i]
-            stmt_code = self.generate_statement(stmt)
-            if stmt_code:
-                code.extend(stmt_code)
+        # Push block context onto block_stack (for RETURN support)
+        # Use stack (variable 0) to store the block result
+        block_ctx = {
+            'code_buffer': code,
+            'return_placeholders': [],  # Positions of RETURN jumps to patch
+            'block_type': 'PROG',
+            'result_var': 0,  # Stack (SP) - result is pushed onto stack
+        }
+        self.block_stack.append(block_ctx)
+
+        try:
+            # Generate code for each statement in sequence
+            for i in range(1, len(operands)):
+                stmt = operands[i]
+                stmt_code = self.generate_statement(stmt)
+                if stmt_code:
+                    code.extend(stmt_code)
+
+            # Exit point is at the end of the block
+            exit_point = len(code)
+
+            # Patch all RETURN placeholders (0x8C 0xFF 0xBB -> jump to exit_point)
+            # Use pattern scanning instead of position tracking, since RETURN may be
+            # inside nested structures (like COND) that generate code in temp buffers
+            i = 0
+            while i < len(code) - 2:
+                if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xBB:
+                    # Found RETURN placeholder at position i
+                    # Z-machine JUMP: Target = PC + Offset - 2
+                    # Offset = Target - PC + 2 = exit_point - (i + 3) + 2
+                    return_offset = exit_point - (i + 1)
+                    if return_offset < 0:
+                        return_offset_unsigned = (1 << 16) + return_offset
+                    else:
+                        return_offset_unsigned = return_offset
+                    code[i+1] = (return_offset_unsigned >> 8) & 0xFF
+                    code[i+2] = return_offset_unsigned & 0xFF
+                i += 1
+
+        finally:
+            # Pop block context
+            self.block_stack.pop()
 
         return bytes(code)
 
@@ -6393,6 +6605,8 @@ class ImprovedCodeGenerator:
 
         <BIND bindings body...> creates local variables and executes body.
         Similar to PROG but focuses on local variable scope.
+        RETURN inside BIND exits the block (not the routine) and provides
+        the block's result value.
 
         Example: <BIND ((X 10) (Y 20)) <TELL N <+ .X .Y>>>
 
@@ -6413,12 +6627,48 @@ class ImprovedCodeGenerator:
         # For now, we just execute the body statements
         # Full binding support would require parser-level local scope tracking
 
-        # Generate code for each statement in sequence
-        for i in range(1, len(operands)):
-            stmt = operands[i]
-            stmt_code = self.generate_statement(stmt)
-            if stmt_code:
-                code.extend(stmt_code)
+        # Push block context onto block_stack (for RETURN support)
+        # Use stack (variable 0) to store the block result
+        block_ctx = {
+            'code_buffer': code,
+            'return_placeholders': [],  # Positions of RETURN jumps to patch
+            'block_type': 'BIND',
+            'result_var': 0,  # Stack (SP) - result is pushed onto stack
+        }
+        self.block_stack.append(block_ctx)
+
+        try:
+            # Generate code for each statement in sequence
+            for i in range(1, len(operands)):
+                stmt = operands[i]
+                stmt_code = self.generate_statement(stmt)
+                if stmt_code:
+                    code.extend(stmt_code)
+
+            # Exit point is at the end of the block
+            exit_point = len(code)
+
+            # Patch all RETURN placeholders (0x8C 0xFF 0xBB -> jump to exit_point)
+            # Use pattern scanning instead of position tracking, since RETURN may be
+            # inside nested structures (like COND) that generate code in temp buffers
+            i = 0
+            while i < len(code) - 2:
+                if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xBB:
+                    # Found RETURN placeholder at position i
+                    # Z-machine JUMP: Target = PC + Offset - 2
+                    # Offset = Target - PC + 2 = exit_point - (i + 3) + 2
+                    return_offset = exit_point - (i + 1)
+                    if return_offset < 0:
+                        return_offset_unsigned = (1 << 16) + return_offset
+                    else:
+                        return_offset_unsigned = return_offset
+                    code[i+1] = (return_offset_unsigned >> 8) & 0xFF
+                    code[i+2] = return_offset_unsigned & 0xFF
+                i += 1
+
+        finally:
+            # Pop block context
+            self.block_stack.pop()
 
         return bytes(code)
 
@@ -6428,6 +6678,8 @@ class ImprovedCodeGenerator:
         <REPEAT (bindings) body...> creates an infinite loop that executes body
         statements until RETURN is called to exit.
         AGAIN restarts the loop from the beginning.
+        RETURN inside REPEAT exits the loop (not the routine) and provides
+        the loop's result value.
 
         Example: <REPEAT () <COND (<FSET? ,X ,FLAG> <RETURN T>)> <INC X>>
 
@@ -6438,7 +6690,7 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code for the loop
         """
-        # Use a bytearray that we can reference in loop_stack
+        # Use a bytearray that we can reference in stacks
         code = bytearray()
 
         if len(operands) < 1:
@@ -6450,13 +6702,23 @@ class ImprovedCodeGenerator:
         # Record loop start position (where AGAIN should jump back to)
         loop_start = len(code)
 
-        # Push loop context onto stack
+        # Push loop context onto loop_stack (for AGAIN support)
         loop_ctx = {
             'code_buffer': code,
             'start_offset': loop_start,
             'again_placeholders': []  # Will be populated by gen_again
         }
         self.loop_stack.append(loop_ctx)
+
+        # Push block context onto block_stack (for RETURN support)
+        # Use stack (variable 0) to store the block result
+        block_ctx = {
+            'code_buffer': code,
+            'return_placeholders': [],  # Positions of RETURN jumps to patch
+            'block_type': 'REPEAT',
+            'result_var': 0,  # Stack (SP) - result is pushed onto stack
+        }
+        self.block_stack.append(block_ctx)
 
         try:
             # Generate code for each statement in loop body
@@ -6469,9 +6731,9 @@ class ImprovedCodeGenerator:
             # At end of loop, add unconditional jump back to start
             # This creates the infinite loop (exit via RETURN)
             current_pos = len(code)
-            # JUMP is 3 bytes, so PC after = current_pos + 3
-            # Target is loop_start
-            jump_offset = loop_start - (current_pos + 3)
+            # Z-machine JUMP: Target = PC + Offset - 2, where PC is after instruction
+            # So: Offset = Target - PC + 2 = Target - (current_pos + 3) + 2
+            jump_offset = loop_start - (current_pos + 1)
 
             # JUMP uses signed 16-bit offset
             if jump_offset < 0:
@@ -6483,13 +6745,35 @@ class ImprovedCodeGenerator:
             code.append((jump_offset_unsigned >> 8) & 0xFF)
             code.append(jump_offset_unsigned & 0xFF)
 
+            # Exit point is right after the backward jump (this is where RETURN jumps to)
+            exit_point = len(code)
+
+            # Patch all RETURN placeholders (0x8C 0xFF 0xBB -> jump to exit_point)
+            # Use pattern scanning instead of position tracking, since RETURN may be
+            # inside nested structures (like COND) that generate code in temp buffers
+            i = 0
+            while i < len(code) - 2:
+                if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xBB:
+                    # Found RETURN placeholder at position i
+                    # Z-machine JUMP: Target = PC + Offset - 2
+                    # Offset = Target - PC + 2 = exit_point - (i + 3) + 2
+                    return_offset = exit_point - (i + 1)
+                    if return_offset < 0:
+                        return_offset_unsigned = (1 << 16) + return_offset
+                    else:
+                        return_offset_unsigned = return_offset
+                    code[i+1] = (return_offset_unsigned >> 8) & 0xFF
+                    code[i+2] = return_offset_unsigned & 0xFF
+                i += 1
+
             # Patch all AGAIN placeholders (0x8C 0xFF 0xAA -> actual jump)
             i = 0
             while i < len(code) - 2:
                 if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xAA:
                     # Found AGAIN placeholder at position i
-                    # Calculate jump offset from position i+3 to loop_start
-                    again_offset = loop_start - (i + 3)
+                    # Z-machine JUMP: Target = PC + Offset - 2
+                    # Offset = Target - PC + 2 = loop_start - (i + 3) + 2
+                    again_offset = loop_start - (i + 1)
                     if again_offset < 0:
                         again_offset_unsigned = (1 << 16) + again_offset
                     else:
@@ -6499,6 +6783,8 @@ class ImprovedCodeGenerator:
                 i += 1
 
         finally:
+            # Pop block context
+            self.block_stack.pop()
             # Pop loop context
             self.loop_stack.pop()
 
@@ -7379,8 +7665,10 @@ class ImprovedCodeGenerator:
             # Fix the condition test branch offset
             if not clause['is_t_clause'] and clause['test_size'] > 0:
                 # Branch should jump to next clause if test fails
-                # Offset is from AFTER the branch bytes to the start of next clause
-                next_clause_offset = clause['actions_size'] + clause['jump_size']
+                # Z-machine branch: target = PC + offset - 2
+                # To skip N bytes: offset = N + 2
+                bytes_to_skip = clause['actions_size'] + clause['jump_size']
+                next_clause_offset = bytes_to_skip + 2  # Add 2 for Z-machine formula
 
                 # Fix the branch byte (last byte of test_code)
                 # Preserve bit 7 (branch sense) from original branch byte
@@ -7394,10 +7682,10 @@ class ImprovedCodeGenerator:
                 else:
                     # 2-byte branch form needed
                     # Bit 7=sense (preserved), bit 6=0 (2-byte)
-                    offset_from_branch = next_clause_offset - 2  # -2 because relative to after branch
-                    clause['test_code'][-1] = branch_sense | ((offset_from_branch >> 8) & 0x3F)
+                    # 14-bit signed offset spans 6 bits of first byte + 8 bits of second
+                    clause['test_code'][-1] = branch_sense | ((next_clause_offset >> 8) & 0x3F)
                     # Need to add second byte
-                    clause['test_code'].append(offset_from_branch & 0xFF)
+                    clause['test_code'].append(next_clause_offset & 0xFF)
                     clause['test_size'] += 1
                     clause['total_size'] += 1
 
@@ -7410,21 +7698,15 @@ class ImprovedCodeGenerator:
             # Add jump to end if needed
             if clause['needs_jump_to_end']:
                 # Calculate offset to end of COND
+                # Z-machine JUMP: target = PC + offset - 2, where PC is after the 3-byte JUMP
+                # To skip remaining_size bytes: offset = remaining_size + 2
                 remaining_size = sum(clause_data[j]['total_size'] for j in range(i + 1, len(clause_data)))
+                jump_offset = remaining_size + 2
 
-                # JUMP instruction: 0x8C (1OP, short form, opcode 0x0C)
+                # JUMP instruction: 0x8C followed by 16-bit signed offset
                 code.append(0x8C)
-
-                # Encode offset (2 bytes, signed 14-bit)
-                if remaining_size < 64:
-                    # 1-byte form
-                    code.append(0x40 | (remaining_size & 0x3F))
-                    code.append(0x00)  # Padding
-                else:
-                    # 2-byte form
-                    offset = remaining_size - 2  # Relative to after the jump bytes
-                    code.append((offset >> 8) & 0x3F)
-                    code.append(offset & 0xFF)
+                code.append((jump_offset >> 8) & 0xFF)
+                code.append(jump_offset & 0xFF)
 
             current_pos += clause['total_size']
 
@@ -7494,6 +7776,37 @@ class ImprovedCodeGenerator:
                             code.append(0x43)  # JG opcode
                             code.append(val1 & 0xFF)
                             code.append(val2 & 0xFF)
+
+            # Handle 1? (equals 1)
+            elif op_name == '1?':
+                if len(condition.operands) >= 1:
+                    op_type, op_val = self._get_operand_type_and_value(condition.operands[0])
+                    if op_type == 1:  # Variable
+                        # JE long form: bit 6=1 (first=var), bit 5=0 (second=small)
+                        # 0b01000001 = 0x41
+                        code.append(0x41)  # JE long form, variable/small
+                        code.append(op_val & 0xFF)
+                        code.append(0x01)  # Compare with 1
+                    else:  # Constant
+                        # JE long form: bit 6=0 (first=small), bit 5=0 (second=small)
+                        # 0b00000001 = 0x01
+                        code.append(0x01)  # JE long form, small/small
+                        code.append(op_val & 0xFF)
+                        code.append(0x01)  # Compare with 1
+
+            # Handle 0? / ZERO? (equals 0)
+            elif op_name in ('0?', 'ZERO?'):
+                if len(condition.operands) >= 1:
+                    op_type, op_val = self._get_operand_type_and_value(condition.operands[0])
+                    if op_type == 1:  # Variable
+                        code.append(0xA0)  # JZ 1OP short form, variable operand
+                        code.append(op_val & 0xFF)
+                    else:  # Constant
+                        # JZ with constant - use JE with 0
+                        # JE long form: bit 6=0 (first=small), bit 5=0 (second=small)
+                        code.append(0x01)  # JE long form, small/small
+                        code.append(op_val & 0xFF)
+                        code.append(0x00)  # Compare with 0
 
             # Handle NOT
             elif op_name == 'NOT':
