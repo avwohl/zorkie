@@ -1,22 +1,14 @@
-We have been producing bad .z code with lots of guessing as to why
-and not making much progress in being sure the .z produced isn't missing
-data. A lot of data has been missing from the .z
+On a forum for interactive fiction a famous writer
+of .z tools wrote to us (see below).  Be sure
+that we pass all of her tests. We got a lot of flack
+on on If forums for poor testing.
 
-First take  look at https://ifarchive.org/indexes/if-archive/infocom/tools/ztools/
-See if that can run and disassemble the zork I we have been using for testing.
-Disassemble ours and the offical zork I that goes with the source we compile.
+Also, as Daniel mentioned, the full set of ZILF test cases may prove useful to you. Since your project is licensed under the GPLv3, you’re free to convert those tests to Python and incorporate them, if you want: see the integration tests, which execute compiled Z-code and thus need a Z-machine interpreter, and the interpreter tests, which test the facilities used to execute macros at compile time.
 
-2nd make a proposal for a debugging data file that would be emitted with
-the .z
- - when emiting code pass a lexer token to every emit
- For code with multiple parts like if then else allow listing multiple tokens.
- Each token that conributes to code should be listed in its emit (See below, for 2nd pass)
- - in the debug info for every location in the output .z be
- able to lookup the source that emited it
- - allow for multiple entries. for example I believe strings are stored
- in a table.  if a string is used in 10 places it might have 10 entries
- - allow the compiler to accept a debug file in addtion to the zil/zilf
- usage: compile once to get the debug file, compile again with debug file,
- have the compiler put out a listing with error comments showing which
- tokens (or lines of code as an option) produced no code output.
- 
+These are the URLs (you probably can't read them directly, the server doesnt like non humans, but see below for a local copy I got):
+
+https://foss.heptapod.net/zilf/zilf/-/tree/branch/default/test/Zilf.Tests.Integration?ref_type=heads
+https://foss.heptapod.net/zilf/zilf/-/tree/branch/default/test/Zilf.Tests/Interpreter?ref_type=heads
+
+I did : hg clone https://foss.heptapod.net/zilf/zilf
+The full source is available as ~/esrc/zilf

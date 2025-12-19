@@ -286,7 +286,7 @@ To add new ZIL features:
 
 ## License
 
-Educational implementation for the Zorkie project.
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](../LICENSE) file for details.
 
 ## Known Limitations
 

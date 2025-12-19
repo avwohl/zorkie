@@ -361,7 +361,7 @@ Adding new opcodes is straightforward:
 
 ## License
 
-Educational implementation for learning compiler design, virtual machines, and historical software preservation.
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
 
 ---
 

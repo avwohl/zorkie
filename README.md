@@ -50,3 +50,7 @@ The output file can be run in any Z-machine interpreter (Frotz, Lectrote, etc.).
 **Limited support for**: ZILF standard library (36% of library files parse successfully)
 
 See [KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for details on unsupported ZILF/MDL constructs.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
