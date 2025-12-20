@@ -1187,3 +1187,566 @@ class TestLowcore:
         """Test LOWCORE with subfield access."""
         AssertRoutine('"AUX" X', "<SET X <LOWCORE (ZVERSION 1)>>").compiles()
         AssertRoutine("", "<LOWCORE (FLAGS 1) 123>").compiles()
+
+
+class TestNot:
+    """Tests for NOT opcode."""
+
+    def test_not(self):
+        """Test NOT opcode."""
+        AssertExpr("<NOT 0>").gives_number("1")
+        AssertExpr("<NOT 123>").gives_number("0")
+
+        AssertExpr("<NOT ,FOO>") \
+            .with_global("<GLOBAL FOO 0>") \
+            .gives_number("1")
+        AssertExpr("<NOT ,FOO>") \
+            .with_global("<GLOBAL FOO 123>") \
+            .gives_number("0")
+
+        AssertRoutine("", '<COND (<NOT 0> <PRINTI "hello">) (T <PRINTI "goodbye">)>') \
+            .outputs("hello")
+        AssertRoutine("", '<COND (<NOT 123> <PRINTI "hello">) (T <PRINTI "goodbye">)>') \
+            .outputs("goodbye")
+
+        AssertRoutine("", '<COND (<NOT ,FOO> <PRINTI "hello">) (T <PRINTI "goodbye">)>') \
+            .with_global("<GLOBAL FOO 0>") \
+            .outputs("hello")
+        AssertRoutine("", '<COND (<NOT ,FOO> <PRINTI "hello">) (T <PRINTI "goodbye">)>') \
+            .with_global("<GLOBAL FOO 123>") \
+            .outputs("goodbye")
+
+    def test_not_error(self):
+        """Test NOT error cases."""
+        AssertExpr("<NOT>").does_not_compile()
+        AssertExpr("<NOT 0 0>").does_not_compile()
+
+        AssertExpr("<COND (<NOT>)>").does_not_compile()
+        AssertExpr("<COND (<NOT 0 0>)>").does_not_compile()
+
+
+class TestIntbl:
+    """Tests for INTBL? opcode (V4+)."""
+
+    def test_intbl_p(self):
+        """Test INTBL? opcode."""
+        # V4 to V6, 3 to 4 operands
+        AssertExpr("<COND (<INTBL? 3 ,MYTABLE 4> 123) (T 456)>") \
+            .in_v4() \
+            .with_global("<GLOBAL MYTABLE <TABLE 1 2 3 4>>") \
+            .gives_number("123")
+
+        AssertExpr("<GET <INTBL? 3 ,MYTABLE 4> 0>") \
+            .in_v4() \
+            .with_global("<GLOBAL MYTABLE <TABLE 1 2 3 4>>") \
+            .gives_number("3")
+
+        AssertExpr("<INTBL? 9 ,MYTABLE 4>") \
+            .in_v4() \
+            .with_global("<GLOBAL MYTABLE <TABLE 1 2 3 4>>") \
+            .gives_number("0")
+
+        # 4th operand is allowed in V5
+        AssertExpr("<GETB <INTBL? 10 ,MYTABLE 9 3> 0>") \
+            .in_v5() \
+            .with_global("<GLOBAL MYTABLE <TABLE (BYTE) 111 111 111 222 222 222 10 123 123>>") \
+            .gives_number("10")
+
+    def test_intbl_p_error(self):
+        """Test INTBL? error cases."""
+        # Only exists in V4+
+        AssertExpr("<INTBL? 0 0 0>").in_v3().does_not_compile()
+
+        # V4 to V6, 3 to 4 operands
+        AssertExpr("<INTBL?>").in_v4().does_not_compile()
+        AssertExpr("<INTBL? 0>").in_v4().does_not_compile()
+        AssertExpr("<INTBL? 0 0>").in_v4().does_not_compile()
+
+        # 4th operand is only allowed in V5
+        AssertExpr("<INTBL? 0 0 0 0>").in_v4().does_not_compile()
+        AssertExpr("<INTBL? 0 0 0 0 0>").in_v5().does_not_compile()
+
+
+class TestSaveUndo:
+    """Tests for ISAVE and IRESTORE opcodes (V5+)."""
+
+    def test_isave(self):
+        """Test ISAVE opcode."""
+        # V5 to V6, 0 operands
+        AssertExpr("<ISAVE>").in_v5().compiles()
+
+    def test_isave_error(self):
+        """Test ISAVE error cases."""
+        # Only exists in V5+
+        AssertExpr("<ISAVE>").in_v4().does_not_compile()
+
+        # V5 to V6, 0 operands
+        AssertExpr("<ISAVE 0>").in_v5().does_not_compile()
+
+    def test_irestore(self):
+        """Test IRESTORE opcode."""
+        # V5 to V6, 0 operands
+        AssertExpr("<IRESTORE>").in_v5().compiles()
+
+    def test_irestore_error(self):
+        """Test IRESTORE error cases."""
+        # Only exists in V5+
+        AssertExpr("<IRESTORE>").in_v4().does_not_compile()
+
+        # V5 to V6, 0 operands
+        AssertExpr("<IRESTORE 0>").in_v5().does_not_compile()
+
+
+class TestLex:
+    """Tests for LEX opcode (V5+)."""
+
+    def test_lex(self):
+        """Test LEX opcode."""
+        # V5 to V6, 2 to 4 operands
+        AssertRoutine("", "<LEX ,TEXTBUF ,LEXBUF> <PRINTB <GET ,LEXBUF 1>>") \
+            .in_v5() \
+            .with_global("<GLOBAL TEXTBUF <TABLE (BYTE) 3 3 !\\c !\\a !\\t>>") \
+            .with_global("<GLOBAL LEXBUF <ITABLE 1 (LEXV) 0 0 0>>") \
+            .with_global("<OBJECT CAT (SYNONYM CAT)>") \
+            .outputs("cat")
+
+        AssertExpr("<LEX 0 0 0>").in_v5().compiles()
+        AssertExpr("<LEX 0 0 0 0>").in_v5().compiles()
+
+    def test_lex_error(self):
+        """Test LEX error cases."""
+        # Only exists in V5+
+        AssertExpr("<LEX>").in_v4().does_not_compile()
+
+        # V5 to V6, 2 to 4 operands
+        AssertExpr("<LEX>").in_v5().does_not_compile()
+        AssertExpr("<LEX 0>").in_v5().does_not_compile()
+        AssertExpr("<LEX 0 0 0 0 0>").in_v5().does_not_compile()
+
+
+class TestPrintExtended:
+    """Tests for extended print opcodes."""
+
+    def test_printb(self):
+        """Test PRINTB opcode."""
+        # V1 to V6, 1 operand
+        AssertExpr("<PRINTB <GETP ,MYOBJECT ,P?SYNONYM>>") \
+            .in_v3() \
+            .with_global("<OBJECT MYOBJECT (SYNONYM HELLO)>") \
+            .outputs("hello")
+
+    def test_printb_error(self):
+        """Test PRINTB error cases."""
+        # V1 to V6, 1 operand
+        AssertExpr("<PRINTB>").in_v3().does_not_compile()
+        AssertExpr("<PRINTB 0 0>").in_v3().does_not_compile()
+
+    def test_printr_error(self):
+        """Test PRINTR error cases."""
+        # V1 to V6
+        AssertExpr("<PRINTR>").does_not_compile()
+        AssertExpr('<PRINTR "foo" "bar">').does_not_compile()
+        AssertExpr("<PRINTR 123>").does_not_compile()
+
+    def test_printt(self):
+        """Test PRINTT opcode - V5+ only."""
+        # V5 to V6, 2 to 4 operands
+        AssertExpr("<PRINTT ,MYTEXT 6>") \
+            .in_v5() \
+            .with_global('<GLOBAL MYTEXT <TABLE (STRING) "hansprestige">>') \
+            .outputs("hanspr\n")
+
+        AssertExpr("<PRINTT ,MYTEXT 4 3>") \
+            .in_v5() \
+            .with_global('<GLOBAL MYTEXT <TABLE (STRING) "hansprestige">>') \
+            .outputs("hans\npres\ntige\n")
+
+        AssertExpr("<PRINTT ,MYTEXT 3 3 1>") \
+            .in_v5() \
+            .with_global('<GLOBAL MYTEXT <TABLE (STRING) "hansprestige">>') \
+            .outputs("han\npre\ntig\n")
+
+    def test_printt_error(self):
+        """Test PRINTT error cases."""
+        # Only exists in V5+
+        AssertExpr("<PRINTT>").in_v4().does_not_compile()
+
+        # V5 to V6, 2 to 4 operands
+        AssertExpr("<PRINTT>").in_v5().does_not_compile()
+        AssertExpr("<PRINTT 0>").in_v5().does_not_compile()
+        AssertExpr("<PRINTT 0 0 0 0 0>").in_v5().does_not_compile()
+
+    def test_printu(self):
+        """Test PRINTU opcode - V5+ only."""
+        # V5 to V6, 1 operand
+        AssertExpr("<PRINTU 65>").in_v5().compiles()
+
+    def test_printu_error(self):
+        """Test PRINTU error cases."""
+        # Only exists in V5+
+        AssertExpr("<PRINTU>").in_v4().does_not_compile()
+
+        # V5 to V6, 1 operand
+        AssertExpr("<PRINTU>").in_v5().does_not_compile()
+        AssertExpr("<PRINTU 0 0>").in_v5().does_not_compile()
+
+
+class TestRead:
+    """Tests for READ opcode."""
+
+    def test_read(self):
+        """Test READ opcode."""
+        # V1 to V3, 2 operands
+        # ,HERE must point to a valid object for status line purposes
+        AssertRoutine("", "<READ ,TEXTBUF ,LEXBUF> <PRINTC <GETB ,TEXTBUF 2>> <PRINTB <GET ,LEXBUF 1>>") \
+            .in_v3() \
+            .with_global("<GLOBAL TEXTBUF <ITABLE 50 (BYTE LENGTH) 0>>") \
+            .with_global("<GLOBAL LEXBUF <ITABLE 1 (LEXV) 0 0 0>>") \
+            .with_global("<OBJECT CAT (SYNONYM CAT)>") \
+            .with_global("<GLOBAL HERE CAT>") \
+            .with_input("cat") \
+            .outputs("acat")
+
+        # V4, 2 to 4 operands
+        AssertExpr("<READ 0 0>").in_v4().compiles()
+        AssertExpr("<READ 0 0 0>").in_v4().compiles()
+        AssertExpr("<READ 0 0 0 0>").in_v4().compiles()
+
+        # V5 to V6, 1 to 4 operands
+        AssertRoutine("", "<PRINTN <READ ,TEXTBUF ,LEXBUF>> <PRINTC <GETB ,TEXTBUF 2>> <PRINTB <GET ,LEXBUF 1>>") \
+            .in_v5() \
+            .with_global("<GLOBAL TEXTBUF <ITABLE 50 (BYTE LENGTH) 0>>") \
+            .with_global("<GLOBAL LEXBUF <ITABLE 1 (LEXV) 0 0 0>>") \
+            .with_global("<OBJECT CAT (SYNONYM CAT)>") \
+            .with_input("cat") \
+            .outputs("13ccat")
+
+        AssertExpr("<READ 0>").in_v5().compiles()
+        AssertExpr("<READ 0 0 0>").in_v5().compiles()
+        AssertExpr("<READ 0 0 0 0>").in_v5().compiles()
+
+    def test_read_error(self):
+        """Test READ error cases."""
+        # V1 to V3, 2 operands
+        AssertExpr("<READ>").in_v3().does_not_compile()
+        AssertExpr("<READ 0>").in_v3().does_not_compile()
+        AssertExpr("<READ 0 0 0>").in_v3().does_not_compile()
+
+        # V4, 2 to 4 operands
+        AssertExpr("<READ>").in_v4().does_not_compile()
+        AssertExpr("<READ 0>").in_v4().does_not_compile()
+        AssertExpr("<READ 0 0 0 0 0>").in_v4().does_not_compile()
+
+        # V5 to V6, 1 to 4 operands
+        AssertExpr("<READ>").in_v5().does_not_compile()
+        AssertExpr("<READ 0 0 0 0 0>").in_v5().does_not_compile()
+
+
+class TestReturnExtended:
+    """Tests for extended return functionality."""
+
+    def test_return_from_block(self):
+        """Test RETURN from PROG block."""
+        AssertRoutine("", "<* 2 <PROG () <RETURN 41>>>").gives_number("82")
+        AssertRoutine("", "<PROG () <RETURN>> 42").gives_number("42")
+
+
+class TestSetQuirks:
+    """Tests for SET/SETG quirks."""
+
+    def test_set_quirks(self):
+        """Test SET and SETG variable scope quirks.
+
+        SET and SETG have different VariableScopeQuirks behavior:
+        - SETG treats a ,GVAL as its first argument as a variable name,
+          but treats an .LVAL as an expression: <SETG ,FOO 1> sets the global FOO,
+          whereas <SETG .FOO 1> sets the variable whose index is in .FOO.
+        - Likewise, SET treats an .LVAL as a variable name but a ,GVAL as an
+          expression: <SET .FOO 1> sets the local FOO, and <SET ,FOO 1> sets the
+          variable whose index is in FOO.
+        """
+        # void context
+        AssertRoutine('"AUX" (FOO 16)', "<SET .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+            .with_global("<GLOBAL MYGLOBAL 1>") \
+            .outputs("123\n1")
+
+        AssertRoutine('"AUX" (FOO 16)', "<SETG ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+            .with_global("<GLOBAL MYGLOBAL 1>") \
+            .outputs("16\n123")
+
+        AssertRoutine('"AUX" (FOO 16)', "<SETG .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+            .with_global("<GLOBAL MYGLOBAL 1>") \
+            .outputs("16\n123")
+
+        AssertRoutine('"AUX" (FOO 16)', "<SET ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+            .with_global("<GLOBAL MYGLOBAL 1>") \
+            .outputs("123\n1")
+
+        # value context (more limited)
+        AssertRoutine('"AUX" (FOO 16)', "<PRINTN <SET .FOO 123>> <CRLF> <PRINTN ,MYGLOBAL>") \
+            .with_global("<GLOBAL MYGLOBAL 1>") \
+            .outputs("123\n1")
+
+        AssertRoutine('"AUX" (FOO 16)', "<PRINTN <SETG ,MYGLOBAL 123>> <CRLF> <PRINTN .FOO>") \
+            .with_global("<GLOBAL MYGLOBAL 1>") \
+            .outputs("123\n16")
+
+
+class TestOriginal:
+    """Tests for ORIGINAL? opcode (V5+)."""
+
+    def test_original_p(self):
+        """Test ORIGINAL? opcode."""
+        # V5 to V6, 0 operands
+        AssertExpr("<ORIGINAL?>").in_v5().gives_number("1")
+
+    def test_original_p_error(self):
+        """Test ORIGINAL? error cases."""
+        # Only exists in V5+
+        AssertExpr("<ORIGINAL?>").in_v4().does_not_compile()
+
+        # V5 to V6, 0 operands
+        AssertExpr("<ORIGINAL? 0>").in_v5().does_not_compile()
+
+
+class TestZwstr:
+    """Tests for ZWSTR opcode (V5+)."""
+
+    def test_zwstr(self):
+        """Test ZWSTR opcode."""
+        # V5 to V6, 4 operands
+        AssertRoutine("", "<ZWSTR ,SRCBUF 5 0 ,DSTBUF> <PRINTB ,DSTBUF>") \
+            .in_v5() \
+            .with_global('<GLOBAL SRCBUF <TABLE (STRING) "hello">>') \
+            .with_global("<GLOBAL DSTBUF <TABLE 0 0 0>>") \
+            .outputs("hello")
+
+    def test_zwstr_error(self):
+        """Test ZWSTR error cases."""
+        # Only exists in V5+
+        AssertExpr("<ZWSTR>").in_v4().does_not_compile()
+
+        # V5 to V6, 4 operands
+        AssertExpr("<ZWSTR>").in_v5().does_not_compile()
+        AssertExpr("<ZWSTR 0>").in_v5().does_not_compile()
+        AssertExpr("<ZWSTR 0 0>").in_v5().does_not_compile()
+        AssertExpr("<ZWSTR 0 0 0>").in_v5().does_not_compile()
+        AssertExpr("<ZWSTR 0 0 0 0 0>").in_v5().does_not_compile()
+
+
+class TestV6Stack:
+    """Tests for V6 stack opcodes."""
+
+    def test_fstack_v6(self):
+        """Test FSTACK opcode - V6 only."""
+        # Only the V6 version is supported in ZIL
+        AssertRoutine("",
+            "<PUSH 123> <PUSH 0> <PUSH 0> <PUSH 0> <FSTACK 3> <POP>") \
+            .in_v6() \
+            .gives_number("123")
+
+        AssertRoutine("",
+            "<FSTACK 3 ,MY-STACK> <GET ,MY-STACK 0>") \
+            .with_global("<GLOBAL MY-STACK <TABLE 0 4 3 2 1>>") \
+            .in_v6() \
+            .gives_number("3")
+
+    def test_fstack_error(self):
+        """Test FSTACK error cases."""
+        # Only the V6 version is supported in ZIL
+        AssertExpr("<FSTACK 0>").in_v3().does_not_compile()
+        AssertExpr("<FSTACK 0>").in_v4().does_not_compile()
+        AssertExpr("<FSTACK 0>").in_v5().does_not_compile()
+
+        AssertExpr("<FSTACK>").in_v6().does_not_compile()
+        AssertExpr("<FSTACK 0 0 0>").in_v6().does_not_compile()
+
+    def test_pop_v6(self):
+        """Test POP opcode - V6 version with user stack."""
+        # V6 to V6, 0 to 1 operands
+        AssertRoutine('"AUX" X', "<PUSH 123> <SET X <POP>> .X") \
+            .in_v6() \
+            .gives_number("123")
+
+        AssertExpr("<POP ,MY-STACK>") \
+            .with_global("<GLOBAL MY-STACK <TABLE 3 0 0 0 123>>") \
+            .in_v6() \
+            .gives_number("123")
+
+    def test_xpush_v6(self):
+        """Test XPUSH opcode - V6 only."""
+        # V6 to V6, 2 operands
+        AssertExpr("<XPUSH 0 0>").in_v6().compiles()
+
+    def test_xpush_error_v6(self):
+        """Test XPUSH error cases."""
+        # Only exists in V6+
+        AssertExpr("<XPUSH>").in_v5().does_not_compile()
+
+        # V6 to V6, 2 operands
+        AssertExpr("<XPUSH>").in_v6().does_not_compile()
+        AssertExpr("<XPUSH 0>").in_v6().does_not_compile()
+        AssertExpr("<XPUSH 0 0 0>").in_v6().does_not_compile()
+
+
+class TestV6Screen:
+    """Tests for V6 screen opcodes."""
+
+    def test_margin_v6(self):
+        """Test MARGIN opcode - V6 only."""
+        # V6 to V6, 2 to 3 operands
+        AssertExpr("<MARGIN 0 0>").in_v6().compiles()
+        AssertExpr("<MARGIN 0 0 0>").in_v6().compiles()
+
+    def test_margin_error_v6(self):
+        """Test MARGIN error cases."""
+        # Only exists in V6+
+        AssertExpr("<MARGIN>").in_v5().does_not_compile()
+
+        # V6 to V6, 2 to 3 operands
+        AssertExpr("<MARGIN 0>").in_v6().does_not_compile()
+        AssertExpr("<MARGIN 0 0 0 0>").in_v6().does_not_compile()
+
+    @pytest.mark.skip(reason="V6 graphics opcodes not implemented")
+    def test_scroll_v6(self):
+        """Test SCROLL opcode - V6 only."""
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<SCROLL>").in_v6().compiles()
+        AssertExpr("<SCROLL 0>").in_v6().compiles()
+        AssertExpr("<SCROLL 0 0>").in_v6().compiles()
+        AssertExpr("<SCROLL 0 0 0>").in_v6().compiles()
+        AssertExpr("<SCROLL 0 0 0 0>").in_v6().compiles()
+
+    def test_scroll_error_v6(self):
+        """Test SCROLL error cases."""
+        # Only exists in V6+
+        AssertExpr("<SCROLL>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<SCROLL 0 0 0 0 0>").in_v6().does_not_compile()
+
+    @pytest.mark.skip(reason="V6 window opcodes not implemented")
+    def test_winattr_v6(self):
+        """Test WINATTR opcode - V6 only."""
+        pass
+
+    def test_winattr_error_v6(self):
+        """Test WINATTR error cases."""
+        # Only exists in V6+
+        AssertExpr("<WINATTR>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<WINATTR 0 0 0 0 0>").in_v6().does_not_compile()
+
+    @pytest.mark.skip(reason="V6 window opcodes not implemented")
+    def test_winget_v6(self):
+        """Test WINGET opcode - V6 only."""
+        pass
+
+    def test_winget_error_v6(self):
+        """Test WINGET error cases."""
+        # Only exists in V6+
+        AssertExpr("<WINGET>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<WINGET 0 0 0 0 0>").in_v6().does_not_compile()
+
+    @pytest.mark.skip(reason="V6 window opcodes not implemented")
+    def test_winpos_v6(self):
+        """Test WINPOS opcode - V6 only."""
+        pass
+
+    def test_winpos_error_v6(self):
+        """Test WINPOS error cases."""
+        # Only exists in V6+
+        AssertExpr("<WINPOS>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<WINPOS 0 0 0 0 0>").in_v6().does_not_compile()
+
+    @pytest.mark.skip(reason="V6 window opcodes not implemented")
+    def test_winput_v6(self):
+        """Test WINPUT opcode - V6 only."""
+        pass
+
+    def test_winput_error_v6(self):
+        """Test WINPUT error cases."""
+        # Only exists in V6+
+        AssertExpr("<WINPUT>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<WINPUT 0 0 0 0 0>").in_v6().does_not_compile()
+
+    @pytest.mark.skip(reason="V6 window opcodes not implemented")
+    def test_winsize_v6(self):
+        """Test WINSIZE opcode - V6 only."""
+        pass
+
+    def test_winsize_error_v6(self):
+        """Test WINSIZE error cases."""
+        # Only exists in V6+
+        AssertExpr("<WINSIZE>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<WINSIZE 0 0 0 0 0>").in_v6().does_not_compile()
+
+
+class TestV6Menu:
+    """Tests for V6 menu opcodes."""
+
+    @pytest.mark.skip(reason="V6 menu opcodes not implemented")
+    def test_menu_v6(self):
+        """Test MENU opcode - V6 only."""
+        pass
+
+    def test_menu_error_v6(self):
+        """Test MENU error cases."""
+        # Only exists in V6+
+        AssertExpr("<MENU>").in_v5().does_not_compile()
+
+
+class TestV6Mouse:
+    """Tests for V6 mouse opcodes."""
+
+    def test_mouse_limit_v6(self):
+        """Test MOUSE-LIMIT opcode - V6 only."""
+        # V6 to V6, 1 operand
+        AssertExpr("<MOUSE-LIMIT 0>").in_v6().compiles()
+
+    def test_mouse_limit_error_v6(self):
+        """Test MOUSE-LIMIT error cases."""
+        # Only exists in V6+
+        AssertExpr("<MOUSE-LIMIT>").in_v5().does_not_compile()
+
+    def test_mouse_info_error_v6(self):
+        """Test MOUSE-INFO error cases."""
+        # Only exists in V6+
+        AssertExpr("<MOUSE-INFO>").in_v5().does_not_compile()
+
+
+class TestV6Graphics:
+    """Tests for V6 graphics opcodes."""
+
+    def test_picinf_error_v6(self):
+        """Test PICINF error cases."""
+        # Only exists in V6+
+        AssertExpr("<PICINF>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<PICINF 0 0 0 0 0>").in_v6().does_not_compile()
+
+    def test_picset_error_v6(self):
+        """Test PICSET error cases."""
+        # Only exists in V6+
+        AssertExpr("<PICSET>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<PICSET 0 0 0 0 0>").in_v6().does_not_compile()
+
+    def test_printf_error_v6(self):
+        """Test PRINTF error cases."""
+        # Only exists in V6+
+        AssertExpr("<PRINTF>").in_v5().does_not_compile()
+
+        # V6 to V6, 0 to 4 operands
+        AssertExpr("<PRINTF 0 0 0 0 0>").in_v6().does_not_compile()

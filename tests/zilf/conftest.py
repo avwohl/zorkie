@@ -95,13 +95,16 @@ class ZILCompiler:
         self.version_directive = directive
         return self
 
-    def compile_routine(self, args: str, body: str) -> CompilationResult:
+    def compile_routine(self, args: str, body: str, call_args: Optional[List[str]] = None,
+                         print_return: bool = True) -> CompilationResult:
         """
         Compile a test routine.
 
         Args:
             args: Routine arguments (e.g., '"AUX" X Y')
             body: Routine body
+            call_args: Optional arguments to pass when calling the routine
+            print_return: If True, GO prints the return value; if False, just calls the routine
 
         Returns:
             CompilationResult with compilation status and artifacts
@@ -132,8 +135,18 @@ class ZILCompiler:
         else:
             source_parts.append(f'<ROUTINE TEST?ROUTINE () {body}>')
 
-        # Add GO routine that calls test routine
-        source_parts.append('<ROUTINE GO () <PRINTN <TEST?ROUTINE>> <QUIT>>')
+        # Add GO routine that calls test routine with optional arguments
+        if call_args:
+            call_str = ' '.join(call_args)
+            if print_return:
+                source_parts.append(f'<ROUTINE GO () <PRINTN <TEST?ROUTINE {call_str}>> <QUIT>>')
+            else:
+                source_parts.append(f'<ROUTINE GO () <TEST?ROUTINE {call_str}> <QUIT>>')
+        else:
+            if print_return:
+                source_parts.append('<ROUTINE GO () <PRINTN <TEST?ROUTINE>> <QUIT>>')
+            else:
+                source_parts.append('<ROUTINE GO () <TEST?ROUTINE> <QUIT>>')
 
         source = "\n".join(source_parts)
         return self._compile(source)
@@ -422,7 +435,8 @@ class ExprAssertion:
     def outputs(self, expected: str) -> None:
         """Assert that the expression produces specific output."""
         compiler = self._get_compiler()
-        result = compiler.compile_routine("", self.expr)
+        # Use print_return=False so GO doesn't print the return value
+        result = compiler.compile_routine("", self.expr, print_return=False)
         assert result.success, f"Compilation failed: {result.errors}"
         self._check_warnings(result)
 
@@ -430,8 +444,10 @@ class ExprAssertion:
             zm = ZMachine(result.story_file, self.version)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
-            assert exec_result.output == expected, \
-                f"Expected output '{expected}', got '{exec_result.output}'"
+            # Strip trailing whitespace from output (dfrotz may add newline)
+            actual = exec_result.output.rstrip()
+            assert actual == expected, \
+                f"Expected output '{expected}', got '{actual}'"
 
     def generates_code_matching(self, pattern: str) -> 'ExprAssertion':
         """Assert that the generated code matches a regex pattern."""
@@ -567,7 +583,7 @@ class RoutineAssertion:
     def gives_number(self, expected: str) -> None:
         """Assert that the routine returns a specific number."""
         compiler = self._get_compiler()
-        result = compiler.compile_routine(self.args, self.body)
+        result = compiler.compile_routine(self.args, self.body, self.call_args)
         assert result.success, f"Compilation failed: {result.errors}"
         self._check_warnings(result)
 
@@ -583,7 +599,8 @@ class RoutineAssertion:
     def outputs(self, expected: str) -> None:
         """Assert that the routine produces specific output."""
         compiler = self._get_compiler()
-        result = compiler.compile_routine(self.args, self.body)
+        # Use print_return=False so GO doesn't print the return value
+        result = compiler.compile_routine(self.args, self.body, self.call_args, print_return=False)
         assert result.success, f"Compilation failed: {result.errors}"
         self._check_warnings(result)
 
@@ -591,8 +608,10 @@ class RoutineAssertion:
             zm = ZMachine(result.story_file, self.version)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
-            assert exec_result.output == expected, \
-                f"Expected output '{expected}', got '{exec_result.output}'"
+            # Strip trailing whitespace from output (dfrotz may add newline)
+            actual = exec_result.output.rstrip()
+            assert actual == expected, \
+                f"Expected output '{expected}', got '{actual}'"
 
     def implies(self, *conditions: str) -> None:
         """Assert that all given conditions are true after execution."""

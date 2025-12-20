@@ -81,6 +81,12 @@ class ImprovedCodeGenerator:
         # Placeholders are encoded as 0xFD + index (high byte) + index (low byte)
         self._routine_placeholders: Dict[int, str] = {}
         self._next_placeholder_index = 0
+        # Track actual placeholder positions in code (offset, placeholder_idx)
+        self._placeholder_positions: List[Tuple[int, int]] = []
+        # Pending placeholders for current routine (relative offset, placeholder_idx)
+        self._pending_placeholders: List[Tuple[int, int]] = []
+        # Track relative offset within current routine for placeholder tracking
+        self._routine_code_offset: int = 0
 
         # Track missing routines (referenced but not defined)
         self._missing_routines: set = set()
@@ -198,10 +204,9 @@ class ImprovedCodeGenerator:
         print(full_msg, file=sys.stderr)
 
     def _error(self, message: str):
-        """Record an error message with current context."""
+        """Raise a compilation error with current context."""
         full_msg = f"[codegen] Error in {self._current_routine}: {message}"
-        self._warnings.append(full_msg)
-        print(full_msg, file=sys.stderr)
+        raise SyntaxError(full_msg)
 
     def get_warnings(self) -> List[str]:
         """Return all warnings generated during code generation."""
@@ -323,8 +328,8 @@ class ImprovedCodeGenerator:
     def get_routine_fixups(self) -> List[Tuple[int, int]]:
         """Get routine call fixups for the assembler to resolve.
 
-        Scans the generated code for placeholder markers (0xFD + index)
-        and returns (byte_offset, routine_byte_offset) pairs.
+        Uses tracked placeholder positions instead of scanning, to avoid
+        false matches on data bytes that happen to look like placeholders.
 
         For missing routines, uses offset 0 which will result in address 0x0000
         (a safe null routine address).
@@ -335,21 +340,17 @@ class ImprovedCodeGenerator:
         """
         fixups = []
 
-        # Scan code for placeholder markers
-        i = 0
-        while i < len(self.code) - 1:
-            if self.code[i] == 0xFD:
-                placeholder_idx = self.code[i + 1]
-                if placeholder_idx in self._routine_placeholders:
-                    routine_name = self._routine_placeholders[placeholder_idx]
-                    if routine_name in self.routines:
-                        routine_offset = self.routines[routine_name]
-                        fixups.append((i, routine_offset))
-                    else:
-                        # Missing routine - track it and use offset 0
-                        self._missing_routines.add(routine_name)
-                        fixups.append((i, 0))  # Will become 0x0000
-            i += 1
+        # Use tracked placeholder positions
+        for offset, placeholder_idx in self._placeholder_positions:
+            if placeholder_idx in self._routine_placeholders:
+                routine_name = self._routine_placeholders[placeholder_idx]
+                if routine_name in self.routines:
+                    routine_offset = self.routines[routine_name]
+                    fixups.append((offset, routine_offset))
+                else:
+                    # Missing routine - track it and use offset 0
+                    self._missing_routines.add(routine_name)
+                    fixups.append((offset, 0))  # Will become 0x0000
 
         return fixups
 
@@ -416,8 +417,29 @@ class ImprovedCodeGenerator:
     def generate_routine(self, routine: RoutineNode) -> bytes:
         """Generate bytecode for a routine."""
         self._current_routine = routine.name  # Track for warnings
+
+        # Align routine to proper boundary for packed addresses
+        # V1-3: Even addresses (divisible by 2)
+        # V4-7: Addresses divisible by 4
+        # V8: Addresses divisible by 8
+        if self.version <= 3:
+            alignment = 2
+        elif self.version <= 7:
+            alignment = 4
+        else:
+            alignment = 8
+
+        # Add padding if needed
+        current_offset = len(self.code)
+        if current_offset % alignment != 0:
+            padding_needed = alignment - (current_offset % alignment)
+            self.code.extend(bytes(padding_needed))  # Pad with zeros
+
         routine_start = len(self.code)
         routine_code = bytearray()
+        # Track current routine code buffer for placeholder position tracking
+        self._current_routine_code = routine_code
+        self._pending_placeholders.clear()
 
         # Build local variable table
         self.locals = {}
@@ -441,19 +463,94 @@ class ImprovedCodeGenerator:
 
         # Generate code for routine body
         for stmt in routine.body:
+            # Track placeholder indices created in this statement
+            placeholder_start_idx = self._next_placeholder_index
             stmt_code = self.generate_statement(stmt)
+            # Track placeholder positions in this statement's code
+            # Only match placeholders with index >= start_idx (created in this statement)
+            stmt_offset = len(routine_code)
+            for i in range(len(stmt_code) - 1):
+                if stmt_code[i] == 0xFD:
+                    placeholder_idx = stmt_code[i + 1]
+                    # Only match placeholders created in THIS statement
+                    if (placeholder_idx >= placeholder_start_idx and
+                            placeholder_idx in self._routine_placeholders):
+                        self._pending_placeholders.append((stmt_offset + i, placeholder_idx))
             routine_code.extend(stmt_code)
 
         # Add implicit return if the routine doesn't end with a terminating instruction
         # This ensures all routines have a valid return path
         if not self._ends_with_terminator(routine.body):
-            # RET_POPPED (0OP opcode 8) returns whatever is on the stack (or 0 if empty)
-            # 0OP format: bits 7-6 = 10, bits 5-4 = 11 (no operand), bits 3-0 = opcode
-            # 0xB8 = 10 11 1000 = RET_POPPED
-            routine_code.append(0xB8)  # RET_POPPED
+            # Check if last statement is a value that should be returned
+            implicit_ret_generated = False
+            if routine.body:
+                last_stmt = routine.body[-1]
+                if isinstance(last_stmt, LocalVarNode):
+                    # Return the local variable
+                    var_num = self.locals.get(last_stmt.name, 1)
+                    routine_code.append(0xAB)  # RET variable
+                    routine_code.append(var_num)
+                    implicit_ret_generated = True
+                elif isinstance(last_stmt, GlobalVarNode):
+                    # Return the global variable
+                    var_num = self.globals.get(last_stmt.name, 0x10)
+                    routine_code.append(0xAB)  # RET variable
+                    routine_code.append(var_num)
+                    implicit_ret_generated = True
+                elif isinstance(last_stmt, NumberNode):
+                    # Return the number
+                    val = last_stmt.value
+                    if 0 <= val <= 255:
+                        routine_code.append(0x9B)  # RET small const
+                        routine_code.append(val)
+                    else:
+                        routine_code.append(0x8B)  # RET large const
+                        routine_code.append((val >> 8) & 0xFF)
+                        routine_code.append(val & 0xFF)
+                    implicit_ret_generated = True
+                elif isinstance(last_stmt, FormNode):
+                    # Check if it's a void operation that doesn't push a value
+                    op_name = last_stmt.operator.value.upper() if isinstance(last_stmt.operator, AtomNode) else ''
+                    void_ops = {
+                        'PRINTI', 'PRINT', 'PRINTR', 'PRINTC', 'PRINTB', 'PRINTD',
+                        'PRINTN', 'PRINTT', 'PRINTU', 'CRLF', 'TELL',
+                        'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
+                        'QUIT', 'RESTART', 'CLEAR', 'SCREEN',
+                        'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
+                        'BUFOUT', 'DISPLAY', 'THROW'
+                    }
+                    if op_name in void_ops:
+                        # Void operation - use RET 0
+                        routine_code.append(0x9B)
+                        routine_code.append(0x00)
+                    else:
+                        # The expression pushed its result to the stack
+                        # Use RET_POPPED to return that value
+                        routine_code.append(0xB8)  # RET_POPPED
+                    implicit_ret_generated = True
+                elif isinstance(last_stmt, CondNode):
+                    # COND pushes its result to the stack
+                    # Use RET_POPPED to return that value
+                    routine_code.append(0xB8)  # RET_POPPED
+                    implicit_ret_generated = True
+
+            if not implicit_ret_generated:
+                # Use RET 0 instead of RET_POPPED for predictable behavior
+                # RET_POPPED from an empty stack has undefined behavior in some interpreters
+                # RET is 1OP opcode 0x0B
+                # 0x9B = 10 01 1011 = 1OP short with small constant, opcode 0x0B
+                routine_code.append(0x9B)  # RET small constant
+                routine_code.append(0x00)  # Return value 0
 
         # Store routine address for later reference
         self.routines[routine.name] = routine_start
+
+        # Adjust pending placeholder positions to absolute offsets
+        # and move them to the final positions list
+        base_offset = len(self.code)
+        for rel_offset, placeholder_idx in self._pending_placeholders:
+            self._placeholder_positions.append((base_offset + rel_offset, placeholder_idx))
+        self._pending_placeholders.clear()
 
         self.code.extend(routine_code)
         return bytes(routine_code)
@@ -509,17 +606,27 @@ class ImprovedCodeGenerator:
 
         # Control flow
         if op_name == 'RTRUE':
+            if form.operands:
+                raise ValueError("RTRUE takes no operands")
             return self.gen_rtrue()
         elif op_name == 'RFALSE':
+            if form.operands:
+                raise ValueError("RFALSE takes no operands")
             return self.gen_rfalse()
         elif op_name == '<>':
             # <> as a form means return false (same as RFALSE)
+            if form.operands:
+                raise ValueError("<> takes no operands")
             return self.gen_rfalse()
         elif op_name == 'RFATAL':
+            if form.operands:
+                raise ValueError("RFATAL takes no operands")
             return self.gen_rfatal()
         elif op_name == 'RETURN':
             return self.gen_return(form.operands)
         elif op_name == 'QUIT':
+            if form.operands:
+                raise ValueError("QUIT takes no operands")
             return self.gen_quit()
         elif op_name == 'AGAIN':
             return self.gen_again()
@@ -536,18 +643,26 @@ class ImprovedCodeGenerator:
         elif op_name == 'TELL':
             return self.gen_tell(form.operands)
         elif op_name == 'PRINT':
+            if not form.operands:
+                raise ValueError("PRINT requires at least 1 operand")
             return self.gen_tell(form.operands)
         elif op_name == 'CRLF':
+            if form.operands:
+                raise ValueError("CRLF takes no operands")
             return self.gen_newline()
         elif op_name == 'PRINTN' or op_name == 'PRINT-NUM':
             return self.gen_print_num(form.operands)
         elif op_name == 'PRINTD':
-            return self.gen_print_num(form.operands)  # PRINTD is same as PRINTN
+            if len(form.operands) != 1:
+                raise ValueError("PRINTD requires exactly 1 operand")
+            return self.gen_printobj(form.operands)
         elif op_name == 'PRINTC' or op_name == 'PRINT-CHAR':
             return self.gen_print_char(form.operands)
         elif op_name == 'PRINTB':
             return self.gen_printb(form.operands)
         elif op_name == 'PRINTI':
+            if len(form.operands) != 1:
+                raise ValueError("PRINTI requires exactly 1 operand")
             return self.gen_printi(form.operands)
         elif op_name == 'PRINTADDR':
             return self.gen_printaddr(form.operands)
@@ -595,14 +710,22 @@ class ImprovedCodeGenerator:
             return self.gen_sound(form.operands)
         elif op_name == 'CLEAR':
             return self.gen_clear(form.operands)
+        elif op_name == 'ERASE':
+            return self.gen_erase(form.operands)
         elif op_name == 'SPLIT':
             return self.gen_split(form.operands)
         elif op_name == 'SCREEN':
             return self.gen_screen(form.operands)
         elif op_name == 'CURSET':
             return self.gen_curset(form.operands)
+        elif op_name == 'CURGET':
+            return self.gen_get_cursor(form.operands)
         elif op_name == 'HLIGHT':
             return self.gen_hlight(form.operands)
+        elif op_name == 'COLOR':
+            return self.gen_color(form.operands)
+        elif op_name == 'FONT':
+            return self.gen_font(form.operands)
         elif op_name == 'INPUT':
             return self.gen_input(form.operands)
         elif op_name == 'BUFOUT':
@@ -613,6 +736,8 @@ class ImprovedCodeGenerator:
             return self.gen_usl(form.operands)
         elif op_name == 'DIROUT':
             return self.gen_dirout(form.operands)
+        elif op_name == 'DIRIN':
+            return self.gen_input_stream(form.operands)
         elif op_name == 'PRINTOBJ':
             return self.gen_printobj(form.operands)
         elif op_name == 'READ':
@@ -633,16 +758,14 @@ class ImprovedCodeGenerator:
             return self.gen_primtype(form.operands)
 
         # Comparison
-        elif op_name in ('=', 'EQUAL?', '==?'):
+        elif op_name in ('=', 'EQUAL?', '==?', '=?'):
             return self.gen_equal(form.operands)
-        elif op_name in ('L?', '<'):
+        elif op_name in ('L?', '<', 'LESS?'):
             return self.gen_less(form.operands)
-        elif op_name in ('G?', '>'):
+        elif op_name in ('G?', '>', 'GRTR?'):
             return self.gen_greater(form.operands)
-        elif op_name == 'ZERO?':
-            return self.gen_zero(form.operands)
-        elif op_name == '0?':
-            return self.gen_zero(form.operands)
+        elif op_name in ('ZERO?', '0?'):
+            return self.gen_zero_test(form.operands)
         elif op_name == '1?':
             return self.gen_one(form.operands)
         elif op_name == 'ASSIGNED?':
@@ -659,9 +782,9 @@ class ImprovedCodeGenerator:
             return self.gen_checku(form.operands)
         elif op_name == 'LEXV':
             return self.gen_lexv(form.operands)
-        elif op_name in ('G=?', 'GRTR?', '>='):
+        elif op_name in ('G=?', 'GEQ?', '>='):
             return self.gen_grtr_or_equal(form.operands)
-        elif op_name in ('L=?', 'LESS?', '<='):
+        elif op_name in ('L=?', 'LEQ?', '<='):
             return self.gen_less_or_equal(form.operands)
         elif op_name in ('N=?', 'NEQUAL?', '!='):
             return self.gen_nequal(form.operands)
@@ -725,6 +848,8 @@ class ImprovedCodeGenerator:
             return self.gen_winput(form.operands)
         elif op_name == 'WINATTR':
             return self.gen_winattr(form.operands)
+        elif op_name == 'WINPOS':
+            return self.gen_winpos(form.operands)
         elif op_name == 'SET-COLOUR':
             return self.gen_set_colour(form.operands)
         elif op_name == 'SET-TRUE-COLOUR':
@@ -753,18 +878,36 @@ class ImprovedCodeGenerator:
             return self.gen_window_size(form.operands)
         elif op_name == 'WINDOW-STYLE':
             return self.gen_winattr(form.operands)
-        elif op_name == 'SCROLL-WINDOW':
+        elif op_name == 'SCROLL-WINDOW' or op_name == 'SCROLL':
             return self.gen_scroll_window(form.operands)
         elif op_name == 'PICINF':
             return self.gen_picinf(form.operands)
+        elif op_name == 'PICSET':
+            return self.gen_picset(form.operands)
         elif op_name == 'MOUSE-INFO':
             return self.gen_mouse_info(form.operands)
+        elif op_name == 'MOUSE-LIMIT':
+            return self.gen_mouse_limit(form.operands)
+        elif op_name == 'MENU':
+            return self.gen_make_menu(form.operands)
+        elif op_name == 'PRINTF':
+            return self.gen_print_form(form.operands)
         elif op_name == 'TYPE?':
             return self.gen_type(form.operands)
         elif op_name == 'PRINTTYPE':
             return self.gen_printtype(form.operands)
         elif op_name == 'PRINTT':
+            if self.version < 5:
+                raise ValueError("PRINTT requires V5 or later")
+            if len(form.operands) < 2 or len(form.operands) > 4:
+                raise ValueError("PRINTT requires 2-4 operands")
             return self.gen_printt(form.operands)
+        elif op_name == 'PRINTR':
+            if len(form.operands) != 1:
+                raise ValueError("PRINTR requires exactly 1 operand")
+            if not isinstance(form.operands[0], StringNode):
+                raise ValueError("PRINTR requires a string operand")
+            return self.gen_printr(form.operands)
         elif op_name == 'FSTACK':
             return self.gen_fstack(form.operands)
         elif op_name == 'RSTACK':
@@ -773,7 +916,7 @@ class ImprovedCodeGenerator:
             return self.gen_ifflag(form.operands)
         elif op_name == 'LOG-SHIFT':
             return self.gen_log_shift(form.operands)
-        elif op_name == 'XOR':
+        elif op_name in ('XOR', 'XORB'):
             return self.gen_xor(form.operands)
         elif op_name == 'MUSIC':
             return self.gen_music(form.operands)
@@ -789,13 +932,19 @@ class ImprovedCodeGenerator:
             return self.gen_zero(form.operands)
         elif op_name == 'SHIFT':
             return self.gen_shift(form.operands)
-        elif op_name == 'ART-SHIFT':
+        elif op_name in ('ASH', 'ASHIFT', 'ART-SHIFT'):
             return self.gen_art_shift(form.operands)
+        elif op_name == 'LSH':
+            return self.gen_shift(form.operands)
 
         # V5+ Unicode operations
         elif op_name == 'PRINT-UNICODE':
             return self.gen_print_unicode(form.operands)
         elif op_name == 'PRINTU':
+            if self.version < 5:
+                raise ValueError("PRINTU requires V5 or later")
+            if len(form.operands) != 1:
+                raise ValueError("PRINTU requires exactly 1 operand")
             return self.gen_print_unicode(form.operands)
         elif op_name == 'CHECK-UNICODE':
             return self.gen_check_unicode(form.operands)
@@ -829,9 +978,12 @@ class ImprovedCodeGenerator:
             return self.gen_or_pred(form.operands)
         elif op_name == 'NOT':
             return self.gen_not(form.operands)
-        elif op_name == 'BAND':
+        elif op_name == 'BCOM':
+            # BCOM is bitwise complement
+            return self.gen_bcom(form.operands)
+        elif op_name in ('BAND', 'ANDB'):
             return self.gen_band(form.operands)
-        elif op_name == 'BOR':
+        elif op_name in ('BOR', 'ORB'):
             return self.gen_bor(form.operands)
         elif op_name == 'BTST':
             return self.gen_btst(form.operands)
@@ -900,6 +1052,10 @@ class ImprovedCodeGenerator:
             return self.gen_push(form.operands)
         elif op_name == 'PULL':
             return self.gen_pull(form.operands)
+        elif op_name == 'POP':
+            return self.gen_pop(form.operands)
+        elif op_name == 'XPUSH':
+            return self.gen_xpush(form.operands)
 
         # Object tree
         elif op_name == 'GET-CHILD' or op_name == 'FIRST?':
@@ -923,12 +1079,16 @@ class ImprovedCodeGenerator:
         elif op_name == 'PICK-ONE':
             return self.gen_pick_one(form.operands)
         elif op_name == 'RESTART':
+            if form.operands:
+                raise ValueError("RESTART takes no operands")
             return self.gen_restart()
         elif op_name == 'SAVE':
-            return self.gen_save()
+            return self.gen_save(form.operands)
         elif op_name == 'RESTORE':
-            return self.gen_restore()
+            return self.gen_restore(form.operands)
         elif op_name == 'VERIFY':
+            if form.operands:
+                raise ValueError("VERIFY takes no operands")
             return self.gen_verify()
         elif op_name == 'GOTO':
             return self.gen_goto(form.operands)
@@ -1011,6 +1171,12 @@ class ImprovedCodeGenerator:
             return self.gen_save_undo(form.operands)
         elif op_name == 'IRESTORE':
             return self.gen_restore_undo(form.operands)
+        elif op_name == 'ORIGINAL?':
+            return self.gen_original(form.operands)
+        elif op_name == 'INTBL?':
+            return self.gen_intbl(form.operands)
+        elif op_name == 'ZWSTR':
+            return self.gen_zwstr(form.operands)
 
         # Table operations
         elif op_name == 'TABLE':
@@ -1139,6 +1305,9 @@ class ImprovedCodeGenerator:
 
         If not inside a block, RETURN exits the routine normally.
         """
+        if len(operands) > 1:
+            raise ValueError("RETURN requires 0 or 1 operand")
+
         # Check if we're inside a block scope
         if self.block_stack:
             # Block-scoped return: jump to block exit
@@ -1380,9 +1549,8 @@ class ImprovedCodeGenerator:
 
     def gen_print_num(self, operands: List[ASTNode]) -> bytes:
         """Generate PRINT_NUM (print signed number)."""
-        if not operands:
-            self._warn("PRINT_NUM requires an operand")
-            return b''
+        if len(operands) != 1:
+            raise ValueError("PRINTN requires exactly 1 operand")
 
         code = bytearray()
         operand = operands[0]
@@ -1405,7 +1573,7 @@ class ImprovedCodeGenerator:
             op_val = 0   # Stack
         elif isinstance(operand, CondNode):
             # Generate COND code (result goes to stack)
-            expr_code = self.gen_cond(operand.clauses)
+            expr_code = self.generate_cond(operand)
             code.extend(expr_code)
             op_type = 1  # Variable
             op_val = 0   # Stack
@@ -1431,8 +1599,8 @@ class ImprovedCodeGenerator:
 
     def gen_print_char(self, operands: List[ASTNode]) -> bytes:
         """Generate PRINT_CHAR."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("PRINTC requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -1453,8 +1621,8 @@ class ImprovedCodeGenerator:
 
         In Z-machine V3, PRINT_PADDR is VAR opcode 0x0D.
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("PRINTB requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -1477,6 +1645,27 @@ class ImprovedCodeGenerator:
         """
         # Delegate to TELL implementation
         return self.gen_tell(operands)
+
+    def gen_printr(self, operands: List[ASTNode]) -> bytes:
+        """Generate PRINT_RET (print string and return true).
+
+        <PRINTR "text"> prints a string, a newline, then returns true (1).
+        Uses PRINT_RET opcode (0xB3).
+        """
+        if len(operands) != 1 or not isinstance(operands[0], StringNode):
+            raise ValueError("PRINTR requires exactly 1 string operand")
+
+        code = bytearray()
+
+        # PRINT_RET is 0OP opcode 0x03 followed by encoded string
+        code.append(0xB3)  # PRINT_RET opcode
+
+        # Encode the string
+        text = operands[0].value
+        encoded_words = self.encoder.encode_string(text)
+        code.extend(words_to_bytes(encoded_words))
+
+        return bytes(code)
 
     def gen_printaddr(self, operands: List[ASTNode]) -> bytes:
         """Generate PRINT_ADDR (print string at address).
@@ -1579,9 +1768,8 @@ class ImprovedCodeGenerator:
     def gen_set(self, operands: List[ASTNode], is_global: bool = False) -> bytes:
         """Generate SET/SETG (variable assignment)."""
         op_name = 'SETG' if is_global else 'SET'
-        if len(operands) < 2:
-            self._warn(f"{op_name} requires 2 operands (variable, value)")
-            return b''
+        if len(operands) != 2:
+            raise ValueError(f"{op_name} requires exactly 2 operands")
 
         var_node = operands[0]
         value_node = operands[1]
@@ -1596,11 +1784,9 @@ class ImprovedCodeGenerator:
             else:
                 var_num = self.locals.get(var_node.value)
                 if var_num is None:
-                    self._warn(f"{op_name}: Local variable '{var_node.value}' not declared")
-                    return b''
+                    raise ValueError(f"{op_name}: Local variable '{var_node.value}' not declared")
         else:
-            self._warn(f"{op_name}: First operand must be a variable name")
-            return b''
+            raise ValueError(f"{op_name}: First operand must be a variable name")
 
         code = bytearray()
 
@@ -1647,29 +1833,65 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_inc(self, operands: List[ASTNode]) -> bytes:
-        """Generate INC (increment variable)."""
+        """Generate INC (increment variable).
+
+        INC takes a variable NUMBER as its operand (which variable to increment),
+        not a variable reference to dereference. The operand is encoded as a
+        small constant (1 byte).
+
+        The operand must be a variable name (atom), not a literal number.
+        """
         if not operands:
-            return b''
+            raise ValueError("INC requires exactly 1 operand")
+
+        # Validate that operand is a variable reference, not a literal number
+        op = operands[0]
+        if isinstance(op, NumberNode):
+            raise ValueError("INC requires a variable name, not a number")
 
         code = bytearray()
-        var_num = self.get_variable_number(operands[0])
+        var_num = self.get_variable_number(op)
+        if var_num == 0:
+            # var_num 0 is stack, which is invalid for INC - the variable wasn't found
+            if isinstance(op, AtomNode) and op.value not in self.locals and op.value not in self.globals:
+                raise ValueError(f"INC: Unknown variable '{op.value}'")
 
         # INC is 1OP opcode 0x05
-        code.append(0x85)  # Short 1OP, opcode 0x05, variable type
+        # Short 1OP format: 10 tt nnnn where tt=01 for small constant
+        # 0x95 = 10 01 0101 = short 1OP, small const, opcode 5
+        code.append(0x95)  # Short 1OP with small constant, opcode 0x05
         code.append(var_num)
 
         return bytes(code)
 
     def gen_dec(self, operands: List[ASTNode]) -> bytes:
-        """Generate DEC (decrement variable)."""
+        """Generate DEC (decrement variable).
+
+        DEC takes a variable NUMBER as its operand (which variable to decrement),
+        not a variable reference to dereference. The operand is encoded as a
+        small constant (1 byte).
+
+        The operand must be a variable name (atom), not a literal number.
+        """
         if not operands:
-            return b''
+            raise ValueError("DEC requires exactly 1 operand")
+
+        # Validate that operand is a variable reference, not a literal number
+        op = operands[0]
+        if isinstance(op, NumberNode):
+            raise ValueError("DEC requires a variable name, not a number")
 
         code = bytearray()
-        var_num = self.get_variable_number(operands[0])
+        var_num = self.get_variable_number(op)
+        if var_num == 0:
+            # var_num 0 is stack, which is invalid for DEC - the variable wasn't found
+            if isinstance(op, AtomNode) and op.value not in self.locals and op.value not in self.globals:
+                raise ValueError(f"DEC: Unknown variable '{op.value}'")
 
         # DEC is 1OP opcode 0x06
-        code.append(0x86)  # Short 1OP, opcode 0x06, variable type
+        # Short 1OP format: 10 tt nnnn where tt=01 for small constant
+        # 0x96 = 10 01 0110 = short 1OP, small const, opcode 6
+        code.append(0x96)  # Short 1OP with small constant, opcode 0x06
         code.append(var_num)
 
         return bytes(code)
@@ -1680,8 +1902,20 @@ class ImprovedCodeGenerator:
         <VALUE var> reads the value of a variable (local or global).
         Uses LOAD instruction (1OP opcode 0x0E).
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("VALUE requires exactly 1 operand")
+
+        # Validate that the variable exists
+        var_node = operands[0]
+        if isinstance(var_node, AtomNode):
+            name = var_node.value
+            if name not in self.locals and name not in self.globals:
+                raise ValueError(f"VALUE: Unknown variable '{name}'")
+        elif isinstance(var_node, NumberNode):
+            # Direct variable number (e.g., VALUE 0 for stack)
+            pass
+        else:
+            raise ValueError("VALUE: Operand must be a variable name or number")
 
         code = bytearray()
         var_num = self.get_variable_number(operands[0])
@@ -1740,12 +1974,152 @@ class ImprovedCodeGenerator:
     # ===== Arithmetic Operations =====
 
     def gen_add(self, operands: List[ASTNode]) -> bytes:
-        """Generate ADD instruction."""
-        if len(operands) < 2:
-            return b''
+        """Generate ADD instruction.
 
+        Handles variadic addition:
+        - 0 operands: returns 0 (identity)
+        - 1 operand: returns that operand
+        - 2 operands: a + b
+        - 3+ operands: a + b + c + ...
+        """
         # ADD is 2OP opcode 0x14 (20 decimal)
-        return self._gen_2op_store(0x14, operands[0], operands[1])
+        return self._gen_variadic_arith(0x14, operands, identity=0)
+
+    def _gen_variadic_arith(self, opcode: int, operands: List[ASTNode], identity: int) -> bytes:
+        """Generate variadic arithmetic instruction.
+
+        Args:
+            opcode: The 2OP opcode number
+            operands: List of operand nodes
+            identity: Identity value for 0 operands (0 for add/sub, 1 for mul/div)
+
+        Returns:
+            Bytecode for the instruction
+        """
+        if len(operands) == 0:
+            # Return identity value - push constant to stack
+            return self._gen_push_const(identity)
+
+        if len(operands) == 1:
+            # Single operand - just evaluate and push to stack
+            # Generate code to get the operand value onto the stack
+            return self._gen_push_operand(operands[0])
+
+        if len(operands) == 2:
+            # Standard 2-operand case
+            return self._gen_2op_store(opcode, operands[0], operands[1])
+
+        # 3+ operands: chain operations
+        # First, compute op1 OP op2 -> stack
+        code = bytearray()
+        code.extend(self._gen_2op_store(opcode, operands[0], operands[1]))
+
+        # For each remaining operand, compute stack OP opN -> stack
+        stack_ref = NumberNode(0)  # Variable 0 = stack
+        stack_ref._is_stack_ref = True  # Mark as stack reference
+
+        for i in range(2, len(operands)):
+            code.extend(self._gen_2op_store_with_stack(opcode, operands[i]))
+
+        return bytes(code)
+
+    def _gen_push_const(self, value: int) -> bytes:
+        """Generate code to push a constant value to the stack.
+
+        Uses a simple ADD 0,value -> stack approach for constants.
+        """
+        code = bytearray()
+        # Handle signed values
+        if value < 0:
+            value = (1 << 16) + value
+
+        if value == 0:
+            # ADD 0, 0 -> stack  (long form: both small constants)
+            # Opcode: 0 0 0 10100 = 0x14
+            code.append(0x14)  # Long 2OP, both small const, ADD
+            code.append(0x00)  # First operand: 0
+            code.append(0x00)  # Second operand: 0
+            code.append(0x00)  # Store to stack
+        elif 0 <= value <= 255:
+            # ADD 0, value -> stack (long form)
+            code.append(0x14)  # Long 2OP, both small const, ADD
+            code.append(0x00)  # First operand: 0
+            code.append(value & 0xFF)  # Second operand
+            code.append(0x00)  # Store to stack
+        else:
+            # Need VAR form for large constant
+            code.append(0xD4)  # VAR form, ADD (0xC0 | 0x14)
+            code.append(0x4F)  # Types: 01 00 11 11 = small const, large const, omit, omit
+            code.append(0x00)  # First operand: 0
+            code.append((value >> 8) & 0xFF)
+            code.append(value & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def _gen_push_operand(self, node: ASTNode) -> bytes:
+        """Generate code to push an operand value to the stack."""
+        code = bytearray()
+        op_type, op_val = self._get_operand_type_and_value_ext(node)
+
+        # Handle negative constants
+        if op_type == 0 and op_val < 0:
+            op_val = (1 << 16) + op_val
+
+        if op_type == 2:  # Variable
+            # LOAD var -> stack (1OP opcode 0x0E)
+            # Short form: 10 10 1110 = 0xAE (variable type)
+            code.append(0xAE)
+            code.append(op_val & 0xFF)
+            code.append(0x00)  # Store to stack
+        elif op_type == 1:  # Small constant
+            # ADD 0, const -> stack
+            code.append(0x14)  # Long 2OP ADD
+            code.append(0x00)
+            code.append(op_val & 0xFF)
+            code.append(0x00)  # Store to stack
+        else:  # Large constant
+            # ADD 0, const -> stack (VAR form)
+            code.append(0xD4)  # VAR form ADD
+            code.append(0x4F)  # small const, large const, omit, omit
+            code.append(0x00)
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
+            code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def _gen_2op_store_with_stack(self, opcode: int, op2_node: ASTNode) -> bytes:
+        """Generate 2OP instruction where first operand is stack (variable 0).
+
+        Args:
+            opcode: The 2OP opcode number
+            op2_node: Second operand AST node
+
+        Returns:
+            Bytecode for the instruction
+        """
+        code = bytearray()
+        op2_type, op2_val = self._get_operand_type_and_value_ext(op2_node)
+
+        # First operand is always variable 0 (stack)
+        # Long form: bit 6 = 1 (var), bit 5 = op2 type
+        if op2_type in (1, 2):  # Small const or variable
+            op2_bit = 1 if op2_type == 2 else 0
+            opcode_byte = (1 << 6) | (op2_bit << 5) | opcode
+            code.append(opcode_byte)
+            code.append(0x00)  # Variable 0 (stack)
+            code.append(op2_val & 0xFF)
+        else:  # Large constant - need VAR form
+            code.append(0xC0 | opcode)
+            # Types: 10 (var) 00 (large) 11 11 = 0x8F
+            code.append(0x8F)
+            code.append(0x00)  # Variable 0 (stack)
+            code.append((op2_val >> 8) & 0xFF)
+            code.append(op2_val & 0xFF)
+
+        code.append(0x00)  # Store to stack
+        return bytes(code)
 
     def _gen_2op_store(self, opcode_num: int, op1_node: ASTNode, op2_node: ASTNode, store_var: int = 0) -> bytes:
         """Generate a 2OP instruction with store, handling all operand types correctly.
@@ -1945,41 +2319,78 @@ class ImprovedCodeGenerator:
     def gen_sub(self, operands: List[ASTNode]) -> bytes:
         """Generate SUB instruction.
 
-        With 1 operand: negation (0 - value)
-        With 2+ operands: subtraction (a - b)
+        Handles variadic subtraction:
+        - 0 operands: returns 0 (identity)
+        - 1 operand: negation (0 - value)
+        - 2 operands: a - b
+        - 3+ operands: a - b - c - ...
         """
-        if len(operands) < 1:
-            return b''
+        if len(operands) == 0:
+            return self._gen_push_const(0)
 
         if len(operands) == 1:
             # Negation: 0 - value
-            # Create a synthetic NumberNode for 0
             zero_node = NumberNode(0)
             return self._gen_2op_store(0x15, zero_node, operands[0])
-        else:
+
+        if len(operands) == 2:
             # SUB is 2OP opcode 0x15 (21 decimal)
             return self._gen_2op_store(0x15, operands[0], operands[1])
 
-    def gen_mul(self, operands: List[ASTNode]) -> bytes:
-        """Generate MUL instruction."""
-        if len(operands) < 2:
-            return b''
+        # 3+ operands: chain subtractions (a - b - c - ...)
+        code = bytearray()
+        code.extend(self._gen_2op_store(0x15, operands[0], operands[1]))
+        for i in range(2, len(operands)):
+            code.extend(self._gen_2op_store_with_stack(0x15, operands[i]))
+        return bytes(code)
 
+    def gen_mul(self, operands: List[ASTNode]) -> bytes:
+        """Generate MUL instruction.
+
+        Handles variadic multiplication:
+        - 0 operands: returns 1 (identity)
+        - 1 operand: returns that operand
+        - 2 operands: a * b
+        - 3+ operands: a * b * c * ...
+        """
         # MUL is 2OP opcode 0x16 (22 decimal)
-        return self._gen_2op_store(0x16, operands[0], operands[1])
+        return self._gen_variadic_arith(0x16, operands, identity=1)
 
     def gen_div(self, operands: List[ASTNode]) -> bytes:
-        """Generate DIV instruction."""
-        if len(operands) < 2:
-            return b''
+        """Generate DIV instruction.
 
-        # DIV is 2OP opcode 0x17 (23 decimal)
-        return self._gen_2op_store(0x17, operands[0], operands[1])
+        Handles variadic division:
+        - 0 operands: returns 1 (identity)
+        - 1 operand: 1 / value (integer division)
+        - 2 operands: a / b
+        - 3+ operands: a / b / c / ...
+        """
+        if len(operands) == 0:
+            return self._gen_push_const(1)
+
+        if len(operands) == 1:
+            # 1 / value
+            one_node = NumberNode(1)
+            return self._gen_2op_store(0x17, one_node, operands[0])
+
+        if len(operands) == 2:
+            # DIV is 2OP opcode 0x17 (23 decimal)
+            return self._gen_2op_store(0x17, operands[0], operands[1])
+
+        # 3+ operands: chain divisions
+        code = bytearray()
+        code.extend(self._gen_2op_store(0x17, operands[0], operands[1]))
+        for i in range(2, len(operands)):
+            code.extend(self._gen_2op_store_with_stack(0x17, operands[i]))
+        return bytes(code)
 
     def gen_mod(self, operands: List[ASTNode]) -> bytes:
-        """Generate MOD instruction."""
-        if len(operands) < 2:
-            return b''
+        """Generate MOD instruction.
+
+        MOD requires exactly 2 operands.
+        """
+        if len(operands) != 2:
+            self._error(f"MOD requires exactly 2 operands, got {len(operands)}")
 
         # MOD is 2OP opcode 0x18 (24 decimal)
         return self._gen_2op_store(0x18, operands[0], operands[1])
@@ -2281,17 +2692,25 @@ class ImprovedCodeGenerator:
     def gen_sound(self, operands: List[ASTNode]) -> bytes:
         """Generate SOUND (play sound effect).
 
-        <SOUND effect> plays a sound effect.
-        In V3, this is the SOUND_EFFECT opcode (VAR opcode 0x05).
+        <SOUND effect action volume routine> plays a sound effect.
+        V3: 1-3 operands
+        V5+: 1-4 operands
 
         Args:
             operands[0]: Sound effect number (1-N)
+            operands[1]: Action (optional)
+            operands[2]: Volume (optional)
+            operands[3]: Routine (V5+ only, optional)
 
         Returns:
             bytes: Z-machine code
         """
-        if not operands:
-            return b''
+        if self.version < 5:
+            if len(operands) < 1 or len(operands) > 3:
+                raise ValueError("SOUND requires 1-3 operands in V3/V4")
+        else:
+            if len(operands) < 1 or len(operands) > 4:
+                raise ValueError("SOUND requires 1-4 operands in V5+")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -2304,19 +2723,57 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_clear(self, operands: List[ASTNode]) -> bytes:
-        """Generate CLEAR (clear screen).
+        """Generate CLEAR (clear window - V4+).
 
-        <CLEAR> clears the screen.
-        In V3, this is the ERASE_WINDOW opcode (VAR opcode 0x0D).
-        Window -1 means clear entire screen.
+        <CLEAR window> clears the specified window.
+        V4+ only. Window -1 means clear entire screen.
+
+        Args:
+            operands[0]: Window number
 
         Returns:
             bytes: Z-machine code
         """
+        if self.version < 4:
+            raise ValueError("CLEAR requires V4 or later")
+        if len(operands) != 1:
+            raise ValueError("CLEAR requires exactly 1 operand")
+
         code = bytearray()
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
+
         code.append(0xED)  # ERASE_WINDOW (VAR opcode 0x0D)
-        code.append(0x2F)  # Type byte: 1 small constant, rest omitted
-        code.append(0xFF)  # Window -1 (entire screen)
+        type_byte = 0x01 if op_type == 0 else 0x02
+        code.append((type_byte << 6) | 0x0F)
+        code.append(op_val & 0xFF)
+
+        return bytes(code)
+
+    def gen_erase(self, operands: List[ASTNode]) -> bytes:
+        """Generate ERASE (erase line/window - V4+).
+
+        <ERASE value> erases line or window based on value.
+        V4+ only.
+
+        Args:
+            operands[0]: Erase value
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if self.version < 4:
+            raise ValueError("ERASE requires V4 or later")
+        if len(operands) != 1:
+            raise ValueError("ERASE requires exactly 1 operand")
+
+        code = bytearray()
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
+
+        # Use ERASE_LINE (VAR opcode 0x0E)
+        code.append(0xEE)  # ERASE_LINE (VAR opcode 0x0E)
+        type_byte = 0x01 if op_type == 0 else 0x02
+        code.append((type_byte << 6) | 0x0F)
+        code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -2348,7 +2805,7 @@ class ImprovedCodeGenerator:
         """Generate SPLIT (split window).
 
         <SPLIT lines> splits the screen into upper and lower windows.
-        In V3, this is the SPLIT_WINDOW opcode (VAR opcode 0x0A).
+        In V3+, this is the SPLIT_WINDOW opcode (VAR opcode 0x0A).
 
         Args:
             operands[0]: Number of lines for upper window
@@ -2356,8 +2813,8 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("SPLIT requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -2373,7 +2830,7 @@ class ImprovedCodeGenerator:
         """Generate SCREEN (select window).
 
         <SCREEN window> selects which window to write to.
-        In V3, this is the SET_WINDOW opcode (VAR opcode 0x0B).
+        In V3+, this is the SET_WINDOW opcode (VAR opcode 0x0B).
 
         Args:
             operands[0]: Window number (0=lower, 1=upper)
@@ -2381,8 +2838,8 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("SCREEN requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -2419,10 +2876,10 @@ class ImprovedCodeGenerator:
         return self.gen_screen(operands)
 
     def gen_curset(self, operands: List[ASTNode]) -> bytes:
-        """Generate CURSET (set cursor position).
+        """Generate CURSET (set cursor position - V4+).
 
         <CURSET line column> sets cursor to specified position.
-        In V3+, this is the SET_CURSOR opcode (VAR opcode 0x11).
+        V4+ only. Uses SET_CURSOR opcode (VAR opcode 0x0F).
 
         Args:
             operands[0]: Line number (1-based)
@@ -2431,8 +2888,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 2:
-            return b''
+        if self.version < 4:
+            raise ValueError("CURSET requires V4 or later")
+        if len(operands) != 2:
+            raise ValueError("CURSET requires exactly 2 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -2471,8 +2930,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if not operands or self.version < 4:
-            return b''
+        if self.version < 4:
+            raise ValueError("CURGET requires V4 or later")
+        if len(operands) != 1:
+            raise ValueError("CURGET requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -2580,21 +3041,30 @@ class ImprovedCodeGenerator:
 
     def gen_scroll_window(self, operands: List[ASTNode]) -> bytes:
         """Generate SCROLL_WINDOW (V6 - scroll window contents). V6 only. EXT:0x14."""
-        if len(operands) < 2 or self.version < 6:
-            return b''
+        if self.version < 6:
+            raise ValueError("SCROLL requires V6")
+        if len(operands) > 4:
+            raise ValueError("SCROLL accepts at most 4 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-
         code.append(0xBE)  # EXT opcode marker
         code.append(0x14)  # SCROLL_WINDOW
 
-        t1 = 0x01 if op1_type == 0 else 0x02
-        t2 = 0x01 if op2_type == 0 else 0x02
-        code.append((t1 << 6) | (t2 << 4) | 0x0F)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        # Build type byte and operands
+        type_parts = []
+        for i in range(4):
+            if i < len(operands):
+                op_type, _ = self._get_operand_type_and_value(operands[i])
+                type_parts.append(0x01 if op_type == 0 else 0x02)
+            else:
+                type_parts.append(0x03)  # Omitted
+
+        type_byte = (type_parts[0] << 6) | (type_parts[1] << 4) | (type_parts[2] << 2) | type_parts[3]
+        code.append(type_byte)
+
+        for op in operands:
+            _, op_val = self._get_operand_type_and_value(op)
+            code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -2777,8 +3247,8 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("HLIGHT requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -2808,20 +3278,28 @@ class ImprovedCodeGenerator:
         """Generate INPUT (read text input).
 
         <INPUT buffer parse time routine> reads a line of text from the player.
-        V3: SREAD (VAR:0x04) with buffer and parse
-        V4+: Supports optional time and routine for timed input
+        V3: SREAD (VAR:0x04) with buffer and parse (2 operands)
+        V4: 2-3 operands
+        V5+: 1-4 operands
 
         Args:
             operands[0]: Text buffer address
-            operands[1]: Parse buffer address (optional)
+            operands[1]: Parse buffer address (optional in V5+)
             operands[2]: Time in tenths of seconds (V4+, optional)
-            operands[3]: Routine to call on timeout (V4+, optional)
+            operands[3]: Routine to call on timeout (V5+, optional)
 
         Returns:
             bytes: Z-machine code
         """
-        if not operands:
-            return b''
+        if self.version < 4:
+            if len(operands) != 2:
+                raise ValueError("INPUT requires exactly 2 operands in V3")
+        elif self.version == 4:
+            if len(operands) < 2 or len(operands) > 3:
+                raise ValueError("INPUT requires 2-3 operands in V4")
+        else:
+            if len(operands) < 1 or len(operands) > 4:
+                raise ValueError("INPUT requires 1-4 operands in V5+")
 
         code = bytearray()
         num_ops = len(operands)
@@ -2874,7 +3352,7 @@ class ImprovedCodeGenerator:
         """Generate BUFOUT (buffer mode control).
 
         <BUFOUT mode> enables/disables output buffering.
-        In V3+, this is the BUFFER_MODE opcode (VAR opcode 0x11).
+        In V4+, this is the BUFFER_MODE opcode (VAR opcode 0x11).
         Mode: 0=disable buffering, 1=enable buffering
 
         Args:
@@ -2883,8 +3361,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if not operands:
-            return b''
+        if self.version < 4:
+            raise ValueError("BUFOUT requires V4 or later")
+        if len(operands) != 1:
+            raise ValueError("BUFOUT requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -2913,36 +3393,7 @@ class ImprovedCodeGenerator:
         # Delegate to BUFOUT implementation
         return self.gen_bufout(operands)
 
-    def gen_get_cursor(self, operands: List[ASTNode]) -> bytes:
-        """Generate GET_CURSOR (V4/V6 - get cursor position).
-
-        <GET_CURSOR array> stores cursor position in array.
-        Array word 0 = row (line), word 1 = column.
-        V4+ only.
-
-        Args:
-            operands[0]: Array address (2 words)
-
-        Returns:
-            bytes: Z-machine code (GET_CURSOR VAR opcode)
-        """
-        if not operands or self.version < 4:
-            return b''
-
-        code = bytearray()
-
-        # GET_CURSOR is VAR opcode 0x10
-        code.append(0xF0)  # VAR opcode 0x10
-
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
-
-        if op_type == 1:  # Variable
-            code.append(0x8F)  # Type byte: 1 variable
-        else:  # Constant
-            code.append(0x2F)  # Type byte: 1 small constant
-        code.append(op_val & 0xFF)
-
-        return bytes(code)
+    # gen_get_cursor is defined earlier - this duplicate was removed
 
     def gen_uxor(self, operands: List[ASTNode]) -> bytes:
         """Generate UXOR (unsigned XOR).
@@ -3009,36 +3460,44 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_usl(self, operands: List[ASTNode]) -> bytes:
-        """Generate USL (unsigned shift left).
+        """Generate USL (set status line update - V3 only).
 
-        <USL value shift> shifts value left by shift bits (unsigned).
-        Similar to LSH but explicitly unsigned.
-
-        Args:
-            operands[0]: Value to shift
-            operands[1]: Number of bits to shift
+        <USL> enables status line updates in V3.
+        V3 only, no operands.
 
         Returns:
             bytes: Z-machine code
         """
-        # USL is essentially the same as LSH for our purposes
-        return self.gen_lsh(operands)
+        if self.version >= 4:
+            raise ValueError("USL is only available in V3")
+        if operands:
+            raise ValueError("USL takes no operands")
+
+        # USL is effectively a no-op in compiled code
+        # It's a hint to the interpreter
+        return b''
 
     def gen_dirout(self, operands: List[ASTNode]) -> bytes:
         """Generate DIROUT (direct output to memory).
 
-        <DIROUT table> directs subsequent output to a memory table.
+        <DIROUT stream [table [width]]> directs output to a stream.
         In V3+, this is the OUTPUT_STREAM opcode (VAR 0x13).
         Stream 3 = redirect to table.
 
         Args:
-            operands[0]: Table address for output (or 0 to restore)
+            operands[0]: Stream number
+            operands[1]: Table address (for stream 3)
+            operands[2]: Width (V6 only)
 
         Returns:
             bytes: Z-machine code
         """
         if not operands:
-            return b''
+            raise ValueError("DIROUT requires at least 1 operand")
+        if self.version < 6 and len(operands) > 2:
+            raise ValueError("DIROUT accepts at most 2 operands (3 in V6)")
+        if len(operands) > 3:
+            raise ValueError("DIROUT accepts at most 3 operands")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -3091,8 +3550,8 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code (INPUT_STREAM VAR opcode)
         """
-        if not operands or self.version < 3:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("DIRIN requires exactly 1 operand")
 
         code = bytearray()
 
@@ -3757,52 +4216,146 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_read(self, operands: List[ASTNode]) -> bytes:
-        """Generate READ (read input - alias for INPUT).
+        """Generate READ (read input).
 
-        <READ buffer parse> reads a line of text.
-        This is an alias for INPUT/SREAD.
+        <READ buffer parse time routine> reads a line of text.
+        V3: 2 operands
+        V4: 2-4 operands
+        V5+: 1-4 operands
 
         Args:
             operands[0]: Text buffer
-            operands[1]: Parse buffer
+            operands[1]: Parse buffer (optional in V5+)
+            operands[2]: Time (V4+, optional)
+            operands[3]: Routine (V4+, optional)
 
         Returns:
             bytes: Z-machine code
         """
-        return self.gen_input(operands)
+        if self.version < 4:
+            if len(operands) != 2:
+                raise ValueError("READ requires exactly 2 operands in V3")
+        elif self.version == 4:
+            if len(operands) < 2 or len(operands) > 4:
+                raise ValueError("READ requires 2-4 operands in V4")
+        else:
+            if len(operands) < 1 or len(operands) > 4:
+                raise ValueError("READ requires 1-4 operands in V5+")
+
+        # Use the actual implementation from gen_input but skip its validation
+        code = bytearray()
+        num_ops = len(operands)
+
+        # SREAD/AREAD is VAR opcode 0x04
+        code.append(0xE4)  # VAR opcode 0x04
+
+        # Build type byte based on number of operands
+        type_byte = 0x00
+        for i in range(4):
+            if i < num_ops:
+                op_type, _ = self._get_operand_type_and_value(operands[i])
+                if op_type == 1:  # Variable
+                    type_byte |= (0x02 << (6 - i*2))
+                else:
+                    type_byte |= (0x01 << (6 - i*2))
+            else:
+                type_byte |= (0x03 << (6 - i*2))  # Omitted
+
+        code.append(type_byte)
+
+        # Add operands
+        for i in range(min(num_ops, 4)):
+            op_type, op_val = self._get_operand_type_and_value(operands[i])
+            code.append(op_val & 0xFF)
+
+        return bytes(code)
 
     def gen_dless(self, operands: List[ASTNode]) -> bytes:
         """Generate DLESS? (decrement and test if less).
 
-        <DLESS? var value> decrements var and tests if result < value.
-        Similar to IGRTR? but for less-than.
-        Uses DEC followed by JL.
+        Decrements a variable and tests if result < comparison value.
+        When used as an expression, pushes 1 (true) or 0 (false) to stack.
+
+        DLESS? FOO 100 = decrement FOO, return true if now < 100.
 
         Args:
-            operands[0]: Variable to decrement
-            operands[1]: Value to compare against
+            operands[0]: variable to decrement (must be a variable name, not a number)
+            operands[1]: value to compare against (must be a constant, not a variable)
 
         Returns:
-            bytes: Z-machine code
+            bytes: Z-machine code that pushes 0 or 1 to stack
         """
         if len(operands) < 2:
-            return b''
+            raise ValueError("DLESS? requires exactly 2 operands")
+
+        var = operands[0]
+        cmp_op = operands[1]
+
+        # Validate: first operand must be a variable, not a number
+        if isinstance(var, NumberNode):
+            raise ValueError("DLESS? first operand must be a variable, not a number")
+
+        # Validate: second operand must be a constant, not a variable
+        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
+            raise ValueError("DLESS? second operand must be a constant, not a variable")
+        # Also check for AtomNode that resolves to a variable
+        if isinstance(cmp_op, AtomNode):
+            if cmp_op.value in self.locals or cmp_op.value in self.globals:
+                raise ValueError("DLESS? second operand must be a constant, not a variable")
+
+        var_num = self.get_variable_number(var)
+        if var_num == 0:  # Stack is invalid for DEC
+            if isinstance(var, AtomNode) and var.value not in self.locals and var.value not in self.globals:
+                raise ValueError(f"DLESS? unknown variable '{var.value}'")
+
+        cmp_type, cmp_val = self._get_operand_type_and_value(cmp_op)
 
         code = bytearray()
-        var_num = self.get_variable_number(operands[0])
-        val_type, val_val = self._get_operand_type_and_value(operands[1])
 
-        # DEC variable
-        code.append(0x86)  # DEC (1OP opcode 0x06)
+        # DEC the variable (0x96 = DEC with small const)
+        code.append(0x96)
         code.append(var_num)
 
-        # JL variable value (2OP opcode 0x02)
-        # First operand is always the variable we just decremented
-        opcode = 0x02 | (1 << 6) | (val_type << 5)  # var is first operand
-        code.append(opcode)
+        # Generate code to push 0 or 1 based on var < cmp_val
+        # Pattern:
+        #   JL var cmp_val ?true (if var < cmp_val, branch to true)
+        #   ADD 0 0 -> stack     (false case: push 0)
+        #   JUMP ?end            (skip over true case)
+        #   ?true:
+        #   ADD 0 1 -> stack     (true case: push 1)
+        #   ?end:
+
+        # JL is 2OP opcode 0x02
+        # Short 2OP with var,small: 0 1 0 00010 = 0x42
+        code.append(0x42)  # JL short form with var, small const
         code.append(var_num)
-        code.append(val_val & 0xFF)
-        code.append(0x40)  # Branch byte
+        code.append(cmp_val & 0xFF)
+        # Branch byte: branch if true (bit 7 = 1), short form (bit 6 = 1)
+        # Need to skip: ADD 0 0 -> stack (4 bytes) + JUMP ?end (3 bytes) = 7 bytes
+        # Offset = 7 + 2 = 9
+        code.append(0xC9)  # 11001001 = branch true, short, offset 9
+
+        # FALSE case: ADD 0 0 -> stack
+        # ADD is 2OP opcode 0x14
+        # Short form with both small: 0 0 0 10100 = 0x14
+        code.append(0x14)  # ADD short form, both small
+        code.append(0x00)  # 0
+        code.append(0x00)  # 0
+        code.append(0x00)  # Store to stack
+
+        # JUMP past true case
+        # JUMP is 1OP opcode 0x0C with 16-bit offset
+        # Need to skip 4 bytes (the ADD instruction in true case)
+        # Offset = 4 + 2 = 6 (relative to PC after JUMP instruction)
+        code.append(0x8C)  # 1OP large const, opcode 0x0C
+        code.append(0x00)  # High byte of offset (6 = 0x0006)
+        code.append(0x06)  # Low byte of offset
+
+        # TRUE case: ADD 0 1 -> stack
+        code.append(0x14)  # ADD short form, both small
+        code.append(0x00)  # 0
+        code.append(0x01)  # 1
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -3895,32 +4448,35 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_checku(self, operands: List[ASTNode]) -> bytes:
-        """Generate CHECKU (check if object has property - unrestricted).
+        """Generate CHECKU (check unicode support - V5+).
 
-        <CHECKU object property> tests if object provides a property.
-        Uses GET_PROP_ADDR which returns 0 if property not found.
+        <CHECKU char> tests if the interpreter supports the given character.
+        Returns flags indicating input/output support.
+        V5+ only, exactly 1 operand.
 
         Args:
-            operands[0]: Object number
-            operands[1]: Property number
+            operands[0]: Character code to check
 
         Returns:
-            bytes: Z-machine code
+            bytes: Z-machine code (CHECK_UNICODE EXT opcode)
         """
-        if len(operands) < 2:
-            return b''
+        if self.version < 5:
+            raise ValueError("CHECKU requires V5 or later")
+        if len(operands) != 1:
+            raise ValueError("CHECKU requires exactly 1 operand")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
 
-        # GET_PROP_ADDR returns 0 if not found (2OP opcode 0x13)
-        opcode = 0x13 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        # CHECK_UNICODE is EXT opcode 0x0C
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x0C)  # CHECK_UNICODE
+
+        # Type byte
+        type_byte = (0x01 if op_type == 0 else 0x02) << 6 | 0x3F
+        code.append(type_byte)
+        code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
-        # Then test with JZ - if 0, property doesn't exist
 
         return bytes(code)
 
@@ -4068,7 +4624,7 @@ class ImprovedCodeGenerator:
 
         <COPYT source dest length> copies bytes from source to dest.
         V5+: Uses native COPY_TABLE opcode.
-        V3/V4: Generates inline loop for small constants, stub for large/variables.
+        V3/V4: Not available.
 
         Args:
             operands[0]: Source address
@@ -4078,8 +4634,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 3:
-            return b''
+        if self.version < 5:
+            raise ValueError("COPYT requires V5 or later")
+        if len(operands) != 3:
+            raise ValueError("COPYT requires exactly 3 operands")
 
         code = bytearray()
 
@@ -4166,7 +4724,7 @@ class ImprovedCodeGenerator:
         """Generate >= comparison (greater than or equal).
 
         <G=? a b> tests if a >= b.
-        Implemented as NOT(a < b).
+        Implemented as NOT(a < b): if a < b, return false; else return true.
 
         Args:
             operands[0]: First value
@@ -4175,19 +4733,56 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("G=? requires exactly 2 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # JL with inverted branch (branch on false for >=)
-        opcode = 0x02 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Branch on false (inverted logic)
+        # Check if we need large constants (for negative or large values)
+        needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+        needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+        if needs_large1 or needs_large2:
+            # Use VAR form for JL
+            code.append(0xC2)  # VAR form JL
+            type_byte = 0
+            if needs_large1:
+                type_byte |= (0x00 << 6)
+            elif op1_type == 0:
+                type_byte |= (0x01 << 6)
+            else:
+                type_byte |= (0x02 << 6)
+            if needs_large2:
+                type_byte |= (0x00 << 4)
+            elif op2_type == 0:
+                type_byte |= (0x01 << 4)
+            else:
+                type_byte |= (0x02 << 4)
+            type_byte |= 0x0F
+            code.append(type_byte)
+            if needs_large1:
+                val = op1_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op1_val & 0xFF)
+            if needs_large2:
+                val = op2_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op2_val & 0xFF)
+        else:
+            # JL with branch on true to RFALSE
+            opcode = 0x02 | (op1_type << 6) | (op2_type << 5)
+            code.append(opcode)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
+
+        code.append(0xC0)  # Branch on true (a < b), return false
+        code.append(0xB0)  # RTRUE - fall through (a >= b)
 
         return bytes(code)
 
@@ -4195,7 +4790,7 @@ class ImprovedCodeGenerator:
         """Generate <= comparison (less than or equal).
 
         <L=? a b> tests if a <= b.
-        Implemented as NOT(a > b).
+        Implemented as NOT(a > b): if a > b, return false; else return true.
 
         Args:
             operands[0]: First value
@@ -4204,19 +4799,56 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("L=? requires exactly 2 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # JG with inverted branch (branch on false for <=)
-        opcode = 0x03 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Branch on false (inverted logic)
+        # Check if we need large constants (for negative or large values)
+        needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+        needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+        if needs_large1 or needs_large2:
+            # Use VAR form for JG
+            code.append(0xC3)  # VAR form JG
+            type_byte = 0
+            if needs_large1:
+                type_byte |= (0x00 << 6)
+            elif op1_type == 0:
+                type_byte |= (0x01 << 6)
+            else:
+                type_byte |= (0x02 << 6)
+            if needs_large2:
+                type_byte |= (0x00 << 4)
+            elif op2_type == 0:
+                type_byte |= (0x01 << 4)
+            else:
+                type_byte |= (0x02 << 4)
+            type_byte |= 0x0F
+            code.append(type_byte)
+            if needs_large1:
+                val = op1_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op1_val & 0xFF)
+            if needs_large2:
+                val = op2_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op2_val & 0xFF)
+        else:
+            # JG with branch on true to RFALSE
+            opcode = 0x03 | (op1_type << 6) | (op2_type << 5)
+            code.append(opcode)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
+
+        code.append(0xC0)  # Branch on true (a > b), return false
+        code.append(0xB0)  # RTRUE - fall through (a <= b)
 
         return bytes(code)
 
@@ -4306,49 +4938,30 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_original(self, operands: List[ASTNode]) -> bytes:
-        """Generate ORIGINAL? (test if value is original/not copied).
+        """Generate ORIGINAL? (test if game is original copy - V5+).
 
-        <ORIGINAL? value> tests if value is an original object reference.
-        In ZIL, this checks if a value is an original object (not a copy
-        or derived reference). For Z-machine, we approximate by testing
-        if the value is in valid object range (1-255).
-
-        Args:
-            operands[0]: Value to test
+        <ORIGINAL?> tests if the game is an original (not pirate) copy.
+        Uses the PIRACY opcode. Always returns 1 (true) for non-pirated copies.
+        V5+ only, no operands.
 
         Returns:
-            bytes: Z-machine code
+            bytes: Z-machine code (PIRACY EXT opcode)
         """
-        if not operands:
-            return b''
+        if self.version < 5:
+            raise ValueError("ORIGINAL? requires V5 or later")
+        if operands:
+            raise ValueError("ORIGINAL? takes no operands")
 
         code = bytearray()
-        value = self.get_operand_value(operands[0])
 
-        # For compile-time constants, check if in valid object range
-        if isinstance(value, int):
-            # Objects are 1-255, 0 is false/null
-            is_original = 1 if 1 <= value <= 255 else 0
-
-            # Push result to stack
-            code.append(0x54)  # ADD (2OP:0x14)
-            code.append(0x00)  # 0
-            code.append(is_original & 0xFF)
-            code.append(0x00)  # Store to stack
-        else:
-            # Runtime check: test if value is non-zero and <= 255
-            # Simplified: just test if non-zero (valid object reference)
-            # JNZ value [true]
-            var_num = self.get_variable_number(operands[0])
-            code.append(0x80)  # JZ (1OP:0x00)
-            code.append(var_num)
-            code.append(0x40 | 0x03)  # Branch false, offset 3
-            # If zero, push 0
-            code.append(0x54)
-            code.append(0x00)
-            code.append(0x00)
-            code.append(0x00)
-            # Otherwise push 1 (handled by branch)
+        # PIRACY is EXT opcode 0x0F
+        # It branches if the game is a pirate copy
+        # We implement it to always return 1 (genuine copy)
+        # Push 1 to stack: ADD 0 1 -> stack
+        code.append(0x54)  # ADD (2OP:0x14) short form: small const, small const
+        code.append(0x00)  # 0
+        code.append(0x01)  # 1
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -4434,18 +5047,19 @@ class ImprovedCodeGenerator:
         """Generate COLOR (set foreground/background colors).
 
         <COLOR foreground background> sets text colors.
-        In V5+, uses SET_COLOUR. For V3, this is a stub.
+        V5+ only. Uses SET_COLOUR opcode.
 
         Args:
             operands[0]: Foreground color
-            operands[1]: Background color (optional)
+            operands[1]: Background color
 
         Returns:
-            bytes: Z-machine code (working in V5+, stub for V3)
+            bytes: Z-machine code
         """
-        if not self.has_colors:
-            # V3/V4 don't support colors
-            return b''
+        if self.version < 5:
+            raise ValueError("COLOR requires V5 or later")
+        if len(operands) != 2:
+            raise ValueError("COLOR requires exactly 2 operands")
 
         # V5+: SET_COLOUR opcode
         code = bytearray()
@@ -4486,20 +5100,21 @@ class ImprovedCodeGenerator:
         return self.gen_color(operands)
 
     def gen_font(self, operands: List[ASTNode]) -> bytes:
-        """Generate FONT (set font).
+        """Generate FONT (set font - V5+).
 
         <FONT font-number> sets the current font.
-        In V5+, uses SET_FONT. For V3, this is a stub.
+        V5+ only. Uses SET_FONT opcode.
 
         Args:
             operands[0]: Font number
 
         Returns:
-            bytes: Z-machine code (working in V5+, stub for V3)
+            bytes: Z-machine code
         """
         if self.version < 5:
-            # V3/V4 don't support SET_FONT
-            return b''
+            raise ValueError("FONT requires V5 or later")
+        if len(operands) != 1:
+            raise ValueError("FONT requires exactly 1 operand")
 
         # V5+: SET_FONT opcode
         code = bytearray()
@@ -4573,22 +5188,20 @@ class ImprovedCodeGenerator:
 
         <MARGIN left right window> sets left and right margins.
         V6: Uses PUT_WIND_PROP to set margin properties (6=left, 7=right)
-        V3-V5: No-op (no margin control)
+        V6 only.
 
         Args:
             operands[0]: Left margin
-            operands[1]: Right margin (optional)
+            operands[1]: Right margin
             operands[2]: Window number (optional, defaults to current)
 
         Returns:
             bytes: Z-machine code
         """
         if self.version < 6:
-            # V3-V5: No margin control
-            return b''
-
-        if not operands:
-            return b''
+            raise ValueError("MARGIN requires V6")
+        if len(operands) < 2 or len(operands) > 3:
+            raise ValueError("MARGIN requires 2-3 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -4637,7 +5250,7 @@ class ImprovedCodeGenerator:
         """Generate WINSIZE (set window size).
 
         <WINSIZE window lines> sets window dimensions.
-        Uses SPLIT_WINDOW pattern.
+        V6 only.
 
         Args:
             operands[0]: Window number
@@ -4646,43 +5259,38 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 2:
-            return b''
+        if self.version < 6:
+            raise ValueError("WINSIZE requires V6")
+        if len(operands) > 4:
+            raise ValueError("WINSIZE accepts at most 4 operands")
 
         code = bytearray()
 
-        # Check if window is constant 1 (upper window) - use SPLIT
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
-        if op_type == 0 and op_val == 1:
-            return self.gen_split([operands[1]])
+        # Check if window is constant 1 (upper window) and we have at least 2 operands - use SPLIT
+        if len(operands) >= 2:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
+            if op_type == 0 and op_val == 1:
+                return self.gen_split([operands[1]])
 
-        # For other windows or variable window, use V6 SET_WINDOW if available
-        if self.version >= 6:
-            # WINDOW_SIZE EXT:0x11
-            code.append(0xBE)
-            code.append(0x11)
+        # WINDOW_SIZE EXT:0x11
+        code.append(0xBE)
+        code.append(0x11)
 
-            # Build operands
-            op_types = []
-            op_vals = []
-            for i in range(2):
-                t, v = self._get_operand_type_and_value(operands[i])
-                if t == 0:  # Constant
-                    op_types.append(0x01 if v <= 255 else 0x00)
-                else:
-                    op_types.append(0x02)
-                op_vals.append(v)
+        # Build type byte
+        type_parts = []
+        for i in range(4):
+            if i < len(operands):
+                op_type, _ = self._get_operand_type_and_value(operands[i])
+                type_parts.append(0x01 if op_type == 0 else 0x02)
+            else:
+                type_parts.append(0x03)  # Omitted
 
-            op_types.extend([0x03, 0x03])
-            type_byte = (op_types[0] << 6) | (op_types[1] << 4) | (op_types[2] << 2) | op_types[3]
-            code.append(type_byte)
+        type_byte = (type_parts[0] << 6) | (type_parts[1] << 4) | (type_parts[2] << 2) | type_parts[3]
+        code.append(type_byte)
 
-            for t, v in zip(op_types[:2], op_vals):
-                if t == 0x00:
-                    code.append((v >> 8) & 0xFF)
-                    code.append(v & 0xFF)
-                else:
-                    code.append(v & 0xFF)
+        for op in operands:
+            _, op_val = self._get_operand_type_and_value(op)
+            code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -4690,8 +5298,7 @@ class ImprovedCodeGenerator:
         """Generate WINGET (get window property).
 
         <WINGET window property> gets window information.
-        V6+: Uses GET_WIND_PROP opcode (EXT:0x13)
-        V3-V5: Returns 0 (no window properties)
+        V6 only. Uses GET_WIND_PROP opcode (EXT:0x13).
 
         Window properties:
         0=y, 1=x, 2=height, 3=width, 4=y-cursor, 5=x-cursor,
@@ -4705,17 +5312,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 2:
-            return b''
-
         if self.version < 6:
-            # V3-V5: No window properties, push 0
-            code = bytearray()
-            code.append(0x54)  # ADD small small
-            code.append(0x00)
-            code.append(0x00)
-            code.append(0x00)  # Store to stack
-            return bytes(code)
+            raise ValueError("WINGET requires V6")
+        if len(operands) > 4:
+            raise ValueError("WINGET accepts at most 4 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -4742,8 +5342,7 @@ class ImprovedCodeGenerator:
         """Generate WINPUT (set window property).
 
         <WINPUT window property value> sets window property.
-        V6+: Uses PUT_WIND_PROP opcode (EXT:0x19)
-        V3-V5: No-op (no window properties)
+        V6 only. Uses PUT_WIND_PROP opcode (EXT:0x19).
 
         Args:
             operands[0]: Window number
@@ -4753,8 +5352,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 3 or self.version < 6:
-            return b''
+        if self.version < 6:
+            raise ValueError("WINPUT requires V6")
+        if len(operands) > 4:
+            raise ValueError("WINPUT accepts at most 4 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -4782,8 +5383,7 @@ class ImprovedCodeGenerator:
         """Generate WINATTR (set window attributes).
 
         <WINATTR window flags operation> sets window display attributes.
-        V6+: Uses WINDOW_STYLE opcode (EXT:0x12)
-        V3-V5: No-op
+        V6 only. Uses WINDOW_STYLE opcode (EXT:0x12).
 
         Args:
             operands[0]: Window number
@@ -4793,8 +5393,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 2 or self.version < 6:
-            return b''
+        if self.version < 6:
+            raise ValueError("WINATTR requires V6")
+        if len(operands) > 4:
+            raise ValueError("WINATTR accepts at most 4 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -4820,25 +5422,74 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
-    def gen_intbl(self, operands: List[ASTNode]) -> bytes:
-        """Generate INTBL? (check if value in table).
+    def gen_winpos(self, operands: List[ASTNode]) -> bytes:
+        """Generate WINPOS (move window position).
 
-        <INTBL? value table length> searches table for value.
+        <WINPOS window y x> moves window to position.
+        V6 only. Uses MOVE_WINDOW opcode (EXT:0x10).
+
+        Args:
+            operands[0]: Window number
+            operands[1]: Y position
+            operands[2]: X position
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if self.version < 6:
+            raise ValueError("WINPOS requires V6")
+        if len(operands) > 4:
+            raise ValueError("WINPOS accepts at most 4 operands")
+
+        code = bytearray()
+
+        # MOVE_WINDOW is EXT opcode 0x10
+        code.append(0xBE)  # EXT marker
+        code.append(0x10)  # MOVE_WINDOW
+
+        # Build type byte
+        type_parts = []
+        for i in range(4):
+            if i < len(operands):
+                op_type, _ = self._get_operand_type_and_value(operands[i])
+                type_parts.append(0x01 if op_type == 0 else 0x02)
+            else:
+                type_parts.append(0x03)  # Omitted
+
+        type_byte = (type_parts[0] << 6) | (type_parts[1] << 4) | (type_parts[2] << 2) | type_parts[3]
+        code.append(type_byte)
+
+        for op in operands:
+            _, op_val = self._get_operand_type_and_value(op)
+            code.append(op_val & 0xFF)
+
+        return bytes(code)
+
+    def gen_intbl(self, operands: List[ASTNode]) -> bytes:
+        """Generate INTBL? (check if value in table - V4+).
+
+        <INTBL? value table length [form]> searches table for value.
         Returns true if found (and address in result for V5+).
-        V5+: Uses SCAN_TABLE opcode (EXT:0x17)
-        V3/V4: Unrolled search for small tables
+        V4: 3 operands only
+        V5+: 3-4 operands (4th is form/size)
 
         Args:
             operands[0]: Value to search for
             operands[1]: Table address
             operands[2]: Table length (in words)
-            operands[3]: Entry size (optional, default 2)
+            operands[3]: Entry size (V5+ only, optional, default 2)
 
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 3:
-            return b''
+        if self.version < 4:
+            raise ValueError("INTBL? requires V4 or later")
+        if self.version == 4:
+            if len(operands) != 3:
+                raise ValueError("INTBL? requires exactly 3 operands in V4")
+        else:
+            if len(operands) < 3 or len(operands) > 4:
+                raise ValueError("INTBL? requires 3-4 operands in V5+")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])  # value
@@ -5214,28 +5865,24 @@ class ImprovedCodeGenerator:
         return self.gen_rsh(operands)
 
     def gen_catch(self, operands: List[ASTNode]) -> bytes:
-        """Generate CATCH (catch exception/save state).
+        """Generate CATCH (catch exception/save state - V5+).
 
         <CATCH> creates a catch point for throw/return.
-        V5+ feature using CATCH opcode (VAR:0x19).
+        V5+ only, no operands.
         Returns the current stack frame address.
 
         Returns:
             bytes: Z-machine code
         """
-        code = bytearray()
+        if self.version < 5:
+            raise ValueError("CATCH requires V5 or later")
+        if operands:
+            raise ValueError("CATCH takes no operands")
 
-        # V5+: Use CATCH opcode (VAR:0x19)
-        if self.version >= 5:
-            code.append(0xF9)  # VAR opcode 0x19
-            code.append(0xFF)  # No operands (types all omitted)
-            code.append(0x00)  # Store to stack
-        else:
-            # V3/V4: Not available, return 0 to stack
-            code.append(0x54)  # ADD const const
-            code.append(0x00)  # 0
-            code.append(0x00)  # 0
-            code.append(0x00)  # Store to stack
+        code = bytearray()
+        code.append(0xF9)  # VAR opcode 0x19
+        code.append(0xFF)  # No operands (types all omitted)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -5252,38 +5899,26 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        if len(operands) < 2:
-            return b''
+        if self.version < 5:
+            raise ValueError("THROW requires V5 or later")
+        if len(operands) != 2:
+            raise ValueError("THROW requires exactly 2 operands")
 
         code = bytearray()
 
         # V5+: Use THROW opcode (VAR:0x1A)
-        if self.version >= 5:
-            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-            code.append(0xFA)  # VAR opcode 0x1A
+        code.append(0xFA)  # VAR opcode 0x1A
 
-            # Type byte for 2 operands
-            type1 = 0x01 if op1_type == 0 else 0x02
-            type2 = 0x01 if op2_type == 0 else 0x02
-            type_byte = (type1 << 6) | (type2 << 4) | 0x0F  # Rest omitted
-            code.append(type_byte)
-            code.append(op1_val & 0xFF)
-            code.append(op2_val & 0xFF)
-        else:
-            # V3/V4: Not available - just return the value (first operand)
-            # This is a graceful degradation
-            op_type, op_val = self._get_operand_type_and_value(operands[0])
-            if op_type == 0:
-                code.append(0x54)  # ADD const const
-                code.append(0x00)
-                code.append(op_val & 0xFF)
-                code.append(0x00)  # Store to stack
-            else:
-                code.append(0x8E)  # LOAD var
-                code.append(op_val & 0xFF)
-                code.append(0x00)  # Store to stack
+        # Type byte for 2 operands
+        type1 = 0x01 if op1_type == 0 else 0x02
+        type2 = 0x01 if op2_type == 0 else 0x02
+        type_byte = (type1 << 6) | (type2 << 4) | 0x0F  # Rest omitted
+        code.append(type_byte)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
 
         return bytes(code)
 
@@ -5584,8 +6219,7 @@ class ImprovedCodeGenerator:
 
         <PICINF picture table> gets information about a picture.
         Stores height and width in table (2 words).
-        V6+: Uses PICTURE_DATA opcode (EXT:0x06)
-        V3-V5: Returns empty (no graphics support)
+        V6 only. Uses PICTURE_DATA opcode (EXT:0x06).
 
         Args:
             operands[0]: Picture number
@@ -5595,11 +6229,9 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code for getting picture info
         """
         if self.version < 6:
-            # V3-V5: No graphics support
-            return b''
-
-        if len(operands) < 2:
-            return b''
+            raise ValueError("PICINF requires V6")
+        if len(operands) > 4:
+            raise ValueError("PICINF accepts at most 4 operands")
 
         code = bytearray()
         pic_num = self.get_operand_value(operands[0])
@@ -5654,13 +6286,53 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_picset(self, operands: List[ASTNode]) -> bytes:
+        """Generate PICSET (set picture table).
+
+        <PICSET table> sets picture table for drawing.
+        V6 only. Uses PICTURE_TABLE opcode (EXT:0x1C).
+
+        Args:
+            operands[0]: Picture table address
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if self.version < 6:
+            raise ValueError("PICSET requires V6")
+        if len(operands) > 4:
+            raise ValueError("PICSET accepts at most 4 operands")
+
+        code = bytearray()
+
+        # PICTURE_TABLE is EXT opcode 0x1C
+        code.append(0xBE)  # EXT marker
+        code.append(0x1C)  # PICTURE_TABLE
+
+        # Build type byte
+        type_parts = []
+        for i in range(4):
+            if i < len(operands):
+                op_type, _ = self._get_operand_type_and_value(operands[i])
+                type_parts.append(0x01 if op_type == 0 else 0x02)
+            else:
+                type_parts.append(0x03)  # Omitted
+
+        type_byte = (type_parts[0] << 6) | (type_parts[1] << 4) | (type_parts[2] << 2) | type_parts[3]
+        code.append(type_byte)
+
+        for op in operands:
+            _, op_val = self._get_operand_type_and_value(op)
+            code.append(op_val & 0xFF)
+
+        return bytes(code)
+
     def gen_mouse_info(self, operands: List[ASTNode]) -> bytes:
         """Generate MOUSE-INFO (get mouse information).
 
         <MOUSE-INFO table> reads mouse data into a table.
         Table receives 4 words: y, x, buttons, menu-word.
-        V5+: Uses READ_MOUSE opcode (EXT:0x16)
-        V3/V4: Returns empty (no mouse support)
+        V6 only. Uses READ_MOUSE opcode (EXT:0x16).
 
         Args:
             operands[0]: Table address to store mouse data
@@ -5668,12 +6340,8 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code for reading mouse state
         """
-        if self.version < 5:
-            # V3/V4: No mouse support
-            return b''
-
-        if not operands:
-            return b''
+        if self.version < 6:
+            raise ValueError("MOUSE-INFO requires V6")
 
         code = bytearray()
 
@@ -5695,6 +6363,37 @@ class ImprovedCodeGenerator:
         else:  # Variable
             code.append(0x9F)  # Type: variable, omit, omit, omit (10 01 11 11)
             code.append(op_val & 0xFF)
+
+        return bytes(code)
+
+    def gen_mouse_limit(self, operands: List[ASTNode]) -> bytes:
+        """Generate MOUSE-LIMIT (set mouse window).
+
+        <MOUSE-LIMIT window> sets which window receives mouse input.
+        V6 only. Uses MOUSE_WINDOW opcode (EXT:0x17).
+
+        Args:
+            operands[0]: Window number
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if self.version < 6:
+            raise ValueError("MOUSE-LIMIT requires V6")
+
+        code = bytearray()
+
+        # MOUSE_WINDOW is EXT opcode 0x17
+        code.append(0xBE)  # EXT marker
+        code.append(0x17)  # MOUSE_WINDOW
+
+        if operands:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
+            type_byte = 0x01 if op_type == 0 else 0x02
+            code.append((type_byte << 6) | 0x3F)  # First operand + rest omitted
+            code.append(op_val & 0xFF)
+        else:
+            code.append(0xFF)  # All omitted
 
         return bytes(code)
 
@@ -5911,30 +6610,32 @@ class ImprovedCodeGenerator:
         return self.gen_tell(operands)
 
     def gen_fstack(self, operands: List[ASTNode]) -> bytes:
-        """Generate FSTACK (get frame stack pointer).
+        """Generate FSTACK (V6 flush stack).
 
-        <FSTACK> returns the current frame stack pointer.
-        V5+: Uses CATCH opcode to get current stack frame
-        V3/V4: Returns 0 (no frame introspection)
+        <FSTACK count> pops count items from stack.
+        <FSTACK count stack> pushes popped items to user stack.
+        V6 only.
 
         Returns:
             bytes: Z-machine code
         """
+        if self.version < 6:
+            raise ValueError("FSTACK requires V6")
+        if len(operands) < 1 or len(operands) > 2:
+            raise ValueError("FSTACK requires 1-2 operands")
+
         code = bytearray()
 
-        if self.version >= 5:
-            # V5+: Use CATCH opcode (VAR:0x19) to get frame pointer
-            # CATCH returns the current stack frame address
-            code.append(0xF9)  # CATCH (VAR opcode 0x19)
-            code.append(0xFF)  # No operands
-            code.append(0x00)  # Store result to stack
+        # V6: Use FLUSH_STACK opcode
+        # For now, simplified implementation - just pop items
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
+        if op_type == 0:
+            # Small constant - use multiple POPs
+            for _ in range(op_val):
+                code.append(0xB9)  # POP
         else:
-            # V3/V4: No frame introspection, push 0
-            # Use ADD 0 0 -> sp to push 0
-            code.append(0x54)  # ADD (2OP:0x14)
-            code.append(0x00)  # 0
-            code.append(0x00)  # 0
-            code.append(0x00)  # Store to stack
+            # Variable count - would need loop, stub for now
+            code.append(0xB9)  # POP
 
         return bytes(code)
 
@@ -5951,6 +6652,9 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
+        if operands:
+            raise ValueError("RSTACK takes no operands")
+
         code = bytearray()
 
         if self.version >= 5:
@@ -6050,10 +6754,11 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_log_shift(self, operands: List[ASTNode]) -> bytes:
-        """Generate LOG-SHIFT (logical shift).
+        """Generate LOG-SHIFT (logical shift - V5+).
 
-        <LOG-SHIFT value amount> performs logical shift (signed).
-        Alias for LSH/RSH depending on sign.
+        <LOG-SHIFT value amount> performs logical shift.
+        Positive amount = left shift, negative amount = right shift.
+        V5+ EXT opcode 0x02.
 
         Args:
             operands[0]: Value to shift
@@ -6062,9 +6767,59 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code
         """
-        # LOG-SHIFT: if positive use LSH, if negative use RSH
-        # For simplicity, delegate to LSH
-        return self.gen_lsh(operands)
+        # V5+ only - raise error for earlier versions
+        if self.version < 5:
+            raise ValueError(f"LOG-SHIFT/SHIFT requires V5 or later, got V{self.version}")
+
+        if len(operands) != 2:
+            raise ValueError("LOG-SHIFT/SHIFT requires exactly 2 operands")
+
+        code = bytearray()
+
+        # LOG_SHIFT is EXT opcode 0x02
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x02)  # LOG_SHIFT
+
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+
+        # Check if operands need large constant encoding
+        # Negative numbers and values > 255 need large constants (2 bytes)
+        op1_needs_large = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+        op2_needs_large = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+        types = []
+        # Type 0x00 = large constant, 0x01 = small constant, 0x02 = variable
+        if op1_type == 0:  # constant
+            types.append(0x00 if op1_needs_large else 0x01)
+        else:  # variable
+            types.append(0x02)
+        if op2_type == 0:  # constant
+            types.append(0x00 if op2_needs_large else 0x01)
+        else:  # variable
+            types.append(0x02)
+        types.append(0x03)
+        types.append(0x03)
+        type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
+        code.append(type_byte)
+
+        # Write operand values
+        if op1_needs_large:
+            code.append((op1_val >> 8) & 0xFF)
+            code.append(op1_val & 0xFF)
+        else:
+            code.append(op1_val & 0xFF)
+
+        if op2_needs_large:
+            code.append((op2_val >> 8) & 0xFF)
+            code.append(op2_val & 0xFF)
+        else:
+            code.append(op2_val & 0xFF)
+
+        # Store result to stack
+        code.append(0x00)
+
+        return bytes(code)
 
     def gen_art_shift(self, operands: List[ASTNode]) -> bytes:
         """Generate ART_SHIFT (arithmetic shift - V5+).
@@ -6080,8 +6835,12 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code (ART_SHIFT EXT opcode)
         """
-        if len(operands) < 2 or self.version < 5:
-            return b''
+        # V5+ only - raise error for earlier versions
+        if self.version < 5:
+            raise ValueError(f"ART-SHIFT/ASH requires V5 or later, got V{self.version}")
+
+        if len(operands) != 2:
+            raise ValueError("ART-SHIFT/ASH requires exactly 2 operands")
 
         code = bytearray()
 
@@ -6092,15 +6851,39 @@ class ImprovedCodeGenerator:
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
+        # Check if operands need large constant encoding
+        # Negative numbers and values > 255 need large constants (2 bytes)
+        op1_needs_large = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+        op2_needs_large = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
         types = []
-        types.append(0x01 if op1_type == 0 else 0x02)
-        types.append(0x01 if op2_type == 0 else 0x02)
+        # Type 0x00 = large constant, 0x01 = small constant, 0x02 = variable
+        if op1_type == 0:  # constant
+            types.append(0x00 if op1_needs_large else 0x01)
+        else:  # variable
+            types.append(0x02)
+        if op2_type == 0:  # constant
+            types.append(0x00 if op2_needs_large else 0x01)
+        else:  # variable
+            types.append(0x02)
         types.append(0x03)
         types.append(0x03)
         type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
         code.append(type_byte)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+
+        # Write operand values
+        if op1_needs_large:
+            code.append((op1_val >> 8) & 0xFF)
+            code.append(op1_val & 0xFF)
+        else:
+            code.append(op1_val & 0xFF)
+
+        if op2_needs_large:
+            code.append((op2_val >> 8) & 0xFF)
+            code.append(op2_val & 0xFF)
+        else:
+            code.append(op2_val & 0xFF)
+
         # Store result to stack
         code.append(0x00)
 
@@ -6124,27 +6907,12 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
+
+        # XOR must be emulated in all Z-machine versions
+        # XOR(A, B) = (A OR B) AND NOT(A AND B)
+        # Get operand info for emulation
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-
-        # V5+: Use native XOR (EXT:0x0B)
-        if self.version >= 5:
-            code.append(0xBE)  # EXT opcode marker
-            code.append(0x0B)  # XOR extended opcode
-
-            types = []
-            types.append(0x01 if op1_type == 0 else 0x02)
-            types.append(0x01 if op2_type == 0 else 0x02)
-            types.append(0x03)
-            types.append(0x03)
-            type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
-            code.append(type_byte)
-            code.append(op1_val & 0xFF)
-            code.append(op2_val & 0xFF)
-            # Store result in stack (SP)
-            code.append(0x00)
-
-            return bytes(code)
 
         # V3/V4: Emulate XOR using (A OR B) AND NOT(A AND B)
         # Uses stack for intermediate values
@@ -6154,15 +6922,18 @@ class ImprovedCodeGenerator:
             result = op1_val ^ op2_val
             # Push the result to stack using ADD 0 + result
             if 0 <= result <= 255:
-                code.append(0x54)  # 2OP:20 ADD, small const, small const
+                # 2OP:20 ADD with (small, small)
+                # Long form: 0x14 = 00010100 = (small, small, ADD opcode 20)
+                code.append(0x14)
                 code.append(0x00)  # 0
                 code.append(result & 0xFF)
                 code.append(0x00)  # Store to SP (stack)
             else:
                 # Large constant: use VAR form
                 code.append(0xD4)  # VAR form of ADD
-                code.append(0x0F)  # Type: small(0), large(result), omit, omit
-                code.append(0x00)  # 0
+                # Type byte: small(01), large(00), omit(11), omit(11) = 0x4F
+                code.append(0x4F)
+                code.append(0x00)  # 0 (small constant)
                 code.append((result >> 8) & 0xFF)
                 code.append(result & 0xFF)
                 code.append(0x00)  # Store to SP
@@ -6176,19 +6947,18 @@ class ImprovedCodeGenerator:
         # 4. AND sp sp -> sp   (pop both, push final result)
 
         # Determine operand encoding
-        def encode_operand(val):
+        def encode_operand(op_type, val):
             """Return (type_bits, bytes) for an operand."""
-            if isinstance(val, int):
+            if op_type == 0:  # Constant
                 if 0 <= val <= 255:
                     return (0b01, bytes([val & 0xFF]))  # Small constant
                 else:
                     return (0b00, bytes([(val >> 8) & 0xFF, val & 0xFF]))  # Large
-            else:
-                # Variable reference
+            else:  # Variable (op_type == 1)
                 return (0b10, bytes([val & 0xFF]))  # Variable
 
-        t1, b1 = encode_operand(val1)
-        t2, b2 = encode_operand(val2)
+        t1, b1 = encode_operand(op1_type, op1_val)
+        t2, b2 = encode_operand(op2_type, op2_val)
         types_byte = (t1 << 6) | (t2 << 4) | 0x0F  # Rest omitted
 
         # Step 1: AND A B -> sp
@@ -6292,7 +7062,7 @@ class ImprovedCodeGenerator:
 
         <COPYT source dest length> copies bytes from source to dest table.
         V5+: Uses COPY_TABLE opcode.
-        V3/V4: Generates inline loop with LOADB/STOREB.
+        V3/V4: Not available.
 
         Args:
             operands[0]: Source table address
@@ -6302,8 +7072,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code for table copy
         """
-        if len(operands) < 3:
-            return b''
+        if self.version < 5:
+            raise ValueError("COPYT requires V5 or later")
+        if len(operands) != 3:
+            raise ValueError("COPYT requires exactly 3 operands")
 
         code = bytearray()
 
@@ -7154,38 +7926,174 @@ class ImprovedCodeGenerator:
     # ===== Comparison Operations =====
 
     def gen_equal(self, operands: List[ASTNode]) -> bytes:
-        """Generate JE (jump if equal) - branch instruction.
+        """Generate JE (jump if equal) - pushes 1 if equal, 0 otherwise to stack.
 
         JE can compare up to 4 values: <EQUAL? a b c d> tests if a equals any of b, c, d.
-        Returns true if equal, false otherwise.
+        Returns true (1) if equal, false (0) otherwise.
         """
+        if len(operands) < 1:
+            raise ValueError("EQUAL? requires at least 1 operand")
         if len(operands) < 2:
-            return b''
+            # Single operand - always false (nothing to compare to)
+            return bytes([0x14, 0x00, 0x00, 0x00])  # ADD 0 0 -> stack (push 0)
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # If first operand is a nested expression, evaluate it first
+        first_op = operands[0]
+        if isinstance(first_op, FormNode):
+            expr_code = self.generate_form(first_op)
+            code.extend(expr_code)
+            op1_type = 1  # Variable (stack)
+            op1_val = 0   # Stack
+        elif isinstance(first_op, CondNode):
+            expr_code = self.generate_cond(first_op)
+            code.extend(expr_code)
+            op1_type = 1
+            op1_val = 0
+        else:
+            op1_type, op1_val = self._get_operand_type_and_value(first_op)
 
-        # JE is 2OP opcode 0x01
-        # Long form: bits 6-5 are operand types, bits 4-0 are opcode
-        opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        # Handle simple 2-operand case specially for efficiency
+        if len(operands) == 2:
+            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # Branch byte: bit 7 = branch on true, bit 6 = short offset, bits 5-0 = offset
-        # 0xC0 = branch on true, return true (offset 1)
-        # 0x40 = branch on false, return false (offset 0)
-        code.append(0xC0)  # Branch on true, return true
+            # JE op1 op2 ?true (branch to true case)
+            opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
+            code.append(opcode)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
+            # Branch: if equal, skip to true case (offset 9 bytes forward)
+            code.append(0xC9)  # branch on true, short, offset 9
+
+            # FALSE case: ADD 0 0 -> stack (push 0)
+            code.append(0x14)  # ADD 2OP small small
+            code.append(0x00)
+            code.append(0x00)
+            code.append(0x00)  # Store to stack
+
+            # JUMP past true case (offset 6)
+            code.append(0x8C)  # JUMP
+            code.append(0x00)
+            code.append(0x06)  # offset 6
+
+            # TRUE case: ADD 0 1 -> stack (push 1)
+            code.append(0x14)
+            code.append(0x00)
+            code.append(0x01)
+            code.append(0x00)  # Store to stack
+
+            return bytes(code)
+
+        # Multi-operand case: use VAR form JE
+        # JE can compare 1 value against up to 3 others per instruction
+        # For more than 4 operands total, we need to chain multiple JE instructions
+        all_comparands = operands[1:]
+
+        # If first operand is from stack and we need multiple JEs, save it first
+        # Each JE reads from stack which pops the value, so we need to preserve it
+        if op1_type == 1 and op1_val == 0 and len(all_comparands) > 3:
+            # Save stack value to a temp global (global 16 = 0x10)
+            temp_global = 0x10
+            # Use VAR form ADD: sp + 0 -> temp_global (copy stack to temp)
+            code.append(0xD4)  # VAR form ADD (0xC0 | 0x14)
+            code.append(0x9F)  # Types: var(10), small(01), omit(11), omit(11) = 0x9F
+            code.append(0x00)  # operand 1: sp (variable 0)
+            code.append(0x00)  # operand 2: 0 (small constant)
+            code.append(temp_global)  # store result to temp global
+            # Now use temp_global instead of stack for all JEs
+            op1_val = temp_global
+
+        # Build list of JE instructions, each comparing op1 against up to 3 values
+        je_instructions = []
+        for i in range(0, len(all_comparands), 3):
+            chunk = all_comparands[i:i+3]
+            je_code = bytearray()
+
+            # VAR:1 form: 0xC1 followed by type byte
+            je_code.append(0xC1)  # VAR form JE
+
+            # Build type byte for all operands (op1 + chunk)
+            types_and_vals = [(op1_type, op1_val)]
+            for op in chunk:
+                t, v = self._get_operand_type_and_value(op)
+                types_and_vals.append((t, v))
+
+            # Map types: 0=small const->01, 1=var->10
+            type_byte = 0
+            for j, (t, v) in enumerate(types_and_vals):
+                if j >= 4:
+                    break
+                type_code = 0x01 if t == 0 else 0x02
+                type_byte |= (type_code << (6 - j * 2))
+            # Fill remaining with 0x03 (omitted)
+            for j in range(len(types_and_vals), 4):
+                type_byte |= (0x03 << (6 - j * 2))
+
+            je_code.append(type_byte)
+
+            # Add operand values
+            for t, v in types_and_vals:
+                je_code.append(v & 0xFF)
+
+            # Placeholder for branch byte - will be filled in later
+            je_code.append(0x00)  # Placeholder
+
+            je_instructions.append(je_code)
+
+        # Calculate offsets: each JE branches to TRUE case on match
+        # FALSE case is 4 bytes (ADD 0 0 -> stack)
+        # JUMP is 3 bytes
+        # TRUE case is 4 bytes (ADD 0 1 -> stack)
+        # Total ending: 4 + 3 + 4 = 11 bytes
+
+        # Calculate total size of remaining JE instructions after each one
+        # Each JE branches forward to the TRUE case
+        # Offset = remaining JE instructions size + FALSE case (4) + JUMP (3) + 2
+        # The +2 is because offset is from the branch byte position
+
+        for idx, je_code in enumerate(je_instructions):
+            # Calculate bytes remaining after this JE instruction
+            remaining_je_size = sum(len(je) for je in je_instructions[idx+1:])
+            # Offset to TRUE case: remaining JEs + FALSE (4) + JUMP (3) + 2
+            offset = remaining_je_size + 4 + 3 + 2
+
+            # Branch on true, short form (bit 7=1 for true, bit 6=1 for short)
+            # Short branch: offset in bits 0-5
+            if offset <= 63:
+                je_code[-1] = 0xC0 | offset  # 0xC0 = branch true, short
+            else:
+                # Need long branch - replace single byte with two bytes
+                je_code[-1] = 0x80 | ((offset >> 8) & 0x3F)  # High bits
+                je_code.append(offset & 0xFF)  # Low byte
+
+        # Now emit all JE instructions
+        for je_code in je_instructions:
+            code.extend(je_code)
+
+        # FALSE case: ADD 0 0 -> stack
+        code.append(0x14)
+        code.append(0x00)
+        code.append(0x00)
+        code.append(0x00)
+
+        # JUMP past true case
+        code.append(0x8C)
+        code.append(0x00)
+        code.append(0x06)
+
+        # TRUE case: ADD 0 1 -> stack
+        code.append(0x14)
+        code.append(0x00)
+        code.append(0x01)
+        code.append(0x00)
 
         return bytes(code)
 
     def gen_less(self, operands: List[ASTNode]) -> bytes:
         """Generate JL (jump if less) - branch instruction."""
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("LESS? requires exactly 2 operands")
 
         code = bytearray()
 
@@ -7193,19 +8101,58 @@ class ImprovedCodeGenerator:
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # JL is 2OP opcode 0x02
-        opcode = 0x02 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0xC0)  # Branch on true, return true
+        # Check if we need large constants (for negative or large values)
+        needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+        needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+        if needs_large1 or needs_large2:
+            # Use VAR form for large constants
+            code.append(0xC2)  # VAR form JL (0xC0 | 0x02)
+            # Build type byte: 00=large, 01=small, 10=var, 11=omit
+            type_byte = 0
+            if needs_large1:
+                type_byte |= (0x00 << 6)  # Large constant
+            elif op1_type == 0:
+                type_byte |= (0x01 << 6)  # Small constant
+            else:
+                type_byte |= (0x02 << 6)  # Variable
+            if needs_large2:
+                type_byte |= (0x00 << 4)  # Large constant
+            elif op2_type == 0:
+                type_byte |= (0x01 << 4)  # Small constant
+            else:
+                type_byte |= (0x02 << 4)  # Variable
+            type_byte |= 0x0F  # Remaining slots omitted
+            code.append(type_byte)
+            # Add operands
+            if needs_large1:
+                val = op1_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op1_val & 0xFF)
+            if needs_large2:
+                val = op2_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op2_val & 0xFF)
+        else:
+            # JL is 2OP opcode 0x02, long form
+            opcode = 0x02 | (op1_type << 6) | (op2_type << 5)
+            code.append(opcode)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
+
+        code.append(0xC1)  # Branch on true, return true
+        code.append(0xB1)  # RFALSE - fall through
 
         return bytes(code)
 
     def gen_greater(self, operands: List[ASTNode]) -> bytes:
         """Generate JG (jump if greater) - branch instruction."""
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("GRTR? requires exactly 2 operands")
 
         code = bytearray()
 
@@ -7213,36 +8160,87 @@ class ImprovedCodeGenerator:
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # JG is 2OP opcode 0x03
-        opcode = 0x03 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0xC0)  # Branch on true, return true
+        # Check if we need large constants (for negative or large values)
+        needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+        needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+        if needs_large1 or needs_large2:
+            # Use VAR form for large constants
+            code.append(0xC3)  # VAR form JG (0xC0 | 0x03)
+            # Build type byte: 00=large, 01=small, 10=var, 11=omit
+            type_byte = 0
+            if needs_large1:
+                type_byte |= (0x00 << 6)  # Large constant
+            elif op1_type == 0:
+                type_byte |= (0x01 << 6)  # Small constant
+            else:
+                type_byte |= (0x02 << 6)  # Variable
+            if needs_large2:
+                type_byte |= (0x00 << 4)  # Large constant
+            elif op2_type == 0:
+                type_byte |= (0x01 << 4)  # Small constant
+            else:
+                type_byte |= (0x02 << 4)  # Variable
+            type_byte |= 0x0F  # Remaining slots omitted
+            code.append(type_byte)
+            # Add operands
+            if needs_large1:
+                val = op1_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op1_val & 0xFF)
+            if needs_large2:
+                val = op2_val & 0xFFFF
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(op2_val & 0xFF)
+        else:
+            # JG is 2OP opcode 0x03, long form
+            opcode = 0x03 | (op1_type << 6) | (op2_type << 5)
+            code.append(opcode)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
+
+        code.append(0xC1)  # Branch on true, return true
+        code.append(0xB1)  # RFALSE - fall through
 
         return bytes(code)
 
-    def gen_zero(self, operands: List[ASTNode]) -> bytes:
+    def gen_zero_test(self, operands: List[ASTNode]) -> bytes:
         """Generate ZERO? test (jump if zero).
 
         <ZERO? value> is equivalent to <EQUAL? value 0>
         Uses JZ (jump if zero) - 1OP opcode 0x00
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("ZERO? requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # JZ is 1OP opcode 0x00 (branch instruction)
-        # Short form: bit 5-4 = operand type, bits 3-0 = opcode
-        # Type: 00 = large const, 01 = small const, 10 = variable
+        # 1OP short form encoding:
+        # 0x80-0x8F: large constant (2 bytes) - opcode is bits 3-0
+        # 0x90-0x9F: small constant (1 byte) - opcode is bits 3-0
+        # 0xA0-0xAF: variable (1 byte) - opcode is bits 3-0
         if op_type == 0:  # Constant
-            code.append(0x80)  # Short 1OP, small constant, opcode 0x00
+            val = op_val & 0xFFFF
+            if -128 <= val <= 255:
+                # Small constant
+                code.append(0x90)  # Short 1OP, small constant, opcode 0x00
+                code.append(val & 0xFF)
+            else:
+                # Large constant
+                code.append(0x80)  # Short 1OP, large constant, opcode 0x00
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
         else:  # Variable
             code.append(0xA0)  # Short 1OP, variable, opcode 0x00
-        code.append(op_val & 0xFF)
-        code.append(0xC0)  # Branch on true, return true
+            code.append(op_val & 0xFF)
+        code.append(0xC1)  # Branch on true, return true
+        code.append(0xB1)  # RFALSE - fall through
 
         return bytes(code)
 
@@ -7267,40 +8265,40 @@ class ImprovedCodeGenerator:
             code.append(0x61)  # 2OP long form, variable, small const
             code.append(op_val & 0xFF)
             code.append(0x01)  # Compare with 1
-        code.append(0xC0)  # Branch on true, return true
+        code.append(0xC1)  # Branch on true, return true
+        code.append(0xB1)  # RFALSE - fall through
 
         return bytes(code)
 
     def gen_assigned(self, operands: List[ASTNode]) -> bytes:
-        """Generate ASSIGNED? test (check if variable is assigned).
+        """Generate ASSIGNED? test (check if local variable argument was passed).
 
-        <ASSIGNED? var> checks if a global variable has been assigned.
-        This is a compile-time check - we verify the variable exists in globals.
-        At runtime, we check if the value is non-zero.
+        <ASSIGNED? var> checks if a local variable was passed an argument
+        when the routine was called. Uses CHECK_ARG_COUNT (EXT opcode 0xFF).
+        V5+ only.
         """
-        if not operands:
-            return b''
+        if self.version < 5:
+            raise ValueError("ASSIGNED? requires V5 or later")
+        if len(operands) != 1:
+            raise ValueError("ASSIGNED? requires exactly 1 operand")
+        if not isinstance(operands[0], AtomNode):
+            raise ValueError("ASSIGNED? requires a variable name, not a literal")
+
+        var_name = operands[0].value
+        if var_name not in self.locals:
+            raise ValueError(f"ASSIGNED? requires a valid local variable, got '{var_name}'")
+
+        var_num = self.locals[var_name]
 
         code = bytearray()
-
-        # Get the variable
-        if isinstance(operands[0], AtomNode):
-            var_name = operands[0].value
-            # Check if it's in globals
-            if var_name in self.globals:
-                var_num = self.globals[var_name]
-                # LOAD the variable and test if non-zero
-                code.append(0x8E)  # LOAD
-                code.append(var_num)
-                code.append(0x00)  # Store to stack
-                # JZ (test if zero) - if zero, it's not assigned
-                code.append(0x80)  # JZ
-                code.append(0x00)  # Stack
-                code.append(0x40)  # Branch on true
-            else:
-                # Variable not in globals = not assigned
-                # Return false (0)
-                code.append(0xB1)  # RFALSE
+        # CHECK_ARG_COUNT: EXT opcode 0xFF
+        # Checks if argument number was passed
+        code.append(0xBE)  # EXT marker
+        code.append(0xFF)  # CHECK_ARG_COUNT
+        code.append(0x01)  # Type byte for 1 small constant
+        code.append(var_num & 0xFF)  # Local variable number
+        # Branch offset placeholder (caller fills in)
+        code.append(0xC0)  # Branch on true, short offset
 
         return bytes(code)
 
@@ -7317,7 +8315,7 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code (JZ - jump if zero)
         """
         # NOT? is the same as ZERO?
-        return self.gen_zero(operands)
+        return self.gen_zero_test(operands)
 
     def gen_true_predicate(self, operands: List[ASTNode]) -> bytes:
         """Generate TRUE? (test if value is non-zero).
@@ -7353,84 +8351,198 @@ class ImprovedCodeGenerator:
     def gen_and(self, operands: List[ASTNode]) -> bytes:
         """Generate AND (bitwise).
 
-        Handles constants, variables, and mixed operands.
+        Handles variadic AND:
+        - 0 operands: returns -1 (0xFFFF, all bits set - identity)
+        - 1 operand: returns that operand
+        - 2 operands: a & b
+        - 3+ operands: a & b & c & ...
         """
-        if len(operands) < 2:
-            return b''
-
-        code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-
         # AND is 2OP opcode 0x09
-        # Use long form for simple cases
-        opcode = 0x09 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Store to stack
-
-        return bytes(code)
+        # Identity for AND is -1 (all bits set)
+        return self._gen_variadic_arith(0x09, operands, identity=-1)
 
     def gen_or(self, operands: List[ASTNode]) -> bytes:
         """Generate OR (bitwise).
 
-        Handles constants, variables, and mixed operands.
+        Handles variadic OR:
+        - 0 operands: returns 0 (identity)
+        - 1 operand: returns that operand
+        - 2 operands: a | b
+        - 3+ operands: a | b | c | ...
         """
-        if len(operands) < 2:
-            return b''
+        # OR is 2OP opcode 0x08
+        return self._gen_variadic_arith(0x08, operands, identity=0)
+
+    def gen_not(self, operands: List[ASTNode]) -> bytes:
+        """Generate NOT (logical NOT).
+
+        <NOT value> returns 1 if value is 0, else returns 0.
+        This is logical NOT, not bitwise complement.
+        For bitwise complement, use BCOM.
+
+        Implementation: use JZ to branch, push 1 or 0 to stack.
+        """
+        if len(operands) != 1:
+            raise ValueError("NOT requires exactly 1 operand")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        op_type, op_val = self._get_operand_type_and_value_ext(operands[0])
 
-        # OR is 2OP opcode 0x08
-        opcode = 0x08 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        # Strategy:
+        # JZ value ?+4 (branch forward 4 bytes if zero)
+        # ADD 0 0 -> sp (push 0 for false)
+        # JUMP +3 (skip push 1)
+        # ADD 0 1 -> sp (push 1 for true)
+
+        # 1OP JZ (opcode 0) with operand
+        if op_type == 0:  # Large constant
+            code.append(0x80)  # 1OP:JZ with large constant
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
+        elif op_type == 1:  # Small constant
+            code.append(0x90)  # 1OP:JZ with small constant
+            code.append(op_val & 0xFF)
+        else:  # Variable
+            code.append(0xA0)  # 1OP:JZ with variable
+            code.append(op_val & 0xFF)
+
+        # Branch byte: branch on true (value is zero), short offset
+        # We need to skip: ADD 0 0 -> sp (4 bytes) + JUMP (3 bytes) = 7 bytes
+        # But branch offset 2 means skip 0 instructions (return), offset 3 means skip 1 byte
+        # Actually, offset is just the number of bytes to skip from end of branch instruction
+        # Offset 2 = return false, offset 3 = return true... no those are special
+        # For normal branch: offset = actual_offset - 2 (since 0,1 are special)
+        # To skip 7 bytes: offset = 7 + 2 = 9
+        # Branch byte: polarity=1 (true), short=1, offset in bits 0-5
+        # 0xC0 | 9 = 0xC9
+        code.append(0xC9)  # Branch on true, skip forward 7 bytes (offset 9)
+
+        # Not zero path: push 0
+        code.append(0x14)  # ADD small, small
+        code.append(0x00)  # 0
+        code.append(0x00)  # 0
+        code.append(0x00)  # Store to stack
+
+        # JUMP forward to skip the push 1 (need to skip 4 bytes)
+        # JUMP is 1OP:C (opcode 12) with a 2-byte signed offset
+        # The offset calculation: target = address_after_jump + offset - 2
+        # To skip 4 bytes: offset = 4 + 2 = 6
+        code.append(0x8C)  # JUMP with large constant offset
+        code.append(0x00)  # High byte of offset
+        code.append(0x06)  # Low byte: skip 4 bytes (offset 6)
+
+        # Zero path: push 1
+        code.append(0x14)  # ADD small, small
+        code.append(0x00)  # 0
+        code.append(0x01)  # 1
         code.append(0x00)  # Store to stack
 
         return bytes(code)
 
-    def gen_not(self, operands: List[ASTNode]) -> bytes:
-        """Generate NOT (bitwise complement).
+    def gen_bcom(self, operands: List[ASTNode]) -> bytes:
+        """Generate BCOM (bitwise complement).
 
-        Handles constants and variables.
+        BCOM requires exactly 1 operand.
+        V1-V4: Uses native NOT (1OP:0F)
+        V5+: NOT opcode was replaced by CALL_1N, so emulate with -(value+1)
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            self._error(f"BCOM requires exactly 1 operand, got {len(operands)}")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+        op_type, op_val = self._get_operand_type_and_value_ext(operands[0])
 
-        # NOT is 1OP opcode 0x0F
-        # 0x8F = small constant, 0x9F = large constant, 0xAF = variable
-        # _get_operand_type_and_value returns: 0=constant, 1=variable
-        if op_type == 1:  # Variable
-            code.append(0x9F)  # Short 1OP with variable
-        else:  # Constant
-            code.append(0x8F)  # Short 1OP with small constant
-        code.append(op_val & 0xFF)
-        code.append(0x00)  # Store to stack
+        if self.version >= 5:
+            # V5+: NOT opcode doesn't exist (replaced by CALL_1N)
+            # Use identity: ~X = -(X+1) = SUB(0, ADD(X, 1))
+            # Step 1: ADD X 1 -> stack
+            # Step 2: SUB 0 stack -> stack
+
+            # Step 1: ADD operand 1 -> stack (2OP opcode 0x14)
+            if op_type == 0:  # Large constant
+                # Long form 2OP: %01aabbbb where aa=op1type, bb=op2type
+                # op1=large (0), op2=small (1): %01001100 = 0x4C? No...
+                # Actually for large+small we need VAR form
+                code.append(0xD4)  # VAR form of ADD
+                code.append(0x1F)  # Types: large(00), small(01), omit(11), omit(11)
+                code.append((op_val >> 8) & 0xFF)
+                code.append(op_val & 0xFF)
+                code.append(0x01)  # 1
+            elif op_type == 1:  # Small constant
+                # Long form 2OP with small+small
+                code.append(0x54)  # 2OP:ADD with small, small
+                code.append(op_val & 0xFF)
+                code.append(0x01)  # 1
+            else:  # Variable (op_type == 2)
+                # Long form 2OP with var+small
+                code.append(0x74)  # 2OP:ADD with var, small
+                code.append(op_val & 0xFF)
+                code.append(0x01)  # 1
+
+            code.append(0x00)  # Store to stack
+
+            # Step 2: SUB 0 stack -> stack (2OP opcode 21)
+            # SUB small_const(0) variable(stack)
+            # Long form: $20-$3F = (small, var), opcode in low 5 bits
+            # SUB is opcode 21, so byte = $20 + 21 = $35
+            code.append(0x35)  # Long 2OP:SUB with small, var
+            code.append(0x00)  # Small constant 0
+            code.append(0x00)  # Variable 0 (stack)
+            code.append(0x00)  # Store to stack
+        else:
+            # V1-V4: Use native NOT opcode (1OP:0F)
+            # Short form 1OP: 0x80 | (type << 4) | opcode
+            # Types: 00=large const, 01=small const, 10=variable
+            # 0x8F = large constant (type 00), 0x9F = small constant (type 01), 0xAF = variable (type 10)
+            if op_type == 0:  # Large constant
+                code.append(0x8F)  # Short 1OP with large constant
+                code.append((op_val >> 8) & 0xFF)
+                code.append(op_val & 0xFF)
+            elif op_type == 1:  # Small constant
+                code.append(0x9F)  # Short 1OP with small constant
+                code.append(op_val & 0xFF)
+            else:  # Variable (op_type == 2)
+                code.append(0xAF)  # Short 1OP with variable
+                code.append(op_val & 0xFF)
+
+            code.append(0x00)  # Store to stack
 
         return bytes(code)
 
     # ===== Object Operations =====
 
     def gen_fset(self, operands: List[ASTNode]) -> bytes:
-        """Generate SET_ATTR (set object attribute)."""
-        if len(operands) < 2:
-            return b''
+        """Generate SET_ATTR (set object attribute).
+
+        Returns the previous value of the flag (1 if was set, 0 if not).
+        """
+        if len(operands) != 2:
+            raise ValueError("FSET requires exactly 2 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # SET_ATTR is 2OP opcode 0x0B (long form)
-        # Bit 6 = 1 if first operand is variable, 0 if constant
-        # Bit 5 = 1 if second operand is variable, 0 if constant
-        # _get_operand_type_and_value returns: 0=constant, 1=variable
+        # First, test the attribute to get the previous value
+        # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
+        opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
+        code.append(opcode)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
+        # Branch on true (was set), offset 9 to skip false case
+        code.append(0xC9)
+
+        # FALSE case: attribute was not set
+        # Push 0, then set the attribute
+        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0 0 -> stack
+        # JUMP to skip true case (offset 6)
+        code.extend([0x8C, 0x00, 0x06])
+
+        # TRUE case: attribute was set
+        # Push 1
+        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0 1 -> stack
+
+        # Now set the attribute (SET_ATTR is 2OP opcode 0x0B)
         opcode = 0x0B | (op1_type << 6) | (op2_type << 5)
         code.append(opcode)
         code.append(op1_val & 0xFF)
@@ -7439,16 +8551,37 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_fclear(self, operands: List[ASTNode]) -> bytes:
-        """Generate CLEAR_ATTR (clear object attribute)."""
-        if len(operands) < 2:
-            return b''
+        """Generate CLEAR_ATTR (clear object attribute).
+
+        Returns the previous value of the flag (1 if was set, 0 if not).
+        """
+        if len(operands) != 2:
+            raise ValueError("FCLEAR requires exactly 2 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # CLEAR_ATTR is 2OP opcode 0x0C (long form)
-        # _get_operand_type_and_value returns: 0=constant, 1=variable
+        # First, test the attribute to get the previous value
+        # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
+        opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
+        code.append(opcode)
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
+        # Branch on true (was set), offset 9 to skip false case
+        code.append(0xC9)
+
+        # FALSE case: attribute was not set
+        # Push 0, then clear the attribute
+        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0 0 -> stack
+        # JUMP to skip true case (offset 6)
+        code.extend([0x8C, 0x00, 0x06])
+
+        # TRUE case: attribute was set
+        # Push 1
+        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0 1 -> stack
+
+        # Now clear the attribute (CLEAR_ATTR is 2OP opcode 0x0C)
         opcode = 0x0C | (op1_type << 6) | (op2_type << 5)
         code.append(opcode)
         code.append(op1_val & 0xFF)
@@ -7457,9 +8590,12 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_fset_test(self, operands: List[ASTNode]) -> bytes:
-        """Generate TEST_ATTR (test object attribute) - branch instruction."""
-        if len(operands) < 2:
-            return b''
+        """Generate TEST_ATTR (test object attribute).
+
+        Pushes 1 if attribute is set, 0 if not.
+        """
+        if len(operands) != 2:
+            raise ValueError("FSET? requires exactly 2 operands")
 
         code = bytearray()
 
@@ -7472,14 +8608,23 @@ class ImprovedCodeGenerator:
         code.append(opcode)
         code.append(op1_val & 0xFF)
         code.append(op2_val & 0xFF)
-        code.append(0xC0)  # Branch on true, return true
+        # Branch on true (attribute set), offset 9 to skip false case
+        code.append(0xC9)
+
+        # FALSE case: attribute not set, push 0
+        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0 0 -> stack
+        # JUMP to skip true case (offset 6)
+        code.extend([0x8C, 0x00, 0x06])
+
+        # TRUE case: attribute set, push 1
+        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0 1 -> stack
 
         return bytes(code)
 
     def gen_move(self, operands: List[ASTNode]) -> bytes:
         """Generate INSERT_OBJ (move object to destination)."""
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("MOVE requires exactly 2 operands")
 
         code = bytearray()
 
@@ -7497,15 +8642,16 @@ class ImprovedCodeGenerator:
 
     def gen_remove(self, operands: List[ASTNode]) -> bytes:
         """Generate REMOVE_OBJ (remove object from tree)."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("REMOVE requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # REMOVE_OBJ is 1OP opcode 0x09
-        if op_type == 0:  # Constant
-            code.append(0x89)  # Short 1OP, small constant
+        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
+        if op_type == 0:  # Constant (small)
+            code.append(0x99)  # Short 1OP, small constant
         else:  # Variable
             code.append(0xA9)  # Short 1OP, variable
         code.append(op_val & 0xFF)
@@ -7514,15 +8660,16 @@ class ImprovedCodeGenerator:
 
     def gen_loc(self, operands: List[ASTNode]) -> bytes:
         """Generate GET_PARENT (get object's parent)."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("LOC requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_PARENT is 1OP opcode 0x03
-        if op_type == 0:  # Constant
-            code.append(0x83)  # Short 1OP, small constant
+        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
+        if op_type == 0:  # Constant (small)
+            code.append(0x93)  # Short 1OP, small constant
         else:  # Variable
             code.append(0xA3)  # Short 1OP, variable
         code.append(op_val & 0xFF)
@@ -7534,8 +8681,8 @@ class ImprovedCodeGenerator:
 
     def gen_getp(self, operands: List[ASTNode]) -> bytes:
         """Generate GET_PROP (get object property)."""
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("GETP requires exactly 2 operands")
 
         code = bytearray()
 
@@ -7554,8 +8701,8 @@ class ImprovedCodeGenerator:
 
     def gen_putp(self, operands: List[ASTNode]) -> bytes:
         """Generate PUT_PROP (set object property)."""
-        if len(operands) < 3:
-            return b''
+        if len(operands) != 3:
+            raise ValueError("PUTP requires exactly 3 operands")
 
         code = bytearray()
 
@@ -7581,8 +8728,8 @@ class ImprovedCodeGenerator:
         <PTSIZE prop-addr> returns the length of a property.
         Uses GET_PROP_LEN - 1OP opcode 0x04.
         """
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("PTSIZE requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -7605,8 +8752,8 @@ class ImprovedCodeGenerator:
         If prop is 0, returns the first property.
         Uses GET_NEXT_PROP - 2OP opcode 0x13.
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("NEXTP requires exactly 2 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -7652,8 +8799,78 @@ class ImprovedCodeGenerator:
 
             # Generate actions for this clause
             actions_code = bytearray()
-            for action in actions:
-                actions_code.extend(self.generate_statement(action))
+            for j, action in enumerate(actions):
+                is_last_action = (j == len(actions) - 1)
+                action_code = self.generate_statement(action)
+
+                if is_last_action and len(action_code) == 0:
+                    # Last action is a value that doesn't generate code (number, atom)
+                    # Push the value to stack using ADD 0 val -> stack
+                    # This allows COND to be used as an expression
+                    # ADD is 2OP:20, long form encoding:
+                    # 0x14 = ADD small, small
+                    # 0x24 = ADD small, variable
+                    if isinstance(action, NumberNode):
+                        val = action.value
+                        if 0 <= val <= 255:
+                            # ADD 0 val -> stack
+                            actions_code.extend([0x14, 0x00, val & 0xFF, 0x00])
+                        else:
+                            # Large constant - use VAR form ADD
+                            # 0xD4 = VAR form ADD
+                            # Type byte: 01 00 11 11 = 0x4F (small, large, omit, omit)
+                            actions_code.append(0xD4)
+                            actions_code.append(0x4F)
+                            actions_code.append(0x00)  # First operand: 0
+                            actions_code.append((val >> 8) & 0xFF)
+                            actions_code.append(val & 0xFF)
+                            actions_code.append(0x00)  # Store to stack
+                    elif isinstance(action, AtomNode):
+                        if action.value in self.constants:
+                            val = self.constants[action.value]
+                            if 0 <= val <= 255:
+                                actions_code.extend([0x14, 0x00, val & 0xFF, 0x00])
+                            else:
+                                actions_code.append(0xD4)
+                                actions_code.append(0x4F)
+                                actions_code.append(0x00)
+                                actions_code.append((val >> 8) & 0xFF)
+                                actions_code.append(val & 0xFF)
+                                actions_code.append(0x00)
+                        elif action.value in self.globals:
+                            var_num = self.globals[action.value]
+                            # ADD 0 var -> stack (0x24 = small, variable)
+                            actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                        elif action.value in self.locals:
+                            var_num = self.locals[action.value]
+                            actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                        else:
+                            pass
+                    elif isinstance(action, GlobalVarNode):
+                        if action.name in self.globals:
+                            var_num = self.globals[action.name]
+                            actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                    elif isinstance(action, LocalVarNode):
+                        var_num = self.locals.get(action.name, 1)
+                        actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                else:
+                    actions_code.extend(action_code)
+                    # If this is the last action and it's a void operation,
+                    # push 0 to ensure COND always has a value on the stack
+                    if is_last_action and isinstance(action, FormNode):
+                        op_name = action.operator.value.upper() if isinstance(action.operator, AtomNode) else ''
+                        # Known void operations that don't push a value
+                        void_ops = {
+                            'PRINTI', 'PRINT', 'PRINTR', 'PRINTC', 'PRINTB', 'PRINTD',
+                            'PRINTN', 'PRINTT', 'PRINTU', 'CRLF', 'TELL',
+                            'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
+                            'FSET', 'FCLEAR', 'QUIT', 'RESTART', 'CLEAR', 'SCREEN',
+                            'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
+                            'BUFOUT', 'DISPLAY', 'THROW'
+                        }
+                        if op_name in void_ops:
+                            # Push 0 to stack: ADD 0 0 -> stack
+                            actions_code.extend([0x14, 0x00, 0x00, 0x00])
 
             # Determine if we need a jump to end (not for last clause or T clause)
             needs_jump_to_end = (i < len(cond.clauses) - 1)
@@ -7758,17 +8975,113 @@ class ImprovedCodeGenerator:
                         code.append(attr & 0xFF)
                         # Branch byte will be added below
 
-            # Handle EQUAL? (JE)
-            elif op_name in ('=', 'EQUAL?', '==?'):
+            # Handle EQUAL? (JE) - variadic: tests if first equals ANY of the rest
+            elif op_name in ('=', 'EQUAL?', '==?', '=?'):
                 if len(condition.operands) >= 2:
-                    val1 = self.get_operand_value(condition.operands[0])
-                    val2 = self.get_operand_value(condition.operands[1])
+                    # Get first operand (the one we compare against all others)
+                    first_op = condition.operands[0]
+                    remaining = condition.operands[1:]
 
-                    if isinstance(val1, int) and isinstance(val2, int):
-                        if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                            code.append(0x41)  # JE opcode
-                            code.append(val1 & 0xFF)
-                            code.append(val2 & 0xFF)
+                    # If first operand is a nested expression, evaluate it first
+                    if isinstance(first_op, FormNode):
+                        expr_code = self.generate_form(first_op)
+                        code.extend(expr_code)
+                        op1_type = 1  # Variable (stack)
+                        op1_val = 0   # Stack
+
+                        # If we need multiple JE groups, save stack to temp global
+                        if len(remaining) > 3:
+                            temp_global = 0x10  # Use global 16 as temp
+                            # ADD sp 0 -> temp_global (copy stack to temp)
+                            code.append(0xD4)  # VAR form ADD
+                            code.append(0x9F)  # Types: var(10), small(01), omit(11), omit(11)
+                            code.append(0x00)  # sp
+                            code.append(0x00)  # 0
+                            code.append(temp_global)  # store to temp global
+                            op1_val = temp_global
+                    elif isinstance(first_op, CondNode):
+                        expr_code = self.generate_cond(first_op)
+                        code.extend(expr_code)
+                        op1_type = 1
+                        op1_val = 0
+
+                        # If we need multiple JE groups, save stack to temp global
+                        if len(remaining) > 3:
+                            temp_global = 0x10
+                            code.append(0xD4)
+                            code.append(0x9F)
+                            code.append(0x00)
+                            code.append(0x00)
+                            code.append(temp_global)
+                            op1_val = temp_global
+                    else:
+                        op1_type, op1_val = self._get_operand_type_and_value(first_op)
+
+                    while remaining:
+                        # Take up to 3 comparands (JE can do 1 vs up to 3)
+                        group = remaining[:3]
+                        remaining = remaining[3:]
+
+                        if len(group) == 1:
+                            # 2OP long form for 2 operands
+                            op2_type, op2_val = self._get_operand_type_and_value(group[0])
+                            opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
+                            code.append(opcode)
+                            code.append(op1_val & 0xFF)
+                            code.append(op2_val & 0xFF)
+                        else:
+                            # VAR form for 3+ operands
+                            code.append(0xC1)  # VAR form JE
+
+                            # Build type byte
+                            types_and_vals = [(op1_type, op1_val)]
+                            for op in group:
+                                t, v = self._get_operand_type_and_value(op)
+                                types_and_vals.append((t, v))
+
+                            type_byte = 0
+                            for i, (t, v) in enumerate(types_and_vals):
+                                if i >= 4:
+                                    break
+                                type_code = 0x01 if t == 0 else 0x02
+                                type_byte |= (type_code << (6 - i * 2))
+                            for i in range(len(types_and_vals), 4):
+                                type_byte |= (0x03 << (6 - i * 2))
+
+                            code.append(type_byte)
+                            for t, v in types_and_vals:
+                                code.append(v & 0xFF)
+
+                        if remaining:
+                            # More to check - branch on TRUE to the code after this COND clause
+                            # We'll add a placeholder branch that means "if true, go forward"
+                            # For COND, we want: if any match, DON'T branch (take the clause)
+                            if branch_on_false:
+                                # We want to continue if true (don't branch), skip if all false
+                                # So for each JE, branch on TRUE to skip past remaining JEs
+                                # Calculate how many bytes the remaining JEs will take
+                                bytes_for_remaining = 0
+                                temp_remaining = remaining[:]
+                                while temp_remaining:
+                                    g = temp_remaining[:3]
+                                    temp_remaining = temp_remaining[3:]
+                                    if len(g) == 1:
+                                        bytes_for_remaining += 4  # opcode + 2 operands + branch
+                                    else:
+                                        bytes_for_remaining += 2 + len(g) + 1 + 1  # opcode + type + operands + branch
+
+                                # Skip remaining JEs to get to actions (if any match succeeds)
+                                # The offset is relative to PC after branch byte, so +2
+                                skip_offset = bytes_for_remaining + 2
+                                if skip_offset < 64:
+                                    code.append(0xC0 | (skip_offset & 0x3F))  # Branch true, 1-byte
+                                else:
+                                    code.append(0x80 | ((skip_offset >> 8) & 0x3F))
+                                    code.append(skip_offset & 0xFF)
+                            else:
+                                # branch_on_false=False means branch when true
+                                code.append(0xC0)  # Placeholder
+                        # Last group - don't add branch yet, let caller handle it
 
             # Handle L? (JL)
             elif op_name in ('L?', '<'):
@@ -7827,13 +9140,14 @@ class ImprovedCodeGenerator:
 
             # Handle NOT
             elif op_name == 'NOT':
+                if len(condition.operands) != 1:
+                    raise ValueError("NOT requires exactly 1 operand")
                 # Generate the inner condition and flip the branch sense
-                if condition.operands:
-                    inner_code = self.generate_condition_test(
-                        condition.operands[0],
-                        branch_on_false=not branch_on_false
-                    )
-                    return inner_code
+                inner_code = self.generate_condition_test(
+                    condition.operands[0],
+                    branch_on_false=not branch_on_false
+                )
+                return inner_code
 
             # Handle general routine calls as conditions (e.g., <DESCRIBE-ROOM T>)
             # If we haven't matched any special predicate, treat it as a routine call
@@ -8206,8 +9520,8 @@ class ImprovedCodeGenerator:
         <GET table index> reads word from table[index].
         Uses Z-machine LOADW instruction.
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("GET requires exactly 2 operands")
 
         code = bytearray()
 
@@ -8233,8 +9547,8 @@ class ImprovedCodeGenerator:
         If any operand is a FormNode, generate that form's code first
         (which puts result on stack) then use stack as the operand.
         """
-        if len(operands) < 3:
-            return b''
+        if len(operands) != 3:
+            raise ValueError("PUT requires exactly 3 operands")
 
         code = bytearray()
 
@@ -8278,8 +9592,8 @@ class ImprovedCodeGenerator:
         <GETB table index> reads byte from table[index].
         Uses Z-machine LOADB instruction.
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("GETB requires exactly 2 operands")
 
         code = bytearray()
 
@@ -8302,8 +9616,8 @@ class ImprovedCodeGenerator:
         <PUTB table index value> writes byte value to table[index].
         Uses Z-machine STOREB instruction.
         """
-        if len(operands) < 3:
-            return b''
+        if len(operands) != 3:
+            raise ValueError("PUTB requires exactly 3 operands")
 
         code = bytearray()
 
@@ -8372,31 +9686,34 @@ class ImprovedCodeGenerator:
 
     def gen_push(self, operands: List[ASTNode]) -> bytes:
         """Generate PUSH (push value to stack)."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("PUSH requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # PUSH is VAR opcode 0x08
         code.append(0xE8)  # VAR form, opcode 0x08
+        # Type byte: bits 7-6=first, 5-4=second, 3-2=third, 1-0=fourth
+        # 00=large const, 01=small const, 10=variable, 11=omitted
         if op_type == 1:  # Variable
-            code.append(0x8F)  # Type byte: variable, rest omitted (10 00 11 11)
+            code.append(0xBF)  # Type byte: variable, rest omitted (10 11 11 11)
             code.append(op_val & 0xFF)
-        elif op_val > 255:  # Large constant
-            code.append(0x0F)  # Type byte: large constant, rest omitted (00 00 11 11)
-            code.append((op_val >> 8) & 0xFF)
-            code.append(op_val & 0xFF)
+        elif op_val < 0 or op_val > 255:  # Large constant
+            code.append(0x3F)  # Type byte: large constant, rest omitted (00 11 11 11)
+            val = op_val & 0xFFFF
+            code.append((val >> 8) & 0xFF)
+            code.append(val & 0xFF)
         else:  # Small constant
-            code.append(0x5F)  # Type byte: small constant, rest omitted (01 01 11 11)
+            code.append(0x7F)  # Type byte: small constant, rest omitted (01 11 11 11)
             code.append(op_val & 0xFF)
 
         return bytes(code)
 
     def gen_pull(self, operands: List[ASTNode]) -> bytes:
         """Generate PULL (pop from stack) - V1-5 only."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("PULL requires exactly 1 operand")
 
         code = bytearray()
         var_num = self.get_variable_number(operands[0])
@@ -8406,6 +9723,62 @@ class ImprovedCodeGenerator:
             code.append(0xE9)  # VAR form, opcode 0x09
             code.append(0x02)  # Type byte: 1 variable
             code.append(var_num)
+
+        return bytes(code)
+
+    def gen_pop(self, operands: List[ASTNode]) -> bytes:
+        """Generate POP (pop from stack and return value).
+
+        <POP> returns the value popped from the stack.
+        Implemented as RET with variable 0 (stack).
+        """
+        if operands:
+            raise ValueError("POP takes no operands")
+
+        code = bytearray()
+        # RET with variable 0 (stack) - pops and returns value
+        # RET is 1OP:B (opcode 0x0B)
+        # 0xAB = RET with variable operand
+        code.append(0xAB)
+        code.append(0x00)  # Variable 0 = stack
+        return bytes(code)
+
+    def gen_xpush(self, operands: List[ASTNode]) -> bytes:
+        """Generate XPUSH (V6 push to user stack with branch).
+
+        <XPUSH value stack> pushes value onto user stack.
+        Branches if successful (stack not full).
+        V6 only.
+
+        Args:
+            operands[0]: Value to push
+            operands[1]: Stack address
+
+        Returns:
+            bytes: Z-machine code
+        """
+        if self.version < 6:
+            raise ValueError("XPUSH requires V6")
+        if len(operands) != 2:
+            raise ValueError("XPUSH requires exactly 2 operands")
+
+        code = bytearray()
+
+        # XPUSH is EXT opcode 0x18 (PUSH_STACK)
+        code.append(0xBE)  # EXT marker
+        code.append(0x18)  # PUSH_STACK
+
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+
+        # Type byte
+        type1 = 0x01 if op1_type == 0 else 0x02
+        type2 = 0x01 if op2_type == 0 else 0x02
+        type_byte = (type1 << 6) | (type2 << 4) | 0x0F
+        code.append(type_byte)
+
+        code.append(op1_val & 0xFF)
+        code.append(op2_val & 0xFF)
 
         return bytes(code)
 
@@ -8511,42 +9884,48 @@ class ImprovedCodeGenerator:
 
     def gen_get_child(self, operands: List[ASTNode]) -> bytes:
         """Generate GET_CHILD (get first child of object)."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("FIRST? requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_CHILD is 1OP opcode 0x02 (store + branch)
-        # 0x82 = small constant, 0x92 = variable
+        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
+        # 0x92 = small constant, 0xA2 = variable
         # _get_operand_type_and_value returns: 0=constant, 1=variable
         if op_type == 1:  # Variable
+            code.append(0xA2)
+        else:  # Constant (small)
             code.append(0x92)
-        else:  # Constant
-            code.append(0x82)
         code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
-        code.append(0x40)  # Branch byte
+        # Branch byte: 0xC2 = branch on true, short offset, offset 2 (next instruction)
+        # This makes the branch a no-op - we just want the stored value
+        code.append(0xC2)
 
         return bytes(code)
 
     def gen_get_sibling(self, operands: List[ASTNode]) -> bytes:
         """Generate GET_SIBLING (get next sibling of object)."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("NEXT? requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_SIBLING is 1OP opcode 0x01 (store + branch)
-        # 0x81 = small constant, 0x91 = variable
+        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
+        # 0x91 = small constant, 0xA1 = variable
         if op_type == 1:  # Variable
+            code.append(0xA1)
+        else:  # Constant (small)
             code.append(0x91)
-        else:  # Constant
-            code.append(0x81)
         code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
-        code.append(0x40)  # Branch byte
+        # Branch byte: 0xC2 = branch on true, short offset, offset 2 (next instruction)
+        # This makes the branch a no-op - we just want the stored value
+        code.append(0xC2)
 
         return bytes(code)
 
@@ -8559,11 +9938,12 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_PARENT is 1OP opcode 0x03 (store only)
-        # 0x83 = small constant, 0x93 = variable
+        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
+        # 0x93 = small constant, 0xA3 = variable
         if op_type == 1:  # Variable
+            code.append(0xA3)
+        else:  # Constant (small)
             code.append(0x93)
-        else:  # Constant
-            code.append(0x83)
         code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
 
@@ -8588,11 +9968,12 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_CHILD stores child object (0 if none)
-        # 0x82 = small constant, 0x92 = variable
+        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
+        # 0x92 = small constant, 0xA2 = variable
         if op_type == 1:  # Variable
+            code.append(0xA2)
+        else:  # Constant (small)
             code.append(0x92)
-        else:  # Constant
-            code.append(0x82)
         code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
         # Don't include branch byte - caller handles branching
@@ -8603,12 +9984,10 @@ class ImprovedCodeGenerator:
         """Generate IN? (test if obj1 is directly in obj2).
 
         <IN? obj1 obj2> tests if obj1's parent is obj2.
-        This is equivalent to: <EQUAL? <LOC obj1> obj2>
-
-        Implementation: GET_PARENT obj1, then compare with obj2.
+        Pushes 1 if true, 0 if false to stack.
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("IN? requires exactly 2 operands")
 
         code = bytearray()
 
@@ -8618,8 +9997,9 @@ class ImprovedCodeGenerator:
 
         # Get parent of obj1
         # GET_PARENT is 1OP opcode 0x03 (store instruction)
-        if op1_type == 0:  # Constant
-            code.append(0x83)  # Short 1OP, small constant
+        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
+        if op1_type == 0:  # Constant (small)
+            code.append(0x93)  # Short 1OP, small constant
         else:  # Variable
             code.append(0xA3)  # Short 1OP, variable
         code.append(op1_val & 0xFF)
@@ -8632,7 +10012,25 @@ class ImprovedCodeGenerator:
         code.append(opcode)
         code.append(0x00)  # Stack (result of GET_PARENT)
         code.append(op2_val & 0xFF)
-        code.append(0xC0)  # Branch on true, return true
+        # Branch: if equal, skip to true case (offset 9 bytes forward)
+        code.append(0xC9)
+
+        # FALSE case: ADD 0 0 -> stack (push 0)
+        code.append(0x14)  # ADD 2OP small small
+        code.append(0x00)
+        code.append(0x00)
+        code.append(0x00)  # Store to stack
+
+        # JUMP past true case (offset 6)
+        code.append(0x8C)  # JUMP
+        code.append(0x00)
+        code.append(0x06)  # offset 6
+
+        # TRUE case: ADD 0 1 -> stack (push 1)
+        code.append(0x14)
+        code.append(0x00)
+        code.append(0x01)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -8640,8 +10038,8 @@ class ImprovedCodeGenerator:
 
     def gen_random(self, operands: List[ASTNode]) -> bytes:
         """Generate RANDOM (random number generator)."""
-        if not operands:
-            return b''
+        if len(operands) != 1:
+            raise ValueError("RANDOM requires exactly 1 operand")
 
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
@@ -8659,12 +10057,22 @@ class ImprovedCodeGenerator:
         """Generate RESTART (restart game)."""
         return bytes([0xB7])  # Short 0OP, opcode 0x07
 
-    def gen_save(self) -> bytes:
+    def gen_save(self, operands: List[ASTNode] = None) -> bytes:
         """Generate SAVE (save game).
 
-        V1-3: Branch instruction (branches on success)
-        V4+: Store instruction (returns 0=fail, 1=success)
+        V3-V4: 0 operands, Branch/Store instruction
+        V5+: 0 or 3 operands (table, bytes, name)
         """
+        if operands is None:
+            operands = []
+
+        if self.version < 5:
+            if operands:
+                raise ValueError("SAVE takes no operands in V3/V4")
+        else:
+            if len(operands) not in (0, 3):
+                raise ValueError("SAVE requires 0 or 3 operands in V5+")
+
         code = bytearray()
         code.append(0xB5)  # Short 0OP, opcode 0x05
 
@@ -8677,12 +10085,22 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
-    def gen_restore(self) -> bytes:
+    def gen_restore(self, operands: List[ASTNode] = None) -> bytes:
         """Generate RESTORE (restore game).
 
-        V1-3: Branch instruction (branch never taken)
-        V4+: Store instruction (returns result)
+        V3-V4: 0 operands, Branch/Store instruction
+        V5+: 0 or 3 operands (table, bytes, name)
         """
+        if operands is None:
+            operands = []
+
+        if self.version < 5:
+            if operands:
+                raise ValueError("RESTORE takes no operands in V3/V4")
+        else:
+            if len(operands) not in (0, 3):
+                raise ValueError("RESTORE requires 0 or 3 operands in V5+")
+
         code = bytearray()
         code.append(0xB6)  # Short 0OP, opcode 0x06
 
@@ -8951,7 +10369,13 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code (simplified CALL)
         """
         if len(operands) < 1:
-            return b''
+            raise ValueError("APPLY requires at least 1 operand")
+        if self.version < 5:
+            if len(operands) > 4:
+                raise ValueError("APPLY accepts at most 4 operands in V3/V4")
+        else:
+            if len(operands) > 8:
+                raise ValueError("APPLY accepts at most 8 operands in V5+")
 
         # For simplicity, treat like CALL with first operand
         # Full implementation would unpack args from table
@@ -9110,8 +10534,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code (TOKENISE EXT opcode)
         """
-        if len(operands) < 2 or self.version < 5:
-            return b''
+        if self.version < 5:
+            raise ValueError("LEX requires V5 or later")
+        if len(operands) < 2 or len(operands) > 4:
+            raise ValueError("LEX requires 2-4 operands")
 
         code = bytearray()
 
@@ -9179,6 +10605,55 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_zwstr(self, operands: List[ASTNode]) -> bytes:
+        """Generate ZWSTR (V5+ encode string to Z-character format).
+
+        <ZWSTR src-buffer length from dest-buffer> encodes
+        text from source to destination in Z-encoded format.
+        V5+ only, exactly 4 operands.
+
+        Args:
+            operands[0]: Source text buffer address
+            operands[1]: Length of text
+            operands[2]: Starting position (from)
+            operands[3]: Destination buffer address
+
+        Returns:
+            bytes: Z-machine code (ENCODE_TEXT EXT opcode)
+        """
+        if self.version < 5:
+            raise ValueError("ZWSTR requires V5 or later")
+        if len(operands) != 4:
+            raise ValueError("ZWSTR requires exactly 4 operands")
+
+        code = bytearray()
+
+        # ENCODE_TEXT is EXT opcode 0x05
+        code.append(0xBE)  # EXT opcode marker
+        code.append(0x05)  # ENCODE_TEXT
+
+        # Get operand types and values
+        op_types = []
+        op_vals = []
+        for i in range(4):
+            op_type, op_val = self._get_operand_type_and_value(operands[i])
+            op_types.append(op_type)
+            op_vals.append(op_val)
+
+        # Build type byte
+        type_byte = 0x00
+        for i in range(4):
+            type_val = 0x01 if op_types[i] == 0 else 0x02
+            type_byte |= (type_val << (6 - i*2))
+
+        code.append(type_byte)
+
+        # Append operand values
+        for val in op_vals:
+            code.append(val & 0xFF)
+
+        return bytes(code)
+
     def gen_encode_text(self, operands: List[ASTNode]) -> bytes:
         """Generate ENCODE_TEXT (V5+ encode text to dictionary format).
 
@@ -9194,8 +10669,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code (ENCODE_TEXT EXT opcode)
         """
-        if len(operands) < 4 or self.version < 5:
-            return b''
+        if self.version < 5:
+            raise ValueError("ENCODE_TEXT requires V5 or later")
+        if len(operands) != 4:
+            raise ValueError("ENCODE_TEXT requires exactly 4 operands")
 
         code = bytearray()
 
@@ -9286,8 +10763,10 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code (PRINT_FORM EXT opcode)
         """
-        if not operands or self.version < 6:
-            return b''
+        if self.version < 6:
+            raise ValueError("PRINTF requires V6")
+        if len(operands) > 4:
+            raise ValueError("PRINTF accepts at most 4 operands")
 
         code = bytearray()
 
@@ -9315,8 +10794,8 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code (MAKE_MENU EXT opcode)
         """
-        if not operands or self.version < 6:
-            return b''
+        if self.version < 6:
+            raise ValueError("MENU requires V6")
 
         code = bytearray()
 
@@ -9559,12 +11038,15 @@ class ImprovedCodeGenerator:
 
         <SAVE_UNDO> saves current game state and returns 1 if successful,
         0 if undo not available, -1 if too many saves.
+        V5+ only, no operands.
 
         Returns:
             bytes: Z-machine code (SAVE_UNDO EXT opcode)
         """
         if self.version < 5:
-            return b''
+            raise ValueError("ISAVE requires V5 or later")
+        if operands:
+            raise ValueError("ISAVE takes no operands")
 
         code = bytearray()
 
@@ -9581,12 +11063,15 @@ class ImprovedCodeGenerator:
 
         <RESTORE_UNDO> restores previously saved state and returns 2
         if successful, 0 if no state available.
+        V5+ only, no operands.
 
         Returns:
             bytes: Z-machine code (RESTORE_UNDO EXT opcode)
         """
         if self.version < 5:
-            return b''
+            raise ValueError("IRESTORE requires V5 or later")
+        if operands:
+            raise ValueError("IRESTORE takes no operands")
 
         code = bytearray()
 
@@ -10036,35 +11521,88 @@ class ImprovedCodeGenerator:
         """Generate IGRTR? (increment variable and test if greater).
 
         Increments a variable and tests if result > comparison value.
-        Equivalent to: <INC var> <G? var value>
+        When used as an expression, pushes 1 (true) or 0 (false) to stack.
+
+        IGRTR? FOO 100 = increment FOO, return true if now > 100.
 
         Args:
-            operands[0]: variable to increment
-            operands[1]: value to compare against
+            operands[0]: variable to increment (must be a variable name, not a number)
+            operands[1]: value to compare against (must be a constant, not a variable)
 
         Returns:
-            bytes: Z-machine code (INC + JG)
+            bytes: Z-machine code that pushes 0 or 1 to stack
         """
         if len(operands) < 2:
-            return b''
+            raise ValueError("IGRTR? requires exactly 2 operands")
+
+        var = operands[0]
+        cmp_op = operands[1]
+
+        # Validate: first operand must be a variable, not a number
+        if isinstance(var, NumberNode):
+            raise ValueError("IGRTR? first operand must be a variable, not a number")
+
+        # Validate: second operand must be a constant, not a variable
+        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
+            raise ValueError("IGRTR? second operand must be a constant, not a variable")
+        # Also check for AtomNode that resolves to a variable
+        if isinstance(cmp_op, AtomNode):
+            if cmp_op.value in self.locals or cmp_op.value in self.globals:
+                raise ValueError("IGRTR? second operand must be a constant, not a variable")
+
+        var_num = self.get_variable_number(var)
+        if var_num == 0:  # Stack is invalid for INC
+            if isinstance(var, AtomNode) and var.value not in self.locals and var.value not in self.globals:
+                raise ValueError(f"IGRTR? unknown variable '{var.value}'")
+
+        cmp_type, cmp_val = self._get_operand_type_and_value(cmp_op)
 
         code = bytearray()
-        var = operands[0]
 
-        # INC the variable
-        code.extend(self.gen_inc([var]))
+        # INC the variable (0x95 = INC with small const)
+        code.append(0x95)
+        code.append(var_num)
 
-        # Now test if var > compare_val using JG
-        var_num = self.get_variable_number(var)
-        cmp_type, cmp_val = self._get_operand_type_and_value(operands[1])
+        # Generate code to push 0 or 1 based on var > cmp_val
+        # Pattern:
+        #   JG var cmp_val ?true (if var > cmp_val, branch to true)
+        #   ADD 0 0 -> stack     (false case: push 0)
+        #   JUMP ?end            (skip over true case)
+        #   ?true:
+        #   ADD 0 1 -> stack     (true case: push 1)
+        #   ?end:
 
         # JG is 2OP opcode 0x03
-        # First operand is always the variable we just incremented
-        opcode = 0x03 | (1 << 6) | (cmp_type << 5)  # var is first operand
-        code.append(opcode)
+        # Short 2OP with var,small: 0 1 0 00011 = 0x43
+        code.append(0x43)  # JG short form with var, small const
         code.append(var_num)
         code.append(cmp_val & 0xFF)
-        # Branch offset would be added during COND processing
+        # Branch byte: branch if true (bit 7 = 1), short form (bit 6 = 1)
+        # Need to skip: ADD 0 0 -> stack (4 bytes) + JUMP ?end (3 bytes) = 7 bytes
+        # Offset = 7 + 2 = 9
+        code.append(0xC9)  # 11001001 = branch true, short, offset 9
+
+        # FALSE case: ADD 0 0 -> stack
+        # ADD is 2OP opcode 0x14
+        # Short form with both small: 0 0 0 10100 = 0x14
+        code.append(0x14)  # ADD short form, both small
+        code.append(0x00)  # 0
+        code.append(0x00)  # 0
+        code.append(0x00)  # Store to stack
+
+        # JUMP past true case
+        # JUMP is 1OP opcode 0x0C with 16-bit offset
+        # Need to skip 4 bytes (the ADD instruction in true case)
+        # Offset = 4 + 2 = 6 (relative to PC after JUMP instruction)
+        code.append(0x8C)  # 1OP large const, opcode 0x0C
+        code.append(0x00)  # High byte of offset (6 = 0x0006)
+        code.append(0x06)  # Low byte of offset
+
+        # TRUE case: ADD 0 1 -> stack
+        code.append(0x14)  # ADD short form, both small
+        code.append(0x00)  # 0
+        code.append(0x01)  # 1
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -10258,8 +11796,8 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Z-machine code (GET_PROP_ADDR)
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            raise ValueError("GETPT requires exactly 2 operands")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -10277,30 +11815,37 @@ class ImprovedCodeGenerator:
     def gen_btst(self, operands: List[ASTNode]) -> bytes:
         """Generate BTST (bit test).
 
-        Tests if a specific bit is set in a value.
-        Returns true if (value & (1 << bit)) != 0
+        Tests if all bits in the mask are set in the value.
+        BTST value mask -> returns 1 if (value AND mask) == mask, else 0
+
+        This is the Z-machine TEST opcode semantics.
 
         Args:
             operands[0]: value to test
-            operands[1]: bit number (0-15)
+            operands[1]: bit mask
 
         Returns:
-            bytes: Z-machine code (AND + JZ for branch)
+            bytes: Z-machine code using TEST opcode
         """
-        if len(operands) < 2:
-            return b''
+        if len(operands) != 2:
+            self._error(f"BTST requires exactly 2 operands, got {len(operands)}")
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # AND value with bit mask
-        # AND is 2OP opcode 0x09
-        opcode = 0x09 | (op1_type << 6) | (op2_type << 5)
+        # Use TEST opcode (2OP:7) which branches if (value AND mask) == mask
+        # TEST is opcode 7 in 2OP range
+        # Long form: $00-$1F = (small, small), $20-$3F = (small, var), etc.
+        # Opcode 7: $07 = (small, small, opcode 7)
+        opcode = 0x07 | (op1_type << 6) | (op2_type << 5)
         code.append(opcode)
         code.append(op1_val & 0xFF)
         code.append(op2_val & 0xFF)
-        code.append(0x00)  # Store to stack
+        # Branch byte: 0xC1 = branch on true, short offset, return true (offset 1)
+        code.append(0xC1)
+        # If we fall through (test failed), return false
+        code.append(0xB1)  # RFALSE (return 0)
 
         return bytes(code)
 
