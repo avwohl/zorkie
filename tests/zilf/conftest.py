@@ -643,8 +643,12 @@ class RoutineAssertion:
             zm = ZMachine(result.story_file, self.version)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
-            assert exec_result.return_value == 1, \
-                f"Condition check failed - one or more conditions were false"
+            # The GO routine does <PRINTN <TEST?ROUTINE>>, so check output
+            # If TEST?ROUTINE returns 1 (true), output will be "1\n"
+            # If it returns 0 (false), output will be "0\n"
+            output_value = exec_result.output.strip()
+            assert output_value == "1", \
+                f"Condition check failed - one or more conditions were false (output={output_value})"
 
     def generates_code_matching(self, pattern: str) -> 'RoutineAssertion':
         """Assert that generated code matches a regex pattern."""
@@ -761,7 +765,10 @@ class GlobalsAssertion:
         source_parts.extend(self.additional_globals)
 
         checks = " ".join(f"<COND (<NOT {c}> <RFALSE>)>" for c in conditions)
-        source_parts.append(f'<ROUTINE GO () {checks} <RTRUE>>')
+        # Create test routine that returns true/false based on conditions
+        source_parts.append(f'<ROUTINE TEST?ROUTINE () {checks} <RTRUE>>')
+        # GO routine prints the return value so we can check it
+        source_parts.append('<ROUTINE GO () <PRINTN <TEST?ROUTINE>> <QUIT>>')
 
         result = compiler._compile("\n".join(source_parts))
         assert result.success, f"Compilation failed: {result.errors}"
@@ -770,8 +777,10 @@ class GlobalsAssertion:
             zm = ZMachine(result.story_file, self.version)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
-            assert exec_result.return_value == 1, \
-                f"Condition check failed - one or more conditions were false"
+            # Check output instead of return_value since dfrotz doesn't capture it
+            output_value = exec_result.output.strip()
+            assert output_value == "1", \
+                f"Condition check failed - one or more conditions were false (output={output_value})"
 
     def generates_code_matching(self, pattern: str) -> 'GlobalsAssertion':
         """Assert that generated code matches a regex pattern."""

@@ -1564,6 +1564,90 @@ class ZILCompiler:
         if string_table is not None:
             self.log(f"  String table: {len(string_table)} unique strings")
 
+        # Build dictionary first to get word offsets for SYNONYM properties
+        self.log("Building dictionary vocabulary...")
+        dictionary = Dictionary(self.version)
+
+        # Add BUZZ words
+        if program.buzz_words:
+            dictionary.add_words(program.buzz_words, 'buzz')
+
+        # Add standalone SYNONYM words
+        if program.synonym_words:
+            dictionary.add_words(program.synonym_words, 'synonym')
+
+        # Extract SYNONYM and ADJECTIVE words from objects/rooms
+        obj_num = 1
+        for obj in program.objects:
+            if 'SYNONYM' in obj.properties:
+                synonyms = obj.properties['SYNONYM']
+                if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
+                    for syn in synonyms:
+                        if hasattr(syn, 'value'):
+                            val = syn.value
+                            if isinstance(val, (int, float)):
+                                val = str(val)
+                            dictionary.add_synonym(val, obj_num)
+                        elif isinstance(syn, str):
+                            dictionary.add_synonym(syn, obj_num)
+                        elif isinstance(syn, (int, float)):
+                            dictionary.add_synonym(str(syn), obj_num)
+                elif hasattr(synonyms, 'value'):
+                    val = synonyms.value
+                    if isinstance(val, (int, float)):
+                        val = str(val)
+                    dictionary.add_synonym(val, obj_num)
+
+            if 'ADJECTIVE' in obj.properties:
+                adjectives = obj.properties['ADJECTIVE']
+                if hasattr(adjectives, '__iter__') and not isinstance(adjectives, str):
+                    for adj in adjectives:
+                        if hasattr(adj, 'value'):
+                            val = adj.value
+                            if isinstance(val, (int, float)):
+                                val = str(val)
+                            dictionary.add_adjective(val, obj_num)
+                        elif isinstance(adj, str):
+                            dictionary.add_adjective(adj, obj_num)
+                        elif isinstance(adj, (int, float)):
+                            dictionary.add_adjective(str(adj), obj_num)
+                elif hasattr(adjectives, 'value'):
+                    val = adjectives.value
+                    if isinstance(val, (int, float)):
+                        val = str(val)
+                    dictionary.add_adjective(val, obj_num)
+            obj_num += 1
+
+        for room in program.rooms:
+            if 'SYNONYM' in room.properties:
+                synonyms = room.properties['SYNONYM']
+                if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
+                    for syn in synonyms:
+                        if hasattr(syn, 'value'):
+                            dictionary.add_synonym(syn.value, obj_num)
+                        elif isinstance(syn, str):
+                            dictionary.add_synonym(syn, obj_num)
+                elif hasattr(synonyms, 'value'):
+                    dictionary.add_synonym(synonyms.value, obj_num)
+            obj_num += 1
+
+        # Add words from SYNTAX definitions
+        for syntax_def in program.syntax:
+            if syntax_def.pattern:
+                for word in syntax_def.pattern:
+                    if word.upper() not in ('OBJECT', 'FIND', 'HAVE', 'HELD',
+                                             'ON-GROUND', 'IN-ROOM', 'TAKE',
+                                             'MANY', 'SEARCH'):
+                        if not (isinstance(word, str) and
+                                (word.startswith('(') or word.startswith('='))):
+                            word_lower = word.lower()
+                            word_type = 'verb' if syntax_def.pattern.index(word) == 0 else 'prep'
+                            dictionary.add_word(word_lower, word_type)
+
+        # Get word offsets for SYNONYM property fixups
+        dict_word_offsets = dictionary.get_word_offsets()
+        self.log(f"  Dictionary contains {len(dictionary.words)} words")
+
         # Build object table with proper properties
         self.log("Building object table...")
         obj_table = ObjectTable(self.version, text_encoder=codegen.encoder)
@@ -1626,6 +1710,17 @@ class ZILCompiler:
         }
         next_prop_num = 3
 
+        # Check if SYNONYM or ADJECTIVE are used - add to prop_map
+        uses_synonym = any('SYNONYM' in obj.properties for obj in program.objects + program.rooms)
+        uses_adjective = any('ADJECTIVE' in obj.properties for obj in program.objects + program.rooms)
+
+        if uses_synonym:
+            prop_map['SYNONYM'] = next_prop_num
+            next_prop_num += 1
+        if uses_adjective:
+            prop_map['ADJECTIVE'] = next_prop_num
+            next_prop_num += 1
+
         # Add user-defined properties from PROPDEF
         for propdef in program.propdefs:
             if propdef.name not in prop_map:
@@ -1633,20 +1728,72 @@ class ZILCompiler:
                 next_prop_num += 1
                 self.log(f"  PROPDEF {propdef.name} -> property #{prop_map[propdef.name]}")
 
+        # Track dictionary word fixups for object properties
+        # Each entry is (word, property_offset) - to be resolved during assembly
+        dict_word_fixups = []
+
         # Helper to extract property number and value
-        def extract_properties(obj_node):
+        def extract_properties(obj_node, obj_idx):
             """Extract properties from object node."""
             nonlocal next_prop_num  # Allow modification of outer scope variable
             props = {}
             for key, value in obj_node.properties.items():
-                if key in prop_map:
+                if key == 'SYNONYM' and 'SYNONYM' in prop_map:
+                    # Store dictionary word offset placeholder for first synonym
+                    prop_num = prop_map['SYNONYM']
+                    synonyms = value
+                    first_word = None
+                    if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
+                        for syn in synonyms:
+                            if hasattr(syn, 'value'):
+                                first_word = syn.value
+                            elif isinstance(syn, str):
+                                first_word = syn
+                            break
+                    elif hasattr(synonyms, 'value'):
+                        first_word = synonyms.value
+
+                    if first_word:
+                        word_lower = str(first_word).lower()
+                        if word_lower in dict_word_offsets:
+                            # Store placeholder: word_offset | 0x8000 (high bit marks as fixup needed)
+                            # The assembler will add dictionary base address
+                            word_offset = dict_word_offsets[word_lower]
+                            props[prop_num] = word_offset | 0x8000  # Mark for fixup
+                            dict_word_fixups.append((word_lower, obj_idx, prop_num))
+                        else:
+                            props[prop_num] = 0  # Word not found
+                elif key == 'ADJECTIVE' and 'ADJECTIVE' in prop_map:
+                    # Store dictionary word offset placeholder for first adjective
+                    prop_num = prop_map['ADJECTIVE']
+                    adjectives = value
+                    first_word = None
+                    if hasattr(adjectives, '__iter__') and not isinstance(adjectives, str):
+                        for adj in adjectives:
+                            if hasattr(adj, 'value'):
+                                first_word = adj.value
+                            elif isinstance(adj, str):
+                                first_word = adj
+                            break
+                    elif hasattr(adjectives, 'value'):
+                        first_word = adjectives.value
+
+                    if first_word:
+                        word_lower = str(first_word).lower()
+                        if word_lower in dict_word_offsets:
+                            word_offset = dict_word_offsets[word_lower]
+                            props[prop_num] = 0xFE00 | (word_offset & 0xFF)
+                            dict_word_fixups.append((word_lower, obj_idx, prop_num))
+                        else:
+                            props[prop_num] = 0
+                elif key in prop_map:
                     prop_num = prop_map[key]
                     # Extract value from AST node
                     if hasattr(value, 'value'):
                         props[prop_num] = value.value
                     else:
                         props[prop_num] = value
-                elif key not in ['FLAGS', 'SYNONYM', 'ADJECTIVE', 'IN', 'LOC']:
+                elif key not in ['FLAGS', 'IN', 'LOC']:
                     # Unknown property, assign next number
                     if key not in prop_map:
                         prop_map[key] = next_prop_num
@@ -1735,10 +1882,10 @@ class ZILCompiler:
                 sibling_of[child_list[-1]] = 0
 
         # Add objects with properties and tree structure
-        for name, node, is_room in all_objects:
+        for obj_idx, (name, node, is_room) in enumerate(all_objects):
             obj_num = obj_name_to_num[name]
             attributes = flags_to_attributes(node.properties.get('FLAGS', []))
-            properties = extract_properties(node)
+            properties = extract_properties(node, obj_idx)
             obj_table.add_object(
                 name=name,
                 parent=parent_of.get(obj_num, 0),
@@ -1760,131 +1907,8 @@ class ZILCompiler:
 
         self.log(f"  Registered {len(flag_bit_map)} flags, {len(obj_name_to_num)} objects")
 
-        # Build dictionary with vocabulary from objects
-        self.log("Building dictionary...")
-        dictionary = Dictionary(self.version)
-
-        # Add BUZZ words (noise words that parser recognizes but ignores)
-        if program.buzz_words:
-            self.log(f"  Adding {len(program.buzz_words)} BUZZ words")
-            dictionary.add_words(program.buzz_words, 'buzz')
-
-        # Add standalone SYNONYM words (directions, verb synonyms, etc.)
-        if program.synonym_words:
-            self.log(f"  Adding {len(program.synonym_words)} SYNONYM words")
-            dictionary.add_words(program.synonym_words, 'synonym')
-
-        # Don't add hardcoded standard verbs - only add words from source
-        # The official compiler only includes words that appear in:
-        #   - SYNTAX declarations
-        #   - BUZZ words
-        #   - Standalone SYNONYM declarations
-        #   - Object/Room SYNONYM and ADJECTIVE properties
-        #   - PSEUDO properties
-
-        # Extract SYNONYM and ADJECTIVE from objects
-        obj_num = 1
-        for obj in program.objects:
-            # Add synonyms (nouns that refer to this object)
-            if 'SYNONYM' in obj.properties:
-                synonyms = obj.properties['SYNONYM']
-                # SYNONYM can be a list of atoms
-                if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
-                    for syn in synonyms:
-                        if hasattr(syn, 'value'):
-                            val = syn.value
-                            # Convert to string if it's a number
-                            if isinstance(val, (int, float)):
-                                val = str(val)
-                            dictionary.add_synonym(val, obj_num)
-                        elif isinstance(syn, str):
-                            dictionary.add_synonym(syn, obj_num)
-                        elif isinstance(syn, (int, float)):
-                            dictionary.add_synonym(str(syn), obj_num)
-                elif hasattr(synonyms, 'value'):
-                    val = synonyms.value
-                    if isinstance(val, (int, float)):
-                        val = str(val)
-                    dictionary.add_synonym(val, obj_num)
-
-            # Add adjectives
-            if 'ADJECTIVE' in obj.properties:
-                adjectives = obj.properties['ADJECTIVE']
-                if hasattr(adjectives, '__iter__') and not isinstance(adjectives, str):
-                    for adj in adjectives:
-                        if hasattr(adj, 'value'):
-                            val = adj.value
-                            if isinstance(val, (int, float)):
-                                val = str(val)
-                            dictionary.add_adjective(val, obj_num)
-                        elif isinstance(adj, str):
-                            dictionary.add_adjective(adj, obj_num)
-                        elif isinstance(adj, (int, float)):
-                            dictionary.add_adjective(str(adj), obj_num)
-                elif hasattr(adjectives, 'value'):
-                    val = adjectives.value
-                    if isinstance(val, (int, float)):
-                        val = str(val)
-                    dictionary.add_adjective(val, obj_num)
-
-            # DISABLED: Don't add PSEUDO words to dictionary
-            # PSEUDO strings are handled internally by the game, not via dictionary lookup
-            # if 'PSEUDO' in obj.properties:
-            #     pseudo = obj.properties['PSEUDO']
-            #     if hasattr(pseudo, '__iter__') and not isinstance(pseudo, str):
-            #         # PSEUDO is list of string/routine pairs: "WORD" HANDLER "WORD2" HANDLER2
-            #         for i, item in enumerate(pseudo):
-            #             # Only take strings (odd indices are routines)
-            #             if hasattr(item, 'value') and isinstance(item.value, str):
-            #                 dictionary.add_word(item.value.lower(), 'pseudo')
-
-            obj_num += 1
-
-        # Extract from rooms too
-        for room in program.rooms:
-            if 'SYNONYM' in room.properties:
-                synonyms = room.properties['SYNONYM']
-                if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
-                    for syn in synonyms:
-                        if hasattr(syn, 'value'):
-                            dictionary.add_synonym(syn.value, obj_num)
-                        elif isinstance(syn, str):
-                            dictionary.add_synonym(syn, obj_num)
-                elif hasattr(synonyms, 'value'):
-                    dictionary.add_synonym(synonyms.value, obj_num)
-
-            # DISABLED: Don't add PSEUDO words from rooms
-            # if 'PSEUDO' in room.properties:
-            #     pseudo = room.properties['PSEUDO']
-            #     if hasattr(pseudo, '__iter__') and not isinstance(pseudo, str):
-            #         for i, item in enumerate(pseudo):
-            #             if hasattr(item, 'value') and isinstance(item.value, str):
-            #                 dictionary.add_word(item.value.lower(), 'pseudo')
-
-            obj_num += 1
-
-        # Extract verbs and prepositions from SYNTAX definitions
-        syntax_words = set()
-        for syntax_def in program.syntax:
-            if syntax_def.pattern:
-                for word in syntax_def.pattern:
-                    # Skip OBJECT and other placeholders
-                    if word.upper() not in ('OBJECT', 'FIND', 'HAVE', 'HELD',
-                                             'ON-GROUND', 'IN-ROOM', 'TAKE',
-                                             'MANY', 'SEARCH'):
-                        # Skip special markers like flags in parens
-                        if not (isinstance(word, str) and
-                                (word.startswith('(') or word.endswith('BIT'))):
-                            word_lower = word.lower() if isinstance(word, str) else str(word).lower()
-                            syntax_words.add(word_lower)
-                            # First word is verb, others are prepositions
-                            word_type = 'verb' if syntax_def.pattern.index(word) == 0 else 'prep'
-                            dictionary.add_word(word_lower, word_type)
-
-        if syntax_words:
-            self.log(f"  Added {len(syntax_words)} words from SYNTAX definitions")
-
-        self.log(f"  Dictionary contains {len(dictionary.words)} words")
+        # Dictionary was already built earlier for SYNONYM property resolution
+        # Just build the final dictionary data
         dict_data = dictionary.build()
 
         # Run optimization passes before assembly
@@ -1932,6 +1956,11 @@ class ZILCompiler:
             abbreviations_table.encode_abbreviations(text_encoder)
             self.log(f"  Encoded {len(abbreviations_table)} optimized abbreviations")
 
+        # Build extension table if needed (V5+)
+        extension_table = codegen.build_extension_table()
+        if extension_table:
+            self.log(f"  Built extension table: {len(extension_table)} bytes")
+
         # Assemble story file
         self.log("Assembling story file...")
         assembler = ZAssembler(self.version)
@@ -1945,7 +1974,8 @@ class ZILCompiler:
             table_data=table_data,
             table_offsets=table_offsets,
             routine_fixups=routine_fixups,
-            table_routine_fixups=table_routine_fixups
+            table_routine_fixups=table_routine_fixups,
+            extension_table=extension_table
         )
 
         return story

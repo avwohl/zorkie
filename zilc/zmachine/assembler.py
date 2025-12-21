@@ -285,7 +285,8 @@ class ZAssembler:
                         table_data: bytes = b'',
                         table_offsets: dict = None,
                         routine_fixups: list = None,
-                        table_routine_fixups: list = None) -> bytes:
+                        table_routine_fixups: list = None,
+                        extension_table: bytes = b'') -> bytes:
         """
         Build complete story file.
 
@@ -300,6 +301,7 @@ class ZAssembler:
             table_offsets: Dict mapping table index to offset within table_data
             routine_fixups: List of (code_offset, routine_offset) for call address patching
             table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
+            extension_table: Header extension table bytes (V5+)
 
         Returns:
             Complete story file as bytes
@@ -481,7 +483,19 @@ class ZAssembler:
                 story.append(0)
                 current_addr += 1
 
-        # Static memory starts after tables (tables are in dynamic memory)
+        # Add extension table (V5+) in dynamic memory
+        extension_table_addr = 0
+        if extension_table and self.version >= 5:
+            extension_table_addr = current_addr
+            story.extend(extension_table)
+            current_addr += len(extension_table)
+
+            # Align to even boundary
+            while len(story) % 2 != 0:
+                story.append(0)
+                current_addr += 1
+
+        # Static memory starts after tables and extension table (in dynamic memory)
         self.static_mem_base = current_addr
 
         # Mark start of high memory (where code begins)
@@ -596,6 +610,10 @@ class ZAssembler:
         struct.pack_into('>H', story, 0x0E, self.static_mem_base)  # Static memory base
         if abbrev_addr > 0:
             struct.pack_into('>H', story, 0x18, abbrev_addr)  # Abbreviations table address
+
+        # V5+ extension table address
+        if extension_table_addr > 0:
+            struct.pack_into('>H', story, 0x36, extension_table_addr)  # Extension table address
 
         # V6-7 specific header fields (V8 doesn't use these)
         if self.version in (6, 7):

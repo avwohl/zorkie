@@ -1175,7 +1175,6 @@ class TestLowcore:
         AssertRoutine("", "<LOWCORE FLAGS 123>") \
             .generates_code_matching(r"^\s*PUT 0,8,123")
 
-    @pytest.mark.skip(reason="Extension table auto-creation not implemented")
     def test_lowcore_extension(self):
         """Test LOWCORE with extension table."""
         AssertRoutine('"AUX" X', "<SET X <LOWCORE MSLOCY>> <LOWCORE MSETBL 12345>") \
@@ -1396,12 +1395,12 @@ class TestPrintExtended:
 class TestRead:
     """Tests for READ opcode."""
 
-    @pytest.mark.skip(reason="V3 READ requires status line globals (HERE at global 0) not yet implemented")
     def test_read_v3(self):
         """Test READ opcode in V3."""
         # V1 to V3, 2 operands
         # V3 status line reads global 0 to get current location object
-        # This requires HERE to be at global 0 (var 16), not a user-defined position
+        # Output includes V3 status line (location name, score, moves)
+        # Object CAT has no short name, so location shows empty
         AssertRoutine("", "<READ ,TEXTBUF ,LEXBUF> <PRINTC <GETB ,TEXTBUF 2>> <PRINTB <GET ,LEXBUF 1>>") \
             .in_v3() \
             .with_global("<GLOBAL TEXTBUF <ITABLE 50 (BYTE LENGTH) 0>>") \
@@ -1409,7 +1408,7 @@ class TestRead:
             .with_global("<OBJECT CAT (SYNONYM CAT)>") \
             .with_global("<GLOBAL HERE CAT>") \
             .with_input("cat") \
-            .outputs("acat")
+            .outputs("                                                  Score: 0        Moves: 0\n\nacat")
 
     def test_read_v4_compiles(self):
         """Test READ compilation in V4."""
@@ -1476,32 +1475,32 @@ class TestSetQuirks:
           variable whose index is in FOO.
         """
         # void context
-        # Note: FOO=22 because our compiler reserves globals 16-21 for parser globals
-        # (PLAYER, SCORE, HERE, WINNER, MOVES), so user globals start at 22
-        AssertRoutine('"AUX" (FOO 22)', "<SET .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        # Note: FOO=23 because our compiler reserves globals 16-22 for parser globals
+        # (V3: HERE, SCORE, MOVES, PRSA, PRSO, PRSI, WINNER), so user globals start at 23
+        AssertRoutine('"AUX" (FOO 23)', "<SET .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("123\n1")
 
-        AssertRoutine('"AUX" (FOO 22)', "<SETG ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 23)', "<SETG ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
-            .outputs("22\n123")
+            .outputs("23\n123")
 
-        AssertRoutine('"AUX" (FOO 22)', "<SETG .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 23)', "<SETG .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
-            .outputs("22\n123")
+            .outputs("23\n123")
 
-        AssertRoutine('"AUX" (FOO 22)', "<SET ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 23)', "<SET ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("123\n1")
 
         # value context (more limited)
-        AssertRoutine('"AUX" (FOO 22)', "<PRINTN <SET .FOO 123>> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 23)', "<PRINTN <SET .FOO 123>> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("123\n1")
 
-        AssertRoutine('"AUX" (FOO 22)', "<PRINTN <SETG ,MYGLOBAL 123>> <CRLF> <PRINTN .FOO>") \
+        AssertRoutine('"AUX" (FOO 23)', "<PRINTN <SETG ,MYGLOBAL 123>> <CRLF> <PRINTN .FOO>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
-            .outputs("123\n22")
+            .outputs("123\n23")
 
 
 class TestOriginal:

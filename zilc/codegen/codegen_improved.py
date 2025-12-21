@@ -77,6 +77,11 @@ class ImprovedCodeGenerator:
         self.table_offsets: Dict[int, int] = {}  # table_index -> offset within table data
         self._table_data_size = 0  # Running total of table data size
 
+        # Extension table tracking (V5+)
+        # Track the maximum extension word index used (e.g., MSLOCY=2, MSETBL=3)
+        # If > 0, an extension table needs to be created
+        self._max_extension_word = 0
+
         # Routine call placeholders - map placeholder_index to routine_name
         # Placeholders are encoded as 0xFD + index (high byte) + index (low byte)
         self._routine_placeholders: Dict[int, str] = {}
@@ -103,19 +108,36 @@ class ImprovedCodeGenerator:
 
         # Parser system globals (standard ZIL globals)
         # These are allocated in a specific range for parser use
-        self.parser_globals = {
-            'PRSA': 0x10,   # Parser action (verb number)
-            'PRSO': 0x11,   # Parser direct object
-            'PRSI': 0x12,   # Parser indirect object
-            'HERE': 0x13,   # Current location
-            'WINNER': 0x14, # Current actor (usually player)
-            'MOVES': 0x15,  # Move counter
-        }
+        # V3: Status line reads global 0 for location, 1 for score, 2 for moves
+        # V4+: No mandatory layout, but keep consistent ordering
+        if self.version <= 3:
+            # V3 layout: HERE, SCORE, MOVES must be at globals 0, 1, 2
+            self.parser_globals = {
+                'HERE': 0x10,   # Current location (global 0 for status line)
+                'SCORE': 0x11,  # Score (global 1 for status line)
+                'MOVES': 0x12,  # Move counter (global 2 for status line)
+                'PRSA': 0x13,   # Parser action (verb number)
+                'PRSO': 0x14,   # Parser direct object
+                'PRSI': 0x15,   # Parser indirect object
+                'WINNER': 0x16, # Current actor (usually player)
+            }
+            self.next_global = 0x17  # Start user globals after parser globals
+        else:
+            # V4+ layout: no status line constraint
+            self.parser_globals = {
+                'PRSA': 0x10,   # Parser action (verb number)
+                'PRSO': 0x11,   # Parser direct object
+                'PRSI': 0x12,   # Parser indirect object
+                'HERE': 0x13,   # Current location
+                'WINNER': 0x14, # Current actor (usually player)
+                'MOVES': 0x15,  # Move counter
+                'SCORE': 0x16,  # Score
+            }
+            self.next_global = 0x17  # Start user globals after parser globals
 
         # Reserve these globals
         for name, num in self.parser_globals.items():
             self.globals[name] = num
-        self.next_global = 0x16  # Start user globals after parser globals
 
         # Standard verb action numbers (V? constants)
         # These map to PRSA values for common verbs
@@ -230,7 +252,13 @@ class ImprovedCodeGenerator:
 
         # Process globals (register names and capture initial values)
         for global_node in program.globals:
-            self.globals[global_node.name] = self.next_global
+            # Check if this is a parser global (like HERE, SCORE, MOVES)
+            # If so, don't allocate a new slot - use the reserved one
+            if global_node.name not in self.parser_globals:
+                self.globals[global_node.name] = self.next_global
+                self.next_global += 1
+            # else: already in self.globals from parser_globals initialization
+
             # Capture initial value if provided
             if global_node.initial_value is not None:
                 # Check for TableNode first - has special handling for flags like LEXV
@@ -249,7 +277,6 @@ class ImprovedCodeGenerator:
                     init_val = self.get_operand_value(global_node.initial_value)
                     if isinstance(init_val, int):
                         self.global_values[global_node.name] = init_val
-            self.next_global += 1
 
         # Reserve globals for ACTIONS and PREACTIONS tables
         if self.action_table:
@@ -1095,7 +1122,7 @@ class ImprovedCodeGenerator:
             return self.gen_assigned(form.operands)
         elif op_name == 'NOT?':
             return self.gen_not_predicate(form.operands)
-        elif op_name == 'TRUE?':
+        elif op_name == 'TRUE?' or op_name == 'T?':
             return self.gen_true_predicate(form.operands)
         elif op_name == 'IGRTR?':
             return self.gen_igrtr(form.operands)
@@ -6355,6 +6382,9 @@ class ImprovedCodeGenerator:
             elif name in self.LOWCORE_EXTENSION:
                 is_extension = True
                 ext_offset = self.LOWCORE_EXTENSION[name]
+                # Track max extension word used for auto-creation
+                if ext_offset > self._max_extension_word:
+                    self._max_extension_word = ext_offset
         elif isinstance(first_op, FormNode):
             # Subfield access: (NAME subfield)
             if first_op.operands and isinstance(first_op.operands[0], AtomNode):
@@ -8737,13 +8767,49 @@ class ImprovedCodeGenerator:
         if len(operands) == 2:
             op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-            # JE op1 op2 ?true (branch to true case)
-            opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
-            code.append(opcode)
-            code.append(op1_val & 0xFF)
-            code.append(op2_val & 0xFF)
-            # Branch: if equal, skip to true case (offset 9 bytes forward)
-            code.append(0xC9)  # branch on true, short, offset 9
+            # Check if we need large constant encoding
+            needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+            needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+            if needs_large1 or needs_large2:
+                # Use VAR form JE for large constants
+                # VAR form: 0xC1 types_byte operands...
+                code.append(0xC1)  # VAR form 2OP, opcode JE (0x01)
+
+                # Build type byte
+                type1 = 0b00 if needs_large1 else (0b01 if op1_type == 0 else 0b10)
+                type2 = 0b00 if needs_large2 else (0b01 if op2_type == 0 else 0b10)
+                types_byte = (type1 << 6) | (type2 << 4) | 0x0F  # 0x0F = omit, omit
+                code.append(types_byte)
+
+                # Operand 1
+                if needs_large1:
+                    code.append((op1_val >> 8) & 0xFF)
+                    code.append(op1_val & 0xFF)
+                else:
+                    code.append(op1_val & 0xFF)
+
+                # Operand 2
+                if needs_large2:
+                    code.append((op2_val >> 8) & 0xFF)
+                    code.append(op2_val & 0xFF)
+                else:
+                    code.append(op2_val & 0xFF)
+
+                # Branch: if equal, skip to true case
+                # Calculate offset based on sizes
+                false_case_size = 4 + 3  # ADD + JUMP
+                true_case_start = false_case_size + 2  # +2 for branch bytes
+                code.append(0xC0 | (true_case_start & 0x3F))  # branch on true, short
+            else:
+                # Standard 2OP long form for small operands
+                # JE op1 op2 ?true (branch to true case)
+                opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
+                code.append(opcode)
+                code.append(op1_val & 0xFF)
+                code.append(op2_val & 0xFF)
+                # Branch: if equal, skip to true case (offset 9 bytes forward)
+                code.append(0xC9)  # branch on true, short, offset 9
 
             # FALSE case: ADD 0 0 -> stack (push 0)
             code.append(0x14)  # ADD 2OP small small
@@ -9120,9 +9186,9 @@ class ImprovedCodeGenerator:
         return self.gen_zero_test(operands)
 
     def gen_true_predicate(self, operands: List[ASTNode]) -> bytes:
-        """Generate TRUE? (test if value is non-zero).
+        """Generate TRUE? / T? (test if value is non-zero).
 
-        <TRUE? value> tests if a value is non-zero (true).
+        <TRUE? value> or <T? value> tests if a value is non-zero (true).
         This is the opposite of ZERO?/NOT?
 
         Args:
@@ -9135,16 +9201,44 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        val = self.get_operand_value(operands[0])
 
-        # JZ is 1OP opcode 0x00 (branch instruction)
-        # We want to branch if NOT zero (invert the condition)
-        if isinstance(val, int):
-            if 0 <= val <= 255:
-                code.append(0x80)  # Short 1OP, opcode 0x00
-                code.append(val & 0xFF)
-                # Inverted branch: branch on false (when value IS zero, don't branch)
-                code.append(0x00)  # Branch on false
+        # Handle FormNode by generating inner expression first
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Result is on stack, use JZ on variable 0
+            code.append(0xA0)  # 1OP:JZ with variable
+            code.append(0x00)  # Variable 0 = stack
+            # JZ condition = "value == 0"
+            # Branch encoding: 0xC0 = branch on true (if condition met), offset 0 = RFALSE
+            # So: if value IS zero, branch to RFALSE
+            # Fall through means value was non-zero, execute RTRUE
+            code.append(0xC0)  # Branch on true (if zero), return false
+            code.append(0xB0)  # RTRUE - fall through means value was non-zero
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
+
+            # JZ is 1OP opcode 0x00 (branch instruction)
+            # JZ condition = "value == 0"
+            # For TRUE?, we want: return true if non-zero, false if zero
+            # So: if value IS zero (JZ condition true), branch to RFALSE
+            #     if value is non-zero (JZ condition false), fall through to RTRUE
+            if op_type == 0:  # Constant
+                val = op_val & 0xFFFF
+                if -128 <= val <= 255:
+                    code.append(0x90)  # 1OP:JZ with small constant
+                    code.append(val & 0xFF)
+                else:
+                    code.append(0x80)  # 1OP:JZ with large constant
+                    code.append((val >> 8) & 0xFF)
+                    code.append(val & 0xFF)
+            else:  # Variable
+                code.append(0xA0)  # 1OP:JZ with variable
+                code.append(op_val & 0xFF)
+            # Branch encoding: 0xC0 = branch on true, offset 0 = RFALSE
+            # If value is zero, branch to return false; else fall through to return true
+            code.append(0xC0)  # Branch on true (if zero), return false
+            code.append(0xB0)  # RTRUE - fall through
 
         return bytes(code)
 
@@ -9188,7 +9282,20 @@ class ImprovedCodeGenerator:
             raise ValueError("NOT requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value_ext(operands[0])
+
+        # Handle FormNode by generating inner expression first
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            op_type = 2  # Variable (stack)
+            op_val = 0   # Stack
+        elif isinstance(operands[0], CondNode):
+            inner_code = self.generate_cond(operands[0])
+            code.extend(inner_code)
+            op_type = 2
+            op_val = 0
+        else:
+            op_type, op_val = self._get_operand_type_and_value_ext(operands[0])
 
         # Strategy:
         # JZ value ?+4 (branch forward 4 bytes if zero)
@@ -9895,12 +10002,40 @@ class ImprovedCodeGenerator:
                         remaining = remaining[3:]
 
                         if len(group) == 1:
-                            # 2OP long form for 2 operands
+                            # Check for large constants
                             op2_type, op2_val = self._get_operand_type_and_value(group[0])
-                            opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
-                            code.append(opcode)
-                            code.append(op1_val & 0xFF)
-                            code.append(op2_val & 0xFF)
+                            needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+                            needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+                            if needs_large1 or needs_large2:
+                                # Use VAR form JE for large constants
+                                code.append(0xC1)  # VAR form JE
+
+                                # Build type byte
+                                type1 = 0b00 if needs_large1 else (0b01 if op1_type == 0 else 0b10)
+                                type2 = 0b00 if needs_large2 else (0b01 if op2_type == 0 else 0b10)
+                                types_byte = (type1 << 6) | (type2 << 4) | 0x0F  # 0x0F = omit, omit
+                                code.append(types_byte)
+
+                                # Operand 1
+                                if needs_large1:
+                                    code.append((op1_val >> 8) & 0xFF)
+                                    code.append(op1_val & 0xFF)
+                                else:
+                                    code.append(op1_val & 0xFF)
+
+                                # Operand 2
+                                if needs_large2:
+                                    code.append((op2_val >> 8) & 0xFF)
+                                    code.append(op2_val & 0xFF)
+                                else:
+                                    code.append(op2_val & 0xFF)
+                            else:
+                                # 2OP long form for 2 small operands
+                                opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
+                                code.append(opcode)
+                                code.append(op1_val & 0xFF)
+                                code.append(op2_val & 0xFF)
                         else:
                             # VAR form for 3+ operands
                             code.append(0xC1)  # VAR form JE
@@ -10251,6 +10386,37 @@ class ImprovedCodeGenerator:
                     data[offset + 1] = value & 0xFF
 
         return bytes(data)
+
+    def needs_extension_table(self) -> bool:
+        """Check if an extension table is needed (V5+ only)."""
+        return self.version >= 5 and self._max_extension_word > 0
+
+    def build_extension_table(self) -> bytes:
+        """Build the header extension table (V5+).
+
+        The extension table format is:
+        - Word 0: Number of extension words following
+        - Word 1..N: Extension data (mouse coords, flags, etc.)
+
+        Returns:
+            Extension table bytes, or empty bytes if not needed.
+        """
+        if not self.needs_extension_table():
+            return b''
+
+        # Create table with enough words for all used extension fields
+        # +1 because word 0 is the count
+        num_words = self._max_extension_word
+        table = bytearray((num_words + 1) * 2)
+
+        # Word 0: count of extension words
+        table[0] = (num_words >> 8) & 0xFF
+        table[1] = num_words & 0xFF
+
+        # Remaining words are initialized to 0
+        # (mouse coords, flags, etc. - default values)
+
+        return bytes(table)
 
     # ===== Routine Calls =====
 
