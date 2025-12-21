@@ -1175,7 +1175,7 @@ class TestLowcore:
         AssertRoutine("", "<LOWCORE FLAGS 123>") \
             .generates_code_matching(r"^\s*PUT 0,8,123")
 
-    @pytest.mark.skip(reason="LOWCORE extension table (MSLOCY/MSETBL/EXTAB) not implemented")
+    @pytest.mark.skip(reason="Extension table auto-creation not implemented")
     def test_lowcore_extension(self):
         """Test LOWCORE with extension table."""
         AssertRoutine('"AUX" X', "<SET X <LOWCORE MSLOCY>> <LOWCORE MSETBL 12345>") \
@@ -1302,7 +1302,6 @@ class TestSaveUndo:
 class TestLex:
     """Tests for LEX opcode (V5+)."""
 
-    @pytest.mark.skip(reason="LEX test needs parser/dictionary features - operand encoding issues")
     def test_lex(self):
         """Test LEX opcode."""
         # V5 to V6, 2 to 4 operands

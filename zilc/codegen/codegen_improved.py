@@ -224,10 +224,8 @@ class ImprovedCodeGenerator:
             self.globals[global_node.name] = self.next_global
             # Capture initial value if provided
             if global_node.initial_value is not None:
-                init_val = self.get_operand_value(global_node.initial_value)
-                if isinstance(init_val, int):
-                    self.global_values[global_node.name] = init_val
-                elif isinstance(global_node.initial_value, TableNode):
+                # Check for TableNode first - has special handling for flags like LEXV
+                if isinstance(global_node.initial_value, TableNode):
                     # Handle TABLE/LTABLE/ITABLE/PTABLE initial values
                     self._compile_global_table_node(global_node.name, global_node.initial_value)
                 elif isinstance(global_node.initial_value, FormNode):
@@ -237,6 +235,11 @@ class ImprovedCodeGenerator:
                         if form_op in ('TABLE', 'LTABLE', 'ITABLE', 'PTABLE'):
                             # Compile the table and get placeholder
                             self._compile_global_table(global_node.name, global_node.initial_value, form_op)
+                else:
+                    # Simple value (number, atom, etc.)
+                    init_val = self.get_operand_value(global_node.initial_value)
+                    if isinstance(init_val, int):
+                        self.global_values[global_node.name] = init_val
             self.next_global += 1
 
         # Reserve globals for ACTIONS and PREACTIONS tables
@@ -303,10 +306,30 @@ class ImprovedCodeGenerator:
         is_pure = 'PURE' in table_node.flags or table_type == 'PTABLE'
         is_byte = 'BYTE' in table_node.flags
         is_string = 'STRING' in table_node.flags
+        is_lexv = 'LEXV' in table_node.flags
         if is_string:
             is_byte = True  # STRING implies BYTE mode
 
         values = table_node.values
+
+        # Handle LEXV (lexical buffer) format for ITABLE
+        # LEXV format: byte max_entries, byte count, then 4 bytes per entry
+        if is_lexv and table_type == 'ITABLE':
+            initial_size = table_node.size or 1
+            # Header: max entries (byte), word count (byte, initially 0)
+            table_data.append(initial_size & 0xFF)
+            table_data.append(0)  # Initially 0 words parsed
+            # Each entry is 4 bytes: word (dict addr), byte (start), byte (len)
+            for i in range(initial_size):
+                table_data.extend([0, 0, 0, 0])  # Empty entry
+            # Store the table
+            table_idx = len(self.tables)
+            self.table_offsets[table_idx] = self._table_data_size
+            self._table_data_size += len(table_data)
+            self.table_counter += 1
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.global_values[global_name] = 0xFF00 | table_idx
+            return
 
         # For LTABLE, add length prefix
         if table_type == 'LTABLE':
@@ -375,11 +398,12 @@ class ImprovedCodeGenerator:
         is_pure = table_type == 'PTABLE'
         is_byte = False
         is_string = False
+        is_lexv = False
 
         # Process operands from the form
         values = []
         for op in form_node.operands:
-            # Check for flags like (PURE), (BYTE), (STRING)
+            # Check for flags like (PURE), (BYTE), (STRING), (LEXV)
             if isinstance(op, FormNode):
                 if isinstance(op.operator, AtomNode):
                     flag_name = op.operator.value.upper()
@@ -393,6 +417,9 @@ class ImprovedCodeGenerator:
                         is_string = True
                         is_byte = True
                         continue
+                    elif flag_name == 'LEXV':
+                        is_lexv = True
+                        continue
             elif isinstance(op, AtomNode):
                 flag_name = op.value.upper()
                 if flag_name == 'PURE':
@@ -405,6 +432,9 @@ class ImprovedCodeGenerator:
                     is_string = True
                     is_byte = True
                     continue
+                elif flag_name == 'LEXV':
+                    is_lexv = True
+                    continue
             values.append(op)
 
         # For LTABLE, add length prefix
@@ -416,6 +446,25 @@ class ImprovedCodeGenerator:
         if table_type == 'ITABLE' and values and isinstance(values[0], NumberNode):
             initial_size = values[0].value
             values = values[1:]
+
+        # Handle LEXV (lexical buffer) format for ITABLE
+        # LEXV format: byte max_entries, byte count, then 4 bytes per entry
+        if is_lexv and table_type == 'ITABLE':
+            num_entries = initial_size if initial_size else 1
+            # Header: max entries (byte), word count (byte, initially 0)
+            table_data.append(num_entries & 0xFF)
+            table_data.append(0)  # Initially 0 words parsed
+            # Each entry is 4 bytes: word (dict addr), byte (start), byte (len)
+            for i in range(num_entries):
+                table_data.extend([0, 0, 0, 0])  # Empty entry
+            # Store the table
+            table_idx = len(self.tables)
+            self.table_offsets[table_idx] = self._table_data_size
+            self._table_data_size += len(table_data)
+            self.table_counter += 1
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.global_values[global_name] = 0xFF00 | table_idx
+            return
 
         # Encode table values
         for val in values:
@@ -6164,14 +6213,55 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
-    def gen_lowcore(self, operands: List[ASTNode]) -> bytes:
-        """Generate LOWCORE (access low memory constant).
+    # LOWCORE header field constants (byte offsets, /2 for word index)
+    LOWCORE_HEADER = {
+        'ZVERSION': 0x00,    # Version number (byte, but accessed as word)
+        'FLAGS': 0x01,       # Flags 1 (byte)
+        'RELESSION': 0x02,   # Release number (word) - typo preserved for compat
+        'RELEASE': 0x02,     # Release number (word)
+        'ENDLOD': 0x04,      # High memory base (word)
+        'START': 0x06,       # Initial PC / main routine (word)
+        'VOCAB': 0x08,       # Dictionary address (word)
+        'OBJECT': 0x0A,      # Object table address (word)
+        'GLOBAL': 0x0C,      # Global variables table address (word)
+        'IMPURE': 0x0E,      # Static memory base (word)
+        'FLAGS2': 0x10,      # Flags 2 (word)
+        'SERIAL': 0x12,      # Serial number (6 bytes)
+        'WORDS': 0x18,       # Abbreviations table address (word)
+        'LENGTH': 0x1A,      # File length (word, packed)
+        'CHKSUM': 0x1C,      # Checksum (word)
+        'INESSION': 0x1E,    # Interpreter number (byte)
+        'INTVERS': 0x1F,     # Interpreter version (byte)
+        'SCRV': 0x20,        # Screen height (byte)
+        'SCRH': 0x21,        # Screen width (byte)
+        'EXTAB': 0x36,       # Extension table address (word, V5+)
+    }
 
-        <LOWCORE address> reads a word from low memory (0x00-0x40).
-        Accesses Z-machine header and low memory constants.
+    # Extension table entry offsets (word indices from EXTAB base)
+    LOWCORE_EXTENSION = {
+        'EXTABLEN': 0,       # Extension table size (words)
+        'MSLOCX': 1,         # Mouse X coordinate
+        'MSLOCY': 2,         # Mouse Y coordinate
+        'MSETBL': 3,         # Unicode translation table / mouse buttons
+        'FLAGS3': 4,         # Flags 3
+        'TRUEFG': 5,         # True foreground color
+        'TRUEBG': 6,         # True background color
+    }
+
+    def gen_lowcore(self, operands: List[ASTNode]) -> bytes:
+        """Generate LOWCORE (access low memory/header fields).
+
+        <LOWCORE name> reads a word from header by symbolic name.
+        <LOWCORE name value> writes a value to header location.
+        <LOWCORE (name subfield)> reads a byte/subfield.
+
+        Supports:
+        - Header fields: ZVERSION, FLAGS, EXTAB, etc.
+        - Extension table entries: MSLOCY, MSETBL, etc.
 
         Args:
-            operands[0]: Address in low memory
+            operands[0]: Address/name in low memory
+            operands[1]: Value to write (optional)
 
         Returns:
             bytes: Z-machine code
@@ -6180,15 +6270,112 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+        first_op = operands[0]
+        is_write = len(operands) >= 2
 
-        # Use LOADW to read from low memory (base 0, offset = addr)
-        # LOADW is 2OP opcode 0x0F
-        opcode = 0x0F | (0 << 6) | (op_type << 5)  # base=0 is constant
-        code.append(opcode)
-        code.append(0x00)  # Base = 0
-        code.append(op_val & 0xFF)
-        code.append(0x00)  # Store to stack
+        # Check for symbolic header names
+        addr = None
+        is_extension = False
+        ext_offset = 0
+
+        if isinstance(first_op, AtomNode):
+            name = first_op.value.upper() if hasattr(first_op.value, 'upper') else str(first_op.value)
+            if name in self.LOWCORE_HEADER:
+                addr = self.LOWCORE_HEADER[name]
+            elif name in self.LOWCORE_EXTENSION:
+                is_extension = True
+                ext_offset = self.LOWCORE_EXTENSION[name]
+        elif isinstance(first_op, FormNode):
+            # Subfield access: (NAME subfield)
+            if first_op.operands and isinstance(first_op.operands[0], AtomNode):
+                name = first_op.operands[0].value.upper()
+                if name in self.LOWCORE_HEADER:
+                    addr = self.LOWCORE_HEADER[name]
+                    # Add subfield offset if provided
+                    if len(first_op.operands) > 1:
+                        sub_type, sub_val = self._get_operand_type_and_value(first_op.operands[1])
+                        addr += sub_val
+
+        if is_extension:
+            # Extension table access: read EXTAB, then access offset
+            # First, read EXTAB (header 0x36) to stack
+            code.append(0x0F)  # LOADW short form
+            code.append(0x00)  # Base = 0
+            code.append(0x36 // 2)  # EXTAB word offset
+            code.append(0x00)  # Store to stack
+
+            if is_write:
+                # STOREW stack, ext_offset, value
+                val_type, val_val = self._get_operand_type_and_value(operands[1])
+                # STOREW is 3-operand VAR opcode
+                code.append(0xE1)  # STOREW VAR form
+                # Types: stack=var(10), small const(01), value type
+                type_byte = (0x02 << 6) | (0x01 << 4) | (val_type << 2) | 0x03
+                code.append(type_byte)
+                code.append(0x00)  # Stack (operand 1)
+                code.append(ext_offset)  # Offset (operand 2)
+                if val_type == 0:  # Large constant
+                    code.append((val_val >> 8) & 0xFF)
+                    code.append(val_val & 0xFF)
+                else:
+                    code.append(val_val & 0xFF)
+            else:
+                # LOADW stack, ext_offset -> stack
+                code.append(0x4F)  # LOADW with var, small const
+                code.append(0x00)  # Stack (base)
+                code.append(ext_offset)  # Offset
+                code.append(0x00)  # Store to stack
+        elif addr is not None:
+            # Direct header access
+            word_offset = addr // 2
+            if is_write:
+                # STOREW 0, word_offset, value
+                val_type, val_val = self._get_operand_type_and_value(operands[1])
+                code.append(0xE1)  # STOREW VAR form
+                # Types: small(01), small(01), value type, omit(11)
+                type_byte = (0x01 << 6) | (0x01 << 4) | (val_type << 2) | 0x03
+                code.append(type_byte)
+                code.append(0x00)  # Base = 0
+                code.append(word_offset)  # Offset
+                if val_type == 0:  # Large constant
+                    code.append((val_val >> 8) & 0xFF)
+                    code.append(val_val & 0xFF)
+                else:
+                    code.append(val_val & 0xFF)
+            else:
+                # LOADW 0, word_offset -> stack
+                code.append(0x0F)  # LOADW 2OP small, small
+                code.append(0x00)  # Base = 0
+                code.append(word_offset)
+                code.append(0x00)  # Store to stack
+        else:
+            # Numeric address or unknown - use as-is
+            op_type, op_val = self._get_operand_type_and_value(first_op)
+            if is_write:
+                val_type, val_val = self._get_operand_type_and_value(operands[1])
+                code.append(0xE1)  # STOREW VAR form
+                type_byte = (0x01 << 6) | (op_type << 4) | (val_type << 2) | 0x03
+                code.append(type_byte)
+                code.append(0x00)  # Base = 0
+                if op_type == 0:
+                    code.append((op_val >> 8) & 0xFF)
+                    code.append(op_val & 0xFF)
+                else:
+                    code.append(op_val & 0xFF)
+                if val_type == 0:
+                    code.append((val_val >> 8) & 0xFF)
+                    code.append(val_val & 0xFF)
+                else:
+                    code.append(val_val & 0xFF)
+            else:
+                # LOADW 0, offset -> stack
+                opcode = 0x0F
+                if op_type == 0:  # Large constant
+                    opcode = 0x0F  # 2OP small, large
+                code.append(opcode)
+                code.append(0x00)  # Base = 0
+                code.append(op_val & 0xFF)
+                code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -9843,6 +10030,16 @@ class ImprovedCodeGenerator:
         if isinstance(node, NumberNode):
             return node.value
         elif isinstance(node, AtomNode):
+            # Check for ZIL character literals: !\c, !\", !\\, etc.
+            # Format: !<char> or !\<char> where the char is the ASCII value
+            if node.value.startswith('!') and len(node.value) >= 2:
+                char_part = node.value[1:]  # Everything after !
+                if char_part.startswith('\\') and len(char_part) >= 2:
+                    # !\c format - return ASCII value of character after backslash
+                    return ord(char_part[1])
+                elif len(char_part) == 1:
+                    # !c format - return ASCII value of single character
+                    return ord(char_part[0])
             if node.value in self.constants:
                 return self.constants[node.value]
             elif node.value in self.globals:
@@ -11202,9 +11399,9 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # TOKENISE is VAR opcode 0x0B (11)
-        # VAR opcode byte = 0xE0 + opcode = 0xE0 + 0x0B = 0xEB
-        code.append(0xEB)
+        # TOKENISE is VAR opcode 0x1B (27)
+        # VAR opcode byte = 0xE0 + opcode = 0xE0 + 0x1B = 0xFB
+        code.append(0xFB)
 
         # Get operand types and values
         op_types = []
