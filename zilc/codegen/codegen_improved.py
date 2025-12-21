@@ -7260,8 +7260,8 @@ class ImprovedCodeGenerator:
     def gen_fstack(self, operands: List[ASTNode]) -> bytes:
         """Generate FSTACK (V6 flush stack).
 
-        <FSTACK count> pops count items from stack.
-        <FSTACK count stack> pushes popped items to user stack.
+        <FSTACK count> pops count items from system stack (discards them).
+        <FSTACK count user-stack> pops items from system stack and pushes to user stack.
         V6 only.
 
         Returns:
@@ -7273,17 +7273,78 @@ class ImprovedCodeGenerator:
             raise ValueError("FSTACK requires 1-2 operands")
 
         code = bytearray()
-
-        # V6: Use FLUSH_STACK opcode
-        # For now, simplified implementation - just pop items
         op_type, op_val = self._get_operand_type_and_value(operands[0])
-        if op_type == 0:
-            # Small constant - use multiple POPs
-            for _ in range(op_val):
-                code.append(0xB9)  # POP
+
+        if len(operands) == 1:
+            # Pop items from system stack and discard
+            # Use STOREW to write the value to a safe location (start of globals)
+            # This effectively consumes the stack value and discards it
+            # STOREW array index value -> stores value at array+2*index
+            if op_type == 0:  # Constant count
+                for _ in range(op_val):
+                    # STOREW 0x40 0 (stack value) - writes to globals base, discarding
+                    # Actually, use ADD with stack values to consume them
+                    # ADD var0 0 -> var0 effectively pops and discards
+                    # Use: JZ var0 ?~skip - jump if zero, always jump, consumes value
+                    # Simplest: INC var0 followed by DEC var0 - no, that doesn't pop
+
+                    # Best approach: PULL to a valid variable
+                    # Allocate a scratch global if not already done
+                    if '_SCRATCH_' not in self.globals:
+                        self.globals['_SCRATCH_'] = self.next_global
+                        self.global_values['_SCRATCH_'] = 0  # Initialize to 0
+                        self.next_global += 1
+
+                    scratch_var = self.globals['_SCRATCH_']
+                    # V6 PULL: opcode, type=0xFF (all omitted = main stack), store byte
+                    code.append(0xE9)  # PULL - VAR:0x09
+                    code.append(0xFF)  # Type: all omitted (uses main stack)
+                    code.append(scratch_var)  # Store to scratch global (discards)
+            else:
+                # Variable count - need to generate loop (not fully implemented)
+                if '_SCRATCH_' not in self.globals:
+                    self.globals['_SCRATCH_'] = self.next_global
+                    self.global_values['_SCRATCH_'] = 0  # Initialize to 0
+                    self.next_global += 1
+                scratch_var = self.globals['_SCRATCH_']
+                code.append(0xE9)
+                code.append(0xFF)  # V6: all omitted type byte
+                code.append(scratch_var)
         else:
-            # Variable count - would need loop, stub for now
-            code.append(0xB9)  # POP
+            # FSTACK with 2 operands: pop from system stack, push to user stack
+            # For each item: PULL from system stack, then PUSH to user stack
+            stack_type, stack_val = self._get_operand_type_and_value(operands[1])
+
+            if op_type == 0:  # Constant count
+                for _ in range(op_val):
+                    # PULL from system stack to variable 0 (stack)
+                    # For V6: type byte 0xFF = all omitted (uses main stack), then store byte
+                    code.append(0xE9)  # PULL
+                    code.append(0xFF)  # V6: all omitted (main stack)
+                    code.append(0x00)  # Store to stack (to be consumed by PUSH_STACK)
+
+                    # PUSH to user stack using PUSH_STACK (EXT:24 / 0x18)
+                    code.append(0xBE)  # EXT marker
+                    code.append(0x18)  # PUSH_STACK
+
+                    # Type byte: stack value (variable 0), user stack
+                    if stack_type == 0:
+                        type2 = 0x01 if stack_val <= 255 else 0x00
+                    else:
+                        type2 = 0x02
+                    type_byte = (0x02 << 6) | (type2 << 4) | 0x0F  # var, then operand2
+                    code.append(type_byte)
+
+                    code.append(0x00)  # Value from stack (variable 0)
+
+                    if type2 == 0x00:
+                        code.append((stack_val >> 8) & 0xFF)
+                        code.append(stack_val & 0xFF)
+                    else:
+                        code.append(stack_val & 0xFF)
+
+                    # PUSH_STACK branches on success/failure - branch always (short, true, +2)
+                    code.append(0xC0 | 0x02)  # Short branch true, offset +2 (next instruction)
 
         return bytes(code)
 
@@ -10547,19 +10608,57 @@ class ImprovedCodeGenerator:
     def gen_pop(self, operands: List[ASTNode]) -> bytes:
         """Generate POP (pop from stack and return value).
 
-        <POP> returns the value popped from the stack.
-        Implemented as RET with variable 0 (stack).
-        """
-        if operands:
-            raise ValueError("POP takes no operands")
+        <POP> returns the value popped from the system stack.
+        <POP user-stack> (V6) pops from user stack using EXT:21.
 
+        Implemented as:
+        - V1-V6 with 0 operands: Load from variable 0 (stack) then push result
+        - V6 with 1 operand: EXT:21 (pop_stack) with count=1
+        """
         code = bytearray()
-        # RET with variable 0 (stack) - pops and returns value
-        # RET is 1OP:B (opcode 0x0B)
-        # 0xAB = RET with variable operand
-        code.append(0xAB)
-        code.append(0x00)  # Variable 0 = stack
-        return bytes(code)
+
+        if len(operands) == 0:
+            # Pop from system stack - the value is already on stack.
+            # For value-returning context (e.g., <PRINTN <POP>>), the caller
+            # will read from variable 0 (stack). We should NOT generate any code
+            # since generating PULL to variable 0 is a no-op that doesn't consume
+            # the value. Just return empty bytes and let the caller use the stack.
+            return bytes(code)
+        elif len(operands) == 1 and self.version >= 6:
+            # V6: Pop from user stack using EXT:21 (pop_stack)
+            # pop_stack has 2 operands: items (count) and stack
+            # We pop 1 item and return it
+            code.append(0xBE)  # EXT marker
+            code.append(0x15)  # POP_STACK (EXT:21 = 0x15)
+
+            # Get stack operand
+            stack_type, stack_val = self._get_operand_type_and_value(operands[0])
+
+            # Type byte: small constant 1 for count, then stack type
+            if stack_type == 0:  # Constant
+                type2 = 0x01 if stack_val <= 255 else 0x00
+            else:
+                type2 = 0x02  # Variable
+
+            # Count is always 1 (small constant)
+            type_byte = (0x01 << 6) | (type2 << 4) | 0x0F
+            code.append(type_byte)
+
+            # Operands: count=1, then stack
+            code.append(0x01)  # Count = 1
+
+            if type2 == 0x00:  # Large constant
+                code.append((stack_val >> 8) & 0xFF)
+                code.append(stack_val & 0xFF)
+            else:
+                code.append(stack_val & 0xFF)
+
+            # Store result to stack (variable 0)
+            code.append(0x00)
+
+            return bytes(code)
+        else:
+            raise ValueError(f"POP takes 0 operands (or 1 in V6), got {len(operands)}")
 
     def gen_xpush(self, operands: List[ASTNode]) -> bytes:
         """Generate XPUSH (V6 push to user stack with branch).
