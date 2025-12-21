@@ -444,8 +444,11 @@ class ExprAssertion:
             zm = ZMachine(result.story_file, self.version)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
-            # Strip trailing whitespace from output (dfrotz may add newline)
-            actual = exec_result.output.rstrip()
+            # Only strip trailing whitespace if expected doesn't end with whitespace
+            # This preserves newlines for CRLF testing
+            actual = exec_result.output
+            if not expected.endswith(('\n', '\r', ' ', '\t')):
+                actual = actual.rstrip()
             assert actual == expected, \
                 f"Expected output '{expected}', got '{actual}'"
 
@@ -501,6 +504,7 @@ class RoutineAssertion:
         self.debug_info = False
         self.version_directive: Optional[str] = None
         self.call_args: Optional[List[str]] = None
+        self.input_queue: List[str] = []
 
     def in_v3(self) -> 'RoutineAssertion':
         self.version = ZVersion.V3
@@ -544,6 +548,11 @@ class RoutineAssertion:
     def when_called_with(self, *args: str) -> 'RoutineAssertion':
         """Specify arguments to pass when calling the routine."""
         self.call_args = list(args)
+        return self
+
+    def with_input(self, *inputs: str) -> 'RoutineAssertion':
+        """Queue input for the test execution."""
+        self.input_queue.extend(inputs)
         return self
 
     def _get_compiler(self) -> ZILCompiler:
@@ -591,8 +600,10 @@ class RoutineAssertion:
             zm = ZMachine(result.story_file, self.version)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
-            # The GO routine prints the return value, so extract it from output
-            actual = exec_result.output.strip()
+            # The GO routine prints the return value as the last line
+            # Extract just the last line to get the return value
+            lines = exec_result.output.strip().split('\n')
+            actual = lines[-1] if lines else ""
             assert actual == expected, \
                 f"Expected {expected}, got {actual}"
 
@@ -606,10 +617,16 @@ class RoutineAssertion:
 
         if result.story_file:
             zm = ZMachine(result.story_file, self.version)
+            # Provide any queued input
+            for inp in self.input_queue:
+                zm.provide_input(inp)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
-            # Strip trailing whitespace from output (dfrotz may add newline)
-            actual = exec_result.output.rstrip()
+            # Only strip trailing whitespace if expected doesn't end with whitespace
+            # This preserves newlines for CRLF testing
+            actual = exec_result.output
+            if not expected.endswith(('\n', '\r', ' ', '\t')):
+                actual = actual.rstrip()
             assert actual == expected, \
                 f"Expected output '{expected}', got '{actual}'"
 

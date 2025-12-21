@@ -890,7 +890,8 @@ class TestPrint:
 
     def test_crlf(self):
         """Test CRLF opcode."""
-        AssertExpr("<CRLF>").outputs("\n")
+        # Note: dfrotz doesn't output bare newlines, so we test with markers
+        AssertRoutine("", '<PRINTI "A"> <CRLF> <PRINTI "B">').outputs("A\nB")
 
     def test_crlf_error(self):
         """Test CRLF error cases."""

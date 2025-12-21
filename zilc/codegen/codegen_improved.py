@@ -1561,7 +1561,7 @@ class ImprovedCodeGenerator:
             expr_code = self.generate_form(operand)
             code.extend(expr_code)
             # Now print from stack (variable 0)
-            op_type = 1  # Variable
+            op_type = 2  # Variable (matching _get_operand_type_and_value_ext convention)
             op_val = 0   # Stack
         elif isinstance(operand, RepeatNode):
             # Generate REPEAT code (result goes to stack via RETURN)
@@ -1569,17 +1569,18 @@ class ImprovedCodeGenerator:
             repeat_operands = [operand.bindings] + operand.body
             expr_code = self.gen_repeat(repeat_operands)
             code.extend(expr_code)
-            op_type = 1  # Variable
+            op_type = 2  # Variable (matching _get_operand_type_and_value_ext convention)
             op_val = 0   # Stack
         elif isinstance(operand, CondNode):
             # Generate COND code (result goes to stack)
             expr_code = self.generate_cond(operand)
             code.extend(expr_code)
-            op_type = 1  # Variable
+            op_type = 2  # Variable (matching _get_operand_type_and_value_ext convention)
             op_val = 0   # Stack
         else:
-            # Determine operand type and value
-            op_type, op_val = self._get_operand_type_and_value(operand)
+            # Determine operand type and value using extended version
+            # (handles large constants for negative numbers and values > 255)
+            op_type, op_val = self._get_operand_type_and_value_ext(operand)
 
         # PRINT_NUM is VAR opcode 0x06
         code.append(0xE6)  # Variable form, VAR, opcode 0x06
@@ -1587,13 +1588,19 @@ class ImprovedCodeGenerator:
         # Type byte encoding for VAR form with single operand:
         # Bits 7-6: operand type (00=large, 01=small, 10=variable, 11=omitted)
         # Bits 5-0: 111111 (remaining operands omitted)
-        if op_type == 0:  # Small constant
+        if op_type == 0:  # Large constant (2 bytes)
+            type_byte = 0x3F  # 00 11 11 11 = large const, rest omitted
+            code.append(type_byte)
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
+        elif op_type == 1:  # Small constant (1 byte)
             type_byte = 0x7F  # 01 11 11 11 = small const, rest omitted
-        else:  # Variable
+            code.append(type_byte)
+            code.append(op_val & 0xFF)
+        else:  # Variable (op_type == 2)
             type_byte = 0xBF  # 10 11 11 11 = variable, rest omitted
-
-        code.append(type_byte)
-        code.append(op_val & 0xFF)
+            code.append(type_byte)
+            code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -1607,8 +1614,9 @@ class ImprovedCodeGenerator:
 
         code.append(0xE5)  # VAR opcode 0x05
         # Type byte: 01 for small constant, 10 for variable
+        # 0x3F = 00111111 (remaining operands omitted)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)  # type in bits 7-6, rest omitted
+        code.append((type_byte << 6) | 0x3F)  # type in bits 7-6, rest omitted
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -1630,7 +1638,7 @@ class ImprovedCodeGenerator:
         # PRINT_PADDR is VAR opcode 0x0D
         code.append(0xED)  # VAR form, opcode 0x0D
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -1692,12 +1700,12 @@ class ImprovedCodeGenerator:
         # For V3, we can use PRINT_PADDR with address conversion
         if self.version >= 4:
             code.append(0xF5)  # VAR form, opcode 0x15
-            code.append((type_byte << 6) | 0x0F)
+            code.append((type_byte << 6) | 0x3F)
             code.append(op_val & 0xFF)
         else:
             # V3: use PRINT_PADDR
             code.append(0xED)  # VAR form, opcode 0x0D
-            code.append((type_byte << 6) | 0x0F)
+            code.append((type_byte << 6) | 0x3F)
             code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2717,7 +2725,7 @@ class ImprovedCodeGenerator:
 
         code.append(0xE5)  # SOUND_EFFECT (VAR opcode 0x05)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2744,7 +2752,7 @@ class ImprovedCodeGenerator:
 
         code.append(0xED)  # ERASE_WINDOW (VAR opcode 0x0D)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2772,7 +2780,7 @@ class ImprovedCodeGenerator:
         # Use ERASE_LINE (VAR opcode 0x0E)
         code.append(0xEE)  # ERASE_LINE (VAR opcode 0x0E)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2796,7 +2804,7 @@ class ImprovedCodeGenerator:
 
         code.append(0xED)  # ERASE_WINDOW (VAR opcode 0x0D)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2821,7 +2829,7 @@ class ImprovedCodeGenerator:
 
         code.append(0xEA)  # SPLIT_WINDOW (VAR opcode 0x0A)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2846,7 +2854,7 @@ class ImprovedCodeGenerator:
 
         code.append(0xEB)  # SET_WINDOW (VAR opcode 0x0B)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2941,7 +2949,7 @@ class ImprovedCodeGenerator:
         # GET_CURSOR is VAR opcode 0x10
         code.append(0xF0)  # GET_CURSOR (VAR:0x10)
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2971,7 +2979,7 @@ class ImprovedCodeGenerator:
         # ERASE_LINE is VAR opcode 0x0E
         code.append(0xEE)  # ERASE_LINE
         type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -8482,27 +8490,29 @@ class ImprovedCodeGenerator:
             code.append(0x00)  # Store to stack
 
             # Step 2: SUB 0 stack -> stack (2OP opcode 21)
-            # SUB small_const(0) variable(stack)
-            # Long form: $20-$3F = (small, var), opcode in low 5 bits
-            # SUB is opcode 21, so byte = $20 + 21 = $35
-            code.append(0x35)  # Long 2OP:SUB with small, var
+            # SUB is opcode 21 which is > 15, so must use VAR form
+            # VAR form: 0xC0 | opcode = 0xC0 | 0x15 = 0xD5
+            code.append(0xD5)  # VAR form of SUB
+            code.append(0x6F)  # Types: small(01), var(10), omit(11), omit(11)
             code.append(0x00)  # Small constant 0
             code.append(0x00)  # Variable 0 (stack)
             code.append(0x00)  # Store to stack
         else:
-            # V1-V4: Use native NOT opcode (1OP:0F)
-            # Short form 1OP: 0x80 | (type << 4) | opcode
-            # Types: 00=large const, 01=small const, 10=variable
-            # 0x8F = large constant (type 00), 0x9F = small constant (type 01), 0xAF = variable (type 10)
+            # V1-V4: Use native NOT opcode (VAR:0x18 = 0xF8)
+            # NOT is a VAR opcode that takes 1 operand and stores result
+            code.append(0xF8)  # VAR opcode 0x18 = NOT
+
+            # Type byte for 1 operand (bits: op1[7:6] op2[5:4] op3[3:2] op4[1:0])
+            # 00=large, 01=small, 10=var, 11=omit
             if op_type == 0:  # Large constant
-                code.append(0x8F)  # Short 1OP with large constant
+                code.append(0x3F)  # Type: large(00), omit(11), omit(11), omit(11)
                 code.append((op_val >> 8) & 0xFF)
                 code.append(op_val & 0xFF)
             elif op_type == 1:  # Small constant
-                code.append(0x9F)  # Short 1OP with small constant
+                code.append(0x7F)  # Type: small(01), omit(11), omit(11), omit(11)
                 code.append(op_val & 0xFF)
             else:  # Variable (op_type == 2)
-                code.append(0xAF)  # Short 1OP with variable
+                code.append(0xBF)  # Type: var(10), omit(11), omit(11), omit(11)
                 code.append(op_val & 0xFF)
 
             code.append(0x00)  # Store to stack
@@ -10047,7 +10057,7 @@ class ImprovedCodeGenerator:
         # RANDOM is VAR opcode 0x07
         code.append(0xE7)  # VAR form, opcode 0x07
         type_byte = 0x01 if op_type == 0 else 0x02  # small const or var
-        code.append((type_byte << 6) | 0x0F)
+        code.append((type_byte << 6) | 0x3F)
         code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
 

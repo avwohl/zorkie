@@ -396,11 +396,20 @@ class ZAssembler:
         # Mark start of high memory (where code begins)
         self.high_mem_base = len(story)
 
-        # For V6+, high memory must be aligned to 8-byte boundary for packed addresses
-        if self.version >= 6:
-            while self.high_mem_base % 8 != 0:
-                story.append(0)
-                self.high_mem_base = len(story)
+        # High memory must be aligned for packed addresses:
+        # V1-3: 2-byte alignment (packed = byte / 2)
+        # V4-7: 4-byte alignment (packed = byte / 4)
+        # V8: 8-byte alignment (packed = byte / 8)
+        if self.version >= 8:
+            alignment = 8
+        elif self.version >= 4:
+            alignment = 4
+        else:
+            alignment = 2
+
+        while self.high_mem_base % alignment != 0:
+            story.append(0)
+            self.high_mem_base = len(story)
 
         # Resolve table routine fixups (for ACTIONS table packed addresses)
         # Now that we know high_mem_base, patch table data with routine addresses
