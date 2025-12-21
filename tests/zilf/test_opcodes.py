@@ -1329,7 +1329,6 @@ class TestLex:
 class TestPrintExtended:
     """Tests for extended print opcodes."""
 
-    @pytest.mark.skip(reason="SYNONYM property storage needs dictionary address fixups - not implemented")
     def test_printb(self):
         """Test PRINTB opcode."""
         # V1 to V6, 1 operand
@@ -1397,7 +1396,7 @@ class TestPrintExtended:
 class TestRead:
     """Tests for READ opcode."""
 
-    @pytest.mark.skip(reason="READ test needs parser/dictionary features and SYNONYM property")
+    @pytest.mark.skip(reason="READ test needs dfrotz input handling investigation")
     def test_read(self):
         """Test READ opcode."""
         # V1 to V3, 2 operands

@@ -307,10 +307,34 @@ class ImprovedCodeGenerator:
         is_byte = 'BYTE' in table_node.flags
         is_string = 'STRING' in table_node.flags
         is_lexv = 'LEXV' in table_node.flags
+        is_length = 'LENGTH' in table_node.flags
         if is_string:
             is_byte = True  # STRING implies BYTE mode
 
         values = table_node.values
+
+        # Handle (BYTE LENGTH) format for ITABLE - text buffer format
+        # Format: byte 0 = max length, then size bytes initialized to init value
+        if is_length and is_byte and table_type == 'ITABLE':
+            initial_size = table_node.size or 1
+            init_value = 0
+            if values and isinstance(values[0], NumberNode):
+                init_value = values[0].value & 0xFF
+
+            # Byte 0: max length (size)
+            table_data.append(initial_size & 0xFF)
+            # Fill with initial value
+            for i in range(initial_size):
+                table_data.append(init_value)
+
+            # Store the table
+            table_idx = len(self.tables)
+            self.table_offsets[table_idx] = self._table_data_size
+            self._table_data_size += len(table_data)
+            self.table_counter += 1
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.global_values[global_name] = 0xFF00 | table_idx
+            return
 
         # Handle LEXV (lexical buffer) format for ITABLE
         # LEXV format: byte max_entries, byte count, then 4 bytes per entry
@@ -399,11 +423,12 @@ class ImprovedCodeGenerator:
         is_byte = False
         is_string = False
         is_lexv = False
+        is_length = False
 
         # Process operands from the form
         values = []
         for op in form_node.operands:
-            # Check for flags like (PURE), (BYTE), (STRING), (LEXV)
+            # Check for flags like (PURE), (BYTE), (STRING), (LEXV), (LENGTH)
             if isinstance(op, FormNode):
                 if isinstance(op.operator, AtomNode):
                     flag_name = op.operator.value.upper()
@@ -420,6 +445,9 @@ class ImprovedCodeGenerator:
                     elif flag_name == 'LEXV':
                         is_lexv = True
                         continue
+                    elif flag_name == 'LENGTH':
+                        is_length = True
+                        continue
             elif isinstance(op, AtomNode):
                 flag_name = op.value.upper()
                 if flag_name == 'PURE':
@@ -435,6 +463,9 @@ class ImprovedCodeGenerator:
                 elif flag_name == 'LEXV':
                     is_lexv = True
                     continue
+                elif flag_name == 'LENGTH':
+                    is_length = True
+                    continue
             values.append(op)
 
         # For LTABLE, add length prefix
@@ -446,6 +477,29 @@ class ImprovedCodeGenerator:
         if table_type == 'ITABLE' and values and isinstance(values[0], NumberNode):
             initial_size = values[0].value
             values = values[1:]
+
+        # Handle (BYTE LENGTH) format for ITABLE - text buffer format
+        # Format: byte 0 = max length, then size bytes initialized to init value
+        if is_length and is_byte and table_type == 'ITABLE':
+            num_entries = initial_size if initial_size else 1
+            init_value = 0
+            if values and isinstance(values[0], NumberNode):
+                init_value = values[0].value & 0xFF
+
+            # Byte 0: max length (size)
+            table_data.append(num_entries & 0xFF)
+            # Fill with initial value
+            for i in range(num_entries):
+                table_data.append(init_value)
+
+            # Store the table
+            table_idx = len(self.tables)
+            self.table_offsets[table_idx] = self._table_data_size
+            self._table_data_size += len(table_data)
+            self.table_counter += 1
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.global_values[global_name] = 0xFF00 | table_idx
+            return
 
         # Handle LEXV (lexical buffer) format for ITABLE
         # LEXV format: byte max_entries, byte count, then 4 bytes per entry

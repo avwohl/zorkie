@@ -136,3 +136,84 @@ class Dictionary:
             result.extend(struct.pack('>H', obj_num & 0xFFFF))
 
         return bytes(result)
+
+    def get_word_offset(self, word: str) -> int:
+        """Get the byte offset of a word within the dictionary data.
+
+        This offset can be added to the dictionary base address to get the
+        actual word address in the story file.
+
+        Args:
+            word: The word to find (case-insensitive)
+
+        Returns:
+            Byte offset within dictionary data, or -1 if word not found
+        """
+        word_lower = word.lower()
+        if word_lower not in self.words:
+            return -1
+
+        # Calculate header size
+        # 1 byte: number of separators
+        # N bytes: separator characters
+        # 1 byte: entry length
+        # 2 bytes: word count
+        header_size = 1 + len(self.separators) + 1 + 2
+
+        # Entry length
+        text_bytes = 4 if self.version <= 3 else 6
+        data_bytes = 3
+        entry_length = text_bytes + data_bytes
+
+        # Get sorted unique words (same as in build())
+        seen_encoded = {}
+        unique_words = []
+        for w in sorted(self.words):
+            encoded = tuple(self.encoder.encode_dictionary_word(w))
+            if encoded not in seen_encoded:
+                seen_encoded[encoded] = w
+                unique_words.append(w)
+
+        # Find word index
+        try:
+            word_index = unique_words.index(word_lower)
+        except ValueError:
+            # Word might have same encoding as another word
+            for idx, w in enumerate(unique_words):
+                if w == word_lower:
+                    word_index = idx
+                    break
+            else:
+                return -1
+
+        return header_size + word_index * entry_length
+
+    def get_word_offsets(self) -> Dict[str, int]:
+        """Get byte offsets for all words in the dictionary.
+
+        Returns:
+            Dict mapping word (lowercase) to byte offset within dictionary data
+        """
+        offsets = {}
+
+        # Calculate header size
+        header_size = 1 + len(self.separators) + 1 + 2
+
+        # Entry length
+        text_bytes = 4 if self.version <= 3 else 6
+        data_bytes = 3
+        entry_length = text_bytes + data_bytes
+
+        # Get sorted unique words (same as in build())
+        seen_encoded = {}
+        unique_words = []
+        for w in sorted(self.words):
+            encoded = tuple(self.encoder.encode_dictionary_word(w))
+            if encoded not in seen_encoded:
+                seen_encoded[encoded] = w
+                unique_words.append(w)
+
+        for idx, word in enumerate(unique_words):
+            offsets[word] = header_size + idx * entry_length
+
+        return offsets

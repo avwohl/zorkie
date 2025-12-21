@@ -212,6 +212,73 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
+                                     prop_defaults_size: int) -> bytes:
+        """
+        Resolve dictionary word placeholders in object property tables.
+
+        Scans property tables for values marked with 0x8000 (SYNONYM) or 0xFE00
+        (ADJECTIVE) high bits and replaces them with actual dictionary addresses.
+
+        Args:
+            objects_data: Object table data with property tables
+            dict_addr: Base address of dictionary in story file
+            prop_defaults_size: Size of property defaults table in bytes
+
+        Returns:
+            Modified object data with dictionary addresses resolved
+        """
+        result = bytearray(objects_data)
+
+        # Property tables start after property defaults and object entries
+        # We need to scan the property tables for placeholder values
+        # Property table format:
+        #   - Text length byte + encoded name
+        #   - Property entries: size byte + data bytes
+        #   - Terminator (0x00)
+
+        # Start scanning after property defaults table
+        i = prop_defaults_size
+
+        # Skip object entries (we don't modify those)
+        # Find where property tables start by reading first object's prop table addr
+        if self.version <= 3:
+            obj_entry_size = 9
+        else:
+            obj_entry_size = 14
+
+        if len(result) > prop_defaults_size + obj_entry_size:
+            # Get first property table address
+            prop_addr_offset = prop_defaults_size + obj_entry_size - 2
+            first_prop_offset = struct.unpack('>H', result[prop_addr_offset:prop_addr_offset+2])[0]
+            # Start scanning from first property table
+            i = first_prop_offset
+
+        # Scan through data looking for placeholder patterns
+        # Placeholders are 2-byte words with high byte 0x80 (SYNONYM) or 0xFE (ADJ)
+        while i < len(result) - 1:
+            word = (result[i] << 8) | result[i + 1]
+
+            # Check for SYNONYM placeholder: 0x8000 | word_offset
+            # word_offset is typically small (< 0x1000)
+            if (word & 0xF000) == 0x8000:
+                word_offset = word & 0x0FFF
+                actual_addr = dict_addr + word_offset
+                result[i] = (actual_addr >> 8) & 0xFF
+                result[i + 1] = actual_addr & 0xFF
+                i += 2
+            # Check for ADJECTIVE placeholder: 0xFE00 | word_offset
+            elif (word & 0xFF00) == 0xFE00:
+                word_offset = word & 0x00FF
+                actual_addr = dict_addr + word_offset
+                result[i] = (actual_addr >> 8) & 0xFF
+                result[i + 1] = actual_addr & 0xFF
+                i += 2
+            else:
+                i += 1
+
+        return bytes(result)
+
     def build_story_file(self, routines: bytes, objects: bytes = b'',
                         dictionary: bytes = b'', globals_data: bytes = b'',
                         abbreviations_table=None, string_table=None,
@@ -340,6 +407,21 @@ class ZAssembler:
             # Property defaults: 31 words for V3, 63 for V4+
             prop_defaults_size = (31 if self.version <= 3 else 63) * 2
             obj_entry_size = 9 if self.version <= 3 else 14
+
+            # Calculate dictionary address ahead of time to resolve property placeholders
+            # Dictionary comes right after objects (with padding)
+            objects_end = current_addr + len(objects_fixed)
+            if objects_end % 2 != 0:
+                objects_end += 1  # Account for padding
+            dict_addr_calc = objects_end
+
+            # Resolve dictionary word placeholders in property tables BEFORE
+            # fixing up property table addresses (since the resolver uses relative offsets)
+            # Placeholders are marked with 0x8000 bit set (SYNONYM) or 0xFE00 (ADJECTIVE)
+            # The low bits contain the word offset within dictionary data
+            objects_fixed = bytearray(self._resolve_dict_placeholders(
+                bytes(objects_fixed), dict_addr_calc, prop_defaults_size
+            ))
 
             # Calculate number of objects
             # Find first property table address to determine where object entries end
