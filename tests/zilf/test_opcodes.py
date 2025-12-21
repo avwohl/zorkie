@@ -1396,11 +1396,12 @@ class TestPrintExtended:
 class TestRead:
     """Tests for READ opcode."""
 
-    @pytest.mark.skip(reason="READ test needs dfrotz input handling investigation")
-    def test_read(self):
-        """Test READ opcode."""
+    @pytest.mark.skip(reason="V3 READ requires status line globals (HERE at global 0) not yet implemented")
+    def test_read_v3(self):
+        """Test READ opcode in V3."""
         # V1 to V3, 2 operands
-        # ,HERE must point to a valid object for status line purposes
+        # V3 status line reads global 0 to get current location object
+        # This requires HERE to be at global 0 (var 16), not a user-defined position
         AssertRoutine("", "<READ ,TEXTBUF ,LEXBUF> <PRINTC <GETB ,TEXTBUF 2>> <PRINTB <GET ,LEXBUF 1>>") \
             .in_v3() \
             .with_global("<GLOBAL TEXTBUF <ITABLE 50 (BYTE LENGTH) 0>>") \
@@ -1410,19 +1411,25 @@ class TestRead:
             .with_input("cat") \
             .outputs("acat")
 
+    def test_read_v4_compiles(self):
+        """Test READ compilation in V4."""
         # V4, 2 to 4 operands
         AssertExpr("<READ 0 0>").in_v4().compiles()
         AssertExpr("<READ 0 0 0>").in_v4().compiles()
         AssertExpr("<READ 0 0 0 0>").in_v4().compiles()
 
+    def test_read_v5(self):
+        """Test READ opcode in V5."""
         # V5 to V6, 1 to 4 operands
+        # V5 READ returns the terminating character (13 for Enter)
+        # dfrotz echoes the typed input, so expected output includes "cat\n" prefix
         AssertRoutine("", "<PRINTN <READ ,TEXTBUF ,LEXBUF>> <PRINTC <GETB ,TEXTBUF 2>> <PRINTB <GET ,LEXBUF 1>>") \
             .in_v5() \
             .with_global("<GLOBAL TEXTBUF <ITABLE 50 (BYTE LENGTH) 0>>") \
             .with_global("<GLOBAL LEXBUF <ITABLE 1 (LEXV) 0 0 0>>") \
             .with_global("<OBJECT CAT (SYNONYM CAT)>") \
             .with_input("cat") \
-            .outputs("13ccat")
+            .outputs("cat\n13ccat")
 
         AssertExpr("<READ 0>").in_v5().compiles()
         AssertExpr("<READ 0 0 0>").in_v5().compiles()

@@ -219,6 +219,15 @@ class ImprovedCodeGenerator:
             for const_name, value in self.action_table['verb_constants'].items():
                 self.constants[const_name] = value
 
+        # Pre-assign object numbers FIRST so globals can reference them
+        # (e.g., <GLOBAL HERE CAT> needs CAT to be assigned number 1)
+        for obj in program.objects:
+            self.objects[obj.name] = self.next_object
+            self.next_object += 1
+        for room in program.rooms:
+            self.objects[room.name] = self.next_object
+            self.next_object += 1
+
         # Process globals (register names and capture initial values)
         for global_node in program.globals:
             self.globals[global_node.name] = self.next_global
@@ -250,13 +259,8 @@ class ImprovedCodeGenerator:
         for const_node in program.constants:
             self.eval_constant(const_node)
 
-        # Process objects (assign numbers)
-        for obj in program.objects:
-            self.objects[obj.name] = self.next_object
-            self.next_object += 1
-        for room in program.rooms:
-            self.objects[room.name] = self.next_object
-            self.next_object += 1
+        # Note: Objects were already assigned numbers above (before globals)
+        # so that globals can reference objects like <GLOBAL HERE CAT>
 
         # Pre-populate routine names so we can detect user-defined routines
         # during code generation (before their offsets are known)
@@ -1951,7 +1955,15 @@ class ImprovedCodeGenerator:
             raise ValueError("PRINTC requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+
+        # Handle FormNode operands - generate the inner code first
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            op_type = 2  # Variable
+            op_val = 0   # Stack
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         code.append(0xE5)  # VAR opcode 0x05
         # Type byte: 01 for small constant, 10 for variable
@@ -4824,6 +4836,10 @@ class ImprovedCodeGenerator:
         for i in range(min(num_ops, 4)):
             op_type, op_val = self._get_operand_type_and_value(operands[i])
             code.append(op_val & 0xFF)
+
+        # V5+: AREAD stores the terminating character
+        if self.version >= 5:
+            code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -10161,6 +10177,9 @@ class ImprovedCodeGenerator:
                 return self.globals[node.value]
             elif node.value in self.locals:
                 return self.locals[node.value]
+            elif node.value in self.objects:
+                # Object reference (e.g., <GLOBAL HERE CAT>)
+                return self.objects[node.value]
             # Check for builtin constants
             elif node.value == 'T':
                 return 1
