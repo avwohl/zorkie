@@ -379,10 +379,9 @@ class ZAssembler:
             story.append(0)
             current_addr += 1
 
-        # Add table data (static memory, before high memory)
-        # Static memory starts here - it contains read-only data like tables
+        # Add table data in dynamic memory (before static memory)
+        # Tables need to be writable, so they go in dynamic memory
         table_base_addr = current_addr
-        self.static_mem_base = current_addr  # Save for header
 
         if table_data:
             story.extend(table_data)
@@ -392,6 +391,9 @@ class ZAssembler:
             while len(story) % 2 != 0:
                 story.append(0)
                 current_addr += 1
+
+        # Static memory starts after tables (tables are in dynamic memory)
+        self.static_mem_base = current_addr
 
         # Mark start of high memory (where code begins)
         self.high_mem_base = len(story)

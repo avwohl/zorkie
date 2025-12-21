@@ -1784,17 +1784,37 @@ class ImprovedCodeGenerator:
 
         # Get variable number
         if isinstance(var_node, AtomNode):
-            if is_global:
-                var_num = self.globals.get(var_node.value, self.next_global)
-                if var_node.value not in self.globals:
-                    self.globals[var_node.value] = var_num
-                    self.next_global += 1
+            var_name = var_node.value
+            # Both SET and SETG check locals first, then globals
+            # SETG will create a new global if the variable doesn't exist
+            var_num = self.locals.get(var_name)
+            if var_num is not None:
+                # Found as local - use it
+                is_global = False
+            elif var_name in self.globals:
+                # Found as global - use it
+                var_num = self.globals[var_name]
+                is_global = True
+            elif is_global:
+                # SETG can create a new global
+                var_num = self.next_global
+                self.globals[var_name] = var_num
+                self.next_global += 1
             else:
-                var_num = self.locals.get(var_node.value)
-                if var_num is None:
-                    raise ValueError(f"{op_name}: Local variable '{var_node.value}' not declared")
+                raise ValueError(f"{op_name}: Variable '{var_name}' not declared")
+        elif isinstance(var_node, NumberNode):
+            # Numeric variable reference (e.g., <SET 1 value> to set local variable 1)
+            var_num = var_node.value
+            # Validate: 0=stack, 1-15=locals (must exist), 16+=globals
+            if 1 <= var_num <= 15:
+                # Local variable - must be within declared locals
+                num_locals = len(self.locals)
+                if var_num > num_locals:
+                    raise ValueError(f"{op_name}: Local variable {var_num} not declared (only {num_locals} locals)")
+            elif var_num >= 16:
+                is_global = True
         else:
-            raise ValueError(f"{op_name}: First operand must be a variable name")
+            raise ValueError(f"{op_name}: First operand must be a variable name or number")
 
         code = bytearray()
 
@@ -4627,107 +4647,6 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
-    def gen_copyt(self, operands: List[ASTNode]) -> bytes:
-        """Generate COPYT (copy table).
-
-        <COPYT source dest length> copies bytes from source to dest.
-        V5+: Uses native COPY_TABLE opcode.
-        V3/V4: Not available.
-
-        Args:
-            operands[0]: Source address
-            operands[1]: Destination address
-            operands[2]: Length in bytes
-
-        Returns:
-            bytes: Z-machine code
-        """
-        if self.version < 5:
-            raise ValueError("COPYT requires V5 or later")
-        if len(operands) != 3:
-            raise ValueError("COPYT requires exactly 3 operands")
-
-        code = bytearray()
-
-        # Get operand types and values
-        op_types = []
-        op_vals = []
-        for i in range(3):
-            t, v = self._get_operand_type_and_value(operands[i])
-            op_types.append(t)
-            op_vals.append(v)
-
-        src_type, src_val = op_types[0], op_vals[0]
-        dest_type, dest_val = op_types[1], op_vals[1]
-        len_type, len_val = op_types[2], op_vals[2]
-
-        # V5+: Use native COPY_TABLE opcode (EXT:0x17)
-        if self.version >= 5:
-            code.append(0xBE)  # EXT opcode marker
-            code.append(0x17)  # COPY_TABLE
-
-            # Encode operands based on types
-            types = []
-            ops = []
-
-            for op_t, op_v in zip(op_types, op_vals):
-                if op_t == 0:  # Constant
-                    if op_v <= 255:
-                        types.append(0b01)  # Small constant
-                        ops.append(bytes([op_v & 0xFF]))
-                    else:
-                        types.append(0b00)  # Large constant
-                        ops.append(bytes([(op_v >> 8) & 0xFF, op_v & 0xFF]))
-                else:  # Variable
-                    types.append(0b10)
-                    ops.append(bytes([op_v & 0xFF]))
-
-            # Type byte
-            type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | 0x03
-            code.append(type_byte)
-
-            for op in ops:
-                code.extend(op)
-
-            return bytes(code)
-
-        # V3/V4: Generate inline copy loop for small constant lengths
-        if src_type == 0 and dest_type == 0 and len_type == 0:
-            if len_val <= 16:
-                # Unroll: generate LOADB/STOREB for each byte
-                for i in range(len_val):
-                    # LOADB src i -> sp
-                    code.append(0xD0)  # VAR form of LOADB (2OP:16)
-                    if src_val + i <= 255:
-                        code.append(0x5F)  # small, small, omit, omit
-                        code.append((src_val + i) & 0xFF)
-                        code.append(0x00)  # offset 0
-                    else:
-                        code.append(0x1F)  # large, small, omit, omit
-                        code.append(((src_val + i) >> 8) & 0xFF)
-                        code.append((src_val + i) & 0xFF)
-                        code.append(0x00)
-                    code.append(0x00)  # Store to SP
-
-                    # STOREB dest i sp
-                    code.append(0xE3)  # VAR form of STOREB
-                    if dest_val + i <= 255:
-                        code.append(0x5B)  # small, small, var, omit
-                        code.append((dest_val + i) & 0xFF)
-                        code.append(0x00)  # offset 0
-                    else:
-                        code.append(0x1B)  # large, small, var, omit
-                        code.append(((dest_val + i) >> 8) & 0xFF)
-                        code.append((dest_val + i) & 0xFF)
-                        code.append(0x00)
-                    code.append(0x00)  # Value from SP
-
-                return bytes(code)
-
-        # For larger or variable lengths, would need complex loop
-        # This is a limitation of the current implementation
-        return bytes(code)
-
     def gen_grtr_or_equal(self, operands: List[ASTNode]) -> bytes:
         """Generate >= comparison (greater than or equal).
 
@@ -7087,15 +7006,15 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # V5+: Use COPY_TABLE opcode (EXT:0x17)
+        # V5+: Use COPY_TABLE opcode (EXT:0x1D = 29 decimal)
         if self.version >= 5:
             op1_type, op1_val = self._get_operand_type_and_value(operands[0])  # src
             op2_type, op2_val = self._get_operand_type_and_value(operands[1])  # dst
             op3_type, op3_val = self._get_operand_type_and_value(operands[2])  # length
 
-            # COPY_TABLE opcode 0xBE (EXT opcode 0x17)
+            # COPY_TABLE opcode 0xBE + 0x1D (EXT opcode 29)
             code.append(0xBE)
-            code.append(0x17)  # Extended opcode number
+            code.append(0x1D)  # Extended opcode number for COPY_TABLE
 
             # Build type byte for 3 operands
             types = []
@@ -9563,6 +9482,8 @@ class ImprovedCodeGenerator:
         code = bytearray()
 
         # Process each operand - FormNodes need code generation first
+        # Use _get_operand_type_and_value_ext which returns:
+        # 0 = large constant, 1 = small constant, 2 = variable
         op_types = []
         op_vals = []
 
@@ -9572,27 +9493,29 @@ class ImprovedCodeGenerator:
                 inner_code = self.generate_form(op)
                 code.extend(inner_code)
                 # Use stack (variable 0) as the operand
-                op_types.append(1)  # variable type
+                op_types.append(2)  # variable type
                 op_vals.append(0x00)  # stack
             else:
-                op_type, op_val = self._get_operand_type_and_value(op)
+                op_type, op_val = self._get_operand_type_and_value_ext(op)
                 op_types.append(op_type)
                 op_vals.append(op_val)
 
         # STOREW is VAR opcode 0x01
         code.append(0xE1)  # VAR form, opcode 0x01
         # Type byte: 2 bits per operand, 00=large, 01=small, 10=var, 11=omitted
-        # 00=large const (2 bytes), 01=small const (1 byte), 10=variable (1 byte), 11=omitted
-        # Our op_types: 0=small const, 1=variable
-        # Map: small(0)->01, var(1)->10
-        def map_type(t):
-            return 0b01 if t == 0 else 0b10
-
-        type_byte = (map_type(op_types[0]) << 6) | (map_type(op_types[1]) << 4) | (map_type(op_types[2]) << 2) | 0x03
+        # _get_operand_type_and_value_ext returns: 0=large, 1=small, 2=variable
+        # Z-machine type encoding: 00=large, 01=small, 10=var, 11=omitted
+        # Map: 0->00, 1->01, 2->10
+        type_byte = (op_types[0] << 6) | (op_types[1] << 4) | (op_types[2] << 2) | 0x03
         code.append(type_byte)
-        code.append(op_vals[0] & 0xFF)
-        code.append(op_vals[1] & 0xFF)
-        code.append(op_vals[2] & 0xFF)
+
+        # Append operand bytes based on type
+        for i in range(3):
+            if op_types[i] == 0:  # Large constant - 2 bytes
+                code.append((op_vals[i] >> 8) & 0xFF)
+                code.append(op_vals[i] & 0xFF)
+            else:  # Small constant or variable - 1 byte
+                code.append(op_vals[i] & 0xFF)
 
         return bytes(code)
 
@@ -9631,19 +9554,35 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-        op3_type, op3_val = self._get_operand_type_and_value(operands[2])
+        # Process each operand using extended type function
+        # Returns: 0=large, 1=small, 2=variable
+        op_types = []
+        op_vals = []
+        for op in operands[:3]:
+            if isinstance(op, FormNode):
+                inner_code = self.generate_form(op)
+                code.extend(inner_code)
+                op_types.append(2)  # variable
+                op_vals.append(0x00)  # stack
+            else:
+                op_type, op_val = self._get_operand_type_and_value_ext(op)
+                op_types.append(op_type)
+                op_vals.append(op_val)
 
         # STOREB is VAR opcode 0x02
         code.append(0xE2)  # VAR form, opcode 0x02
         # Type byte: 2 bits per operand, 00=large, 01=small, 10=var, 11=omitted
-        type_byte = ((op1_type + 1) << 6) | ((op2_type + 1) << 4) | ((op3_type + 1) << 2) | 0x03
+        # _get_operand_type_and_value_ext returns: 0=large, 1=small, 2=variable
+        type_byte = (op_types[0] << 6) | (op_types[1] << 4) | (op_types[2] << 2) | 0x03
         code.append(type_byte)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(op3_val & 0xFF)
+
+        # Append operand bytes based on type
+        for i in range(3):
+            if op_types[i] == 0:  # Large constant - 2 bytes
+                code.append((op_vals[i] >> 8) & 0xFF)
+                code.append(op_vals[i] & 0xFF)
+            else:  # Small constant or variable - 1 byte
+                code.append(op_vals[i] & 0xFF)
 
         return bytes(code)
 
