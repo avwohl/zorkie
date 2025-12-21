@@ -1260,6 +1260,17 @@ class ZILCompiler:
         }
         next_prop = 3  # Custom properties start at 3
 
+        # Check if SYNONYM or ADJECTIVE are used in any object - add P? constants
+        uses_synonym = any('SYNONYM' in obj.properties for obj in program.objects + program.rooms)
+        uses_adjective = any('ADJECTIVE' in obj.properties for obj in program.objects + program.rooms)
+
+        if uses_synonym:
+            properties['P?SYNONYM'] = next_prop
+            next_prop += 1
+        if uses_adjective:
+            properties['P?ADJECTIVE'] = next_prop
+            next_prop += 1
+
         # Collect custom properties from PROPDEF declarations
         for propdef in program.propdefs:
             prop_name = f'P?{propdef.name}'
@@ -1270,7 +1281,9 @@ class ZILCompiler:
         # Collect custom properties from object/room definitions
         # Properties like (MYPROP 123) need P?MYPROP constants
         # This must match the order and numbering in _build_object_table
-        reserved_props = {'FLAGS', 'SYNONYM', 'ADJECTIVE', 'IN', 'LOC'}
+        # FLAGS, IN, LOC are structural - not actual properties
+        # SYNONYM and ADJECTIVE ARE properties if P?SYNONYM/P?ADJECTIVE exist
+        reserved_props = {'FLAGS', 'IN', 'LOC'}
         for obj in program.objects + program.rooms:
             for key in obj.properties.keys():
                 if key not in reserved_props:

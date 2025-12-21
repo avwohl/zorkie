@@ -11202,9 +11202,9 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # TOKENISE is VAR opcode 0x1B (27)
-        # VAR opcode byte = 0xC0 + opcode = 0xC0 + 0x1B = 0xDB
-        code.append(0xDB)
+        # TOKENISE is VAR opcode 0x0B (11)
+        # VAR opcode byte = 0xE0 + opcode = 0xE0 + 0x0B = 0xEB
+        code.append(0xEB)
 
         # Get operand types and values
         op_types = []

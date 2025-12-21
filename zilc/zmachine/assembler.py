@@ -191,10 +191,17 @@ class ZAssembler:
             actual_addr = self.high_mem_base + routine_offset
 
             # Convert to packed address based on version
+            # V1-3: packed = byte_addr / 2
+            # V4-5: packed = byte_addr / 4
+            # V6-7: packed = (byte_addr - 8*routines_offset) / 4 = routine_offset / 4
+            # V8:   packed = byte_addr / 8
             if self.version <= 3:
                 packed_addr = actual_addr // 2
-            elif self.version <= 7:
+            elif self.version <= 5:
                 packed_addr = actual_addr // 4
+            elif self.version <= 7:
+                # V6-7 use routines_offset, so packed = routine_offset / 4
+                packed_addr = routine_offset // 4
             else:
                 packed_addr = actual_addr // 8
 
