@@ -5967,6 +5967,9 @@ class ImprovedCodeGenerator:
         V5+ only, no operands.
         Returns the current stack frame address.
 
+        CATCH is 0OP:9 (replaces POP in V5+).
+        Short form: 0xB9 (1011 1001).
+
         Returns:
             bytes: Z-machine code
         """
@@ -5976,8 +5979,8 @@ class ImprovedCodeGenerator:
             raise ValueError("CATCH takes no operands")
 
         code = bytearray()
-        code.append(0xF9)  # VAR opcode 0x19
-        code.append(0xFF)  # No operands (types all omitted)
+        # CATCH is 0OP opcode 9, short form: 1011 1001 = 0xB9
+        code.append(0xB9)  # 0OP opcode 9 (CATCH)
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -5986,7 +5989,7 @@ class ImprovedCodeGenerator:
         """Generate THROW (throw to catch point).
 
         <THROW value catch-point> jumps to catch with value.
-        V5+ feature using THROW opcode (VAR:0x1A).
+        V5+ feature using THROW opcode (2OP:28 = 0x1C).
 
         Args:
             operands[0]: Value to return
@@ -6002,19 +6005,40 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # V5+: Use THROW opcode (VAR:0x1A)
+        # THROW is 2OP opcode 0x1C (28 decimal)
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        code.append(0xFA)  # VAR opcode 0x1A
+        # Check if we need large constants (values > 255)
+        needs_large1 = op1_type == 0 and op1_val > 255
+        needs_large2 = op2_type == 0 and op2_val > 255
 
-        # Type byte for 2 operands
-        type1 = 0x01 if op1_type == 0 else 0x02
-        type2 = 0x01 if op2_type == 0 else 0x02
-        type_byte = (type1 << 6) | (type2 << 4) | 0x0F  # Rest omitted
-        code.append(type_byte)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        if needs_large1 or needs_large2:
+            # Use VAR form for large constants: 110 nnnnn (0xC0 | opcode)
+            code.append(0xDC)  # VAR form of 2OP opcode 0x1C (0xC0 | 0x1C)
+            # Type byte: 00=large, 01=small, 10=var, 11=omit
+            type1 = 0x00 if needs_large1 else (0x01 if op1_type == 0 else 0x02)
+            type2 = 0x00 if needs_large2 else (0x01 if op2_type == 0 else 0x02)
+            type_byte = (type1 << 6) | (type2 << 4) | 0x0F  # Rest omitted
+            code.append(type_byte)
+            # Add operands
+            if needs_large1:
+                code.append((op1_val >> 8) & 0xFF)
+                code.append(op1_val & 0xFF)
+            else:
+                code.append(op1_val & 0xFF)
+            if needs_large2:
+                code.append((op2_val >> 8) & 0xFF)
+                code.append(op2_val & 0xFF)
+            else:
+                code.append(op2_val & 0xFF)
+        else:
+            # 2OP long form: 0 a b nnnnn where a,b are operand types (0=small, 1=var)
+            # opcode 0x1C = 28 = 0b11100
+            opcode = 0x1C | (op1_type << 6) | (op2_type << 5)
+            code.append(opcode)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
 
         return bytes(code)
 
