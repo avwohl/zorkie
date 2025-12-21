@@ -443,12 +443,15 @@ class ImprovedCodeGenerator:
 
         # Build local variable table
         self.locals = {}
+        local_names = []  # Keep track of names in order
         var_num = 1
         for param in routine.params:
             self.locals[param] = var_num
+            local_names.append(param)
             var_num += 1
         for aux_var in routine.aux_vars:
             self.locals[aux_var] = var_num
+            local_names.append(aux_var)
             var_num += 1
 
         num_locals = len(routine.params) + len(routine.aux_vars)
@@ -458,8 +461,36 @@ class ImprovedCodeGenerator:
 
         # Local variable initial values (V1-4 only)
         if self.version <= 4:
-            for i in range(num_locals):
-                routine_code.extend(struct.pack('>H', 0))
+            for local_name in local_names:
+                init_val = 0
+                if local_name in routine.local_defaults:
+                    default_node = routine.local_defaults[local_name]
+                    # Only handle simple number literals for initial values
+                    if isinstance(default_node, NumberNode):
+                        init_val = default_node.value & 0xFFFF
+                routine_code.extend(struct.pack('>H', init_val))
+        else:
+            # V5+: Local variables don't have initial values in header
+            # Generate SET instructions for variables with defaults
+            for local_name in local_names:
+                if local_name in routine.local_defaults:
+                    default_node = routine.local_defaults[local_name]
+                    if isinstance(default_node, NumberNode):
+                        init_val = default_node.value
+                        local_num = self.locals[local_name]
+                        # Generate STORE instruction: store local init_val
+                        if 0 <= init_val <= 255:
+                            # Small constant: long form 0 0 0D = 0x0D
+                            routine_code.append(0x0D)
+                            routine_code.append(local_num & 0xFF)
+                            routine_code.append(init_val & 0xFF)
+                        else:
+                            # Large constant: VAR form
+                            routine_code.append(0xED)  # VAR form STOREW
+                            routine_code.append(0x4F)  # small, large, omit, omit
+                            routine_code.append(local_num & 0xFF)
+                            routine_code.append((init_val >> 8) & 0xFF)
+                            routine_code.append(init_val & 0xFF)
 
         # Generate code for routine body
         for stmt in routine.body:
@@ -1774,7 +1805,12 @@ class ImprovedCodeGenerator:
     # ===== Variable Operations =====
 
     def gen_set(self, operands: List[ASTNode], is_global: bool = False) -> bytes:
-        """Generate SET/SETG (variable assignment)."""
+        """Generate SET/SETG (variable assignment).
+
+        SET and SETG have different VariableScopeQuirks behavior:
+        - SET treats .LVAL as variable name, ,GVAL as expression (indirect)
+        - SETG treats ,GVAL as variable name, .LVAL as expression (indirect)
+        """
         op_name = 'SETG' if is_global else 'SET'
         if len(operands) != 2:
             raise ValueError(f"{op_name} requires exactly 2 operands")
@@ -1782,19 +1818,53 @@ class ImprovedCodeGenerator:
         var_node = operands[0]
         value_node = operands[1]
 
-        # Get variable number
-        if isinstance(var_node, AtomNode):
+        # Check for indirect variable assignment (computed variable index)
+        indirect_var_num = None  # Variable containing the target variable index
+
+        # Handle LocalVarNode (.FOO)
+        if isinstance(var_node, LocalVarNode):
+            var_name = var_node.name
+            if is_global:
+                # SETG .FOO -> indirect: set variable whose index is in local FOO
+                if var_name not in self.locals:
+                    raise ValueError(f"{op_name}: Local variable '{var_name}' not declared")
+                indirect_var_num = self.locals[var_name]
+            else:
+                # SET .FOO -> direct: set local FOO
+                if var_name not in self.locals:
+                    raise ValueError(f"{op_name}: Local variable '{var_name}' not declared")
+                var_num = self.locals[var_name]
+
+        # Handle GlobalVarNode (,FOO)
+        elif isinstance(var_node, GlobalVarNode):
+            var_name = var_node.name
+            if is_global:
+                # SETG ,FOO -> direct: set global FOO
+                if var_name in self.globals:
+                    var_num = self.globals[var_name]
+                else:
+                    # Create new global
+                    var_num = self.next_global
+                    self.globals[var_name] = var_num
+                    self.next_global += 1
+            else:
+                # SET ,FOO -> indirect: set variable whose index is in global FOO
+                if var_name not in self.globals:
+                    raise ValueError(f"{op_name}: Global variable '{var_name}' not declared")
+                indirect_var_num = self.globals[var_name]
+
+        # Handle AtomNode (bare variable name)
+        elif isinstance(var_node, AtomNode):
             var_name = var_node.value
             # Both SET and SETG check locals first, then globals
             # SETG will create a new global if the variable doesn't exist
             var_num = self.locals.get(var_name)
             if var_num is not None:
                 # Found as local - use it
-                is_global = False
+                pass  # var_num already set
             elif var_name in self.globals:
                 # Found as global - use it
                 var_num = self.globals[var_name]
-                is_global = True
             elif is_global:
                 # SETG can create a new global
                 var_num = self.next_global
@@ -1811,13 +1881,56 @@ class ImprovedCodeGenerator:
                 num_locals = len(self.locals)
                 if var_num > num_locals:
                     raise ValueError(f"{op_name}: Local variable {var_num} not declared (only {num_locals} locals)")
-            elif var_num >= 16:
-                is_global = True
         else:
             raise ValueError(f"{op_name}: First operand must be a variable name or number")
 
         code = bytearray()
 
+        # Handle indirect variable assignment (SET ,GVAL or SETG .LVAL)
+        if indirect_var_num is not None:
+            # Indirect assignment: the value in indirect_var_num is the target variable index
+            # STORE (variable) value - first operand is variable type
+            if isinstance(value_node, FormNode):
+                # Generate code to evaluate expression (result goes to stack twice)
+                # First, we need to duplicate the value: eval, save, eval again won't work
+                # Instead: eval once, store to temp, store temp to target, push temp
+                expr_code = self.generate_form(value_node)
+                code.extend(expr_code)
+                # Stack has the value. Store it in a temp variable (using local 0/stack as temp)
+                # Actually, simpler: STORE pops from stack, so we need to push again
+                # Use: STORE (indirect) stack, then re-evaluate or use ADD 0 0 -> stack trick
+                #
+                # Cleaner approach: Store from stack, then push the same value
+                # But we don't know the value... Let me use STORE then LOAD target
+                # STORE (indirect) stack - stores and pops
+                opcode = 0x0D | (1 << 6) | (1 << 5)  # Both operands are variables
+                code.append(opcode)
+                code.append(indirect_var_num & 0xFF)
+                code.append(0x00)  # Stack
+                # For value context, re-generate the expression to get value again
+                # This is inefficient but correct. TODO: optimize later
+                code.extend(self.generate_form(value_node))
+            else:
+                val_type, val_val = self._get_operand_type_and_value(value_node)
+                # STORE indirect_var value
+                # First operand is variable (the indirect ref), second is the value
+                opcode = 0x0D | (1 << 6) | (val_type << 5)
+                code.append(opcode)
+                code.append(indirect_var_num & 0xFF)
+                code.append(val_val & 0xFF)
+                # Push the stored value (for value context)
+                # Use PUSH (VAR opcode 0x08)
+                if val_type == 0:  # Small constant
+                    code.append(0xE8)  # VAR form PUSH
+                    code.append(0x7F)  # Small constant type, rest omit
+                    code.append(val_val & 0xFF)
+                else:  # Variable
+                    code.append(0xE8)  # VAR form PUSH
+                    code.append(0xBF)  # Variable type, rest omit
+                    code.append(val_val & 0xFF)
+            return bytes(code)
+
+        # Direct variable assignment
         # Check if value is an expression (FormNode) that needs evaluation
         if isinstance(value_node, FormNode):
             # Generate code to evaluate expression (result goes to stack)
@@ -1838,6 +1951,12 @@ class ImprovedCodeGenerator:
                 # V1-5, V8: operand is target variable number
                 code.append(0x7F)  # Type: small constant (01), omit rest
                 code.append(var_num & 0xFF)  # Variable number to store into
+            # For value context, push the stored value (load target variable)
+            # LOAD short form: 10 tt nnnn, tt=01 for small constant (var number), nnnn=0E
+            # 10 01 1110 = 0x9E
+            code.append(0x9E)  # 1OP LOAD short form with small constant type
+            code.append(var_num & 0xFF)
+            code.append(0x00)  # Store to stack
         elif isinstance(value_node, TableNode):
             # Table literal - store table and use placeholder address
             table_index = self._add_table(value_node)
@@ -1847,6 +1966,11 @@ class ImprovedCodeGenerator:
             code.append(0x0D)  # 2OP:0x0D STORE (long form, small/small: 00 0 0 1101)
             code.append(var_num & 0xFF)
             code.append(table_index & 0xFF)  # Placeholder
+            # For value context, push the table address
+            # LOAD short form: 10 01 1110 = 0x9E
+            code.append(0x9E)  # 1OP LOAD with small constant type
+            code.append(var_num & 0xFF)
+            code.append(0x00)  # Store to stack
         else:
             # Simple value assignment
             val_type, val_val = self._get_operand_type_and_value(value_node)
@@ -1857,6 +1981,15 @@ class ImprovedCodeGenerator:
             code.append(opcode)
             code.append(var_num & 0xFF)
             code.append(val_val & 0xFF)
+            # For value context, push the stored value
+            if val_type == 0:  # Small constant
+                code.append(0xE8)  # VAR form PUSH
+                code.append(0x7F)  # Small constant type, rest omit
+                code.append(val_val & 0xFF)
+            else:  # Variable
+                code.append(0xE8)  # VAR form PUSH
+                code.append(0xBF)  # Variable type, rest omit
+                code.append(val_val & 0xFF)
 
         return bytes(code)
 
@@ -1949,7 +2082,11 @@ class ImprovedCodeGenerator:
         var_num = self.get_variable_number(operands[0])
 
         # LOAD is 1OP opcode 0x0E
-        code.append(0x8E)  # Short 1OP, opcode 0x0E, variable type
+        # Short form: 10 tt nnnn, where tt=01 for small constant, nnnn=0E
+        # 10 01 1110 = 0x9E
+        # Note: the operand is a VARIABLE NUMBER (like 1 for local 1, 16 for global 0),
+        # not a variable reference. So we use small constant type.
+        code.append(0x9E)  # Short 1OP, opcode 0x0E, small constant type
         code.append(var_num)
         code.append(0x00)  # Store to stack
 
@@ -1970,7 +2107,8 @@ class ImprovedCodeGenerator:
             return b''
 
         # LOAD is 1OP opcode 0x0E
-        code.append(0x8E)  # Short 1OP, opcode 0x0E, variable type
+        # Short form: 10 01 1110 = 0x9E (small constant type for variable number)
+        code.append(0x9E)  # Short 1OP, opcode 0x0E, small constant type
         code.append(var_num)
         code.append(0x00)  # Store to stack
 
@@ -1993,7 +2131,8 @@ class ImprovedCodeGenerator:
             return b''
 
         # LOAD is 1OP opcode 0x0E
-        code.append(0x8E)  # Short 1OP, opcode 0x0E, variable type
+        # Short form: 10 01 1110 = 0x9E (small constant type for variable number)
+        code.append(0x9E)  # Short 1OP, opcode 0x0E, small constant type
         code.append(var_num)
         code.append(0x00)  # Store to stack
 
@@ -2534,7 +2673,7 @@ class ImprovedCodeGenerator:
 
         # Store b (a >= b case)
         if op2_type == 1:  # Variable
-            code.append(0x8E)  # 1OP LOAD var
+            code.append(0x9E)  # 1OP LOAD var (10 01 1110) with small const type
             code.append(op2_val & 0xFF)
             code.append(0x00)  # Store to stack
         else:  # Constant
@@ -2552,7 +2691,7 @@ class ImprovedCodeGenerator:
 
         # use_a: Store a
         if op1_type == 1:  # Variable
-            code.append(0x8E)  # LOAD var
+            code.append(0x9E)  # LOAD var (10 01 1110) with small const type
             code.append(op1_val & 0xFF)
             code.append(0x00)  # Store to stack
         else:  # Constant
@@ -2680,7 +2819,7 @@ class ImprovedCodeGenerator:
         code.append(0x48)  # Short branch, offset 8
 
         # Positive case: just load the value
-        code.append(0x8E)  # LOAD var
+        code.append(0x9E)  # LOAD var (10 01 1110) with small const type
         code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
 
@@ -2706,12 +2845,12 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         if op_type == 1:  # Variable
-            code.append(0x8E)  # LOAD var
+            code.append(0x9E)  # LOAD var (10 01 1110) with small const type
             code.append(op_val & 0xFF)
             code.append(0x00)  # Store to stack
         else:  # Constant - can compute at compile time
             abs_val = abs(op_val) if op_val < 0x8000 else abs(op_val - 0x10000)
-            code.append(0x8E)  # Use LOAD pattern
+            code.append(0x9E)  # Use LOAD pattern with small const type
             code.append(op_val & 0xFF)
             code.append(0x00)
 
@@ -7088,8 +7227,8 @@ class ImprovedCodeGenerator:
             loop_start = len(code)
 
             # Duplicate counter for use (INC_CHK will consume one)
-            code.append(0x8E)  # LOAD var -> store
-            code.append(0x00)  # Stack
+            code.append(0x9E)  # LOAD var -> store (10 01 1110) with small const type
+            code.append(0x00)  # Stack (variable 0)
             code.append(0x00)  # To stack (now have 2 copies)
 
             # LOADB src stack -> stack
@@ -10063,10 +10202,49 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_verify(self) -> bytes:
-        """Generate VERIFY (verify game file) - branch instruction."""
+        """Generate VERIFY (verify game file) - returns 1 if checksum valid, 0 otherwise.
+
+        VERIFY is a branch instruction. To use as a value:
+        1. VERIFY ?~(+offset) - branch if verify fails (to push 0)
+        2. Push 1 (true) and jump to end
+        3. Push 0 (false)
+        """
         code = bytearray()
-        code.append(0xBD)  # Short 0OP, opcode 0x0D
-        code.append(0x40)  # Branch byte
+
+        # Layout:
+        # 0-1: VERIFY + branch (branch to offset 9 if false/fails)
+        # 2-5: ADD 0 1 -> stack (push 1, verify succeeded)
+        # 6-8: JUMP to offset 13 (skip push 0)
+        # 9-12: ADD 0 0 -> stack (push 0, verify failed)
+        # 13: next instruction
+
+        # VERIFY with branch offset 7 (relative to address after branch byte)
+        # Branch if verify FAILS (bit7=0), to go to "push 0"
+        # After VERIFY+branch_byte (2 bytes), PC is at offset 2
+        # We want to branch to the "push 0" at offset 9, so offset = 9 - 2 = 7
+        code.append(0xBD)  # VERIFY (0OP:13)
+        code.append(0x47)  # Branch byte: bit7=0 (branch on false), bit6=1 (short), bits5-0=7
+
+        # Push 1 (verify succeeded) - use ADD 0 1 -> stack
+        code.append(0x14)  # ADD
+        code.append(0x00)  # operand 1: 0
+        code.append(0x01)  # operand 2: 1
+        code.append(0x00)  # store to stack
+
+        # JUMP over push 0 (skip 4 bytes: the ADD 0 0 -> stack)
+        # JUMP is 1OP:12, short form with large constant: 0x8C
+        # After JUMP (3 bytes at offset 6), PC is at offset 9
+        # Target is offset 13 (after ADD 0 0), so offset = 13 - 9 = 4
+        code.append(0x8C)  # JUMP with large constant
+        code.append(0x00)  # High byte of offset
+        code.append(0x04)  # Low byte of offset (4)
+
+        # Push 0 (verify failed) - use ADD 0 0 -> stack
+        code.append(0x14)  # ADD
+        code.append(0x00)  # operand 1: 0
+        code.append(0x00)  # operand 2: 0
+        code.append(0x00)  # store to stack
+
         return bytes(code)
 
     # ===== Parser Predicates =====

@@ -603,6 +603,7 @@ class Parser:
         # Parse parameter list
         params = []
         aux_vars = []
+        local_defaults = {}  # Map from variable name to default value
 
         if self.current_token.type == TokenType.LPAREN:
             self.advance()
@@ -632,13 +633,15 @@ class Parser:
                         self.error("Expected parameter name in default value form")
                     param_name = self.current_token.value
                     self.advance()
-                    # Skip the default value expression
+                    # Parse the default value expression
                     default_value = self.parse_expression()
                     self.expect(TokenType.RPAREN)
                     if in_aux:
                         aux_vars.append(param_name)
                     else:
                         params.append(param_name)
+                    # Store the default value
+                    local_defaults[param_name] = default_value
                     continue
 
                 # Handle simple parameter name
@@ -658,7 +661,7 @@ class Parser:
         while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
             body.append(self.parse_expression())
 
-        return RoutineNode(name, params, aux_vars, body, line, col)
+        return RoutineNode(name, params, aux_vars, body, line, col, local_defaults)
 
     def parse_object(self, line: int, col: int) -> ObjectNode:
         """Parse OBJECT definition."""

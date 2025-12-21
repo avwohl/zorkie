@@ -1467,30 +1467,32 @@ class TestSetQuirks:
           variable whose index is in FOO.
         """
         # void context
-        AssertRoutine('"AUX" (FOO 16)', "<SET .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        # Note: FOO=22 because our compiler reserves globals 16-21 for parser globals
+        # (PLAYER, SCORE, HERE, WINNER, MOVES), so user globals start at 22
+        AssertRoutine('"AUX" (FOO 22)', "<SET .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("123\n1")
 
-        AssertRoutine('"AUX" (FOO 16)', "<SETG ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 22)', "<SETG ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
-            .outputs("16\n123")
+            .outputs("22\n123")
 
-        AssertRoutine('"AUX" (FOO 16)', "<SETG .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 22)', "<SETG .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
-            .outputs("16\n123")
+            .outputs("22\n123")
 
-        AssertRoutine('"AUX" (FOO 16)', "<SET ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 22)', "<SET ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("123\n1")
 
         # value context (more limited)
-        AssertRoutine('"AUX" (FOO 16)', "<PRINTN <SET .FOO 123>> <CRLF> <PRINTN ,MYGLOBAL>") \
+        AssertRoutine('"AUX" (FOO 22)', "<PRINTN <SET .FOO 123>> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("123\n1")
 
-        AssertRoutine('"AUX" (FOO 16)', "<PRINTN <SETG ,MYGLOBAL 123>> <CRLF> <PRINTN .FOO>") \
+        AssertRoutine('"AUX" (FOO 22)', "<PRINTN <SETG ,MYGLOBAL 123>> <CRLF> <PRINTN .FOO>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
-            .outputs("123\n16")
+            .outputs("123\n22")
 
 
 class TestOriginal:

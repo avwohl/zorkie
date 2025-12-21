@@ -130,13 +130,16 @@ class FormNode(ASTNode):
 class RoutineNode(ASTNode):
     """ROUTINE definition node."""
     def __init__(self, name: str, params: List[str] = None, aux_vars: List[str] = None,
-                 body: List[ASTNode] = None, line: int = 0, column: int = 0):
+                 body: List[ASTNode] = None, line: int = 0, column: int = 0,
+                 local_defaults: Dict[str, 'ASTNode'] = None):
         super().__init__(NodeType.ROUTINE, line, column)
         self.name = name
         self.params = params or []
         self.aux_vars = aux_vars or []
         self.body = body or []
         self.declarations = {}
+        # Map from variable name to default value expression
+        self.local_defaults = local_defaults or {}
 
     def __repr__(self):
         return f"Routine({self.name}, {len(self.params)} params, {len(self.body)} stmts)"
