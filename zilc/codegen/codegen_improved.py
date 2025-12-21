@@ -1975,21 +1975,42 @@ class ImprovedCodeGenerator:
             # Simple value assignment
             val_type, val_val = self._get_operand_type_and_value(value_node)
 
-            # STORE is 2OP opcode 0x0D
-            # Long form: bit6=var type for first op, bit5=var type for second op
-            opcode = 0x0D | (0 << 6) | (val_type << 5)  # First operand always small const
-            code.append(opcode)
-            code.append(var_num & 0xFF)
-            code.append(val_val & 0xFF)
-            # For value context, push the stored value
-            if val_type == 0:  # Small constant
-                code.append(0xE8)  # VAR form PUSH
-                code.append(0x7F)  # Small constant type, rest omit
+            # Check if value is a large constant (> 255)
+            is_large_const = val_type == 0 and val_val > 255
+
+            if is_large_const:
+                # Use VAR form for large constants
+                # STORE is 2OP opcode 0x0D, VAR form is 0xCD
+                code.append(0xCD)  # VAR form STORE
+                # Type byte: small constant for var, large constant for value
+                code.append(0x4F)  # 01=small, 00=large, 11=omit, 11=omit
+                code.append(var_num & 0xFF)
+                # Write 2-byte value (big-endian)
+                # For routine address placeholders, this writes 0xFD <idx>
+                # which will be found by the placeholder scanning code
+                code.append((val_val >> 8) & 0xFF)
                 code.append(val_val & 0xFF)
-            else:  # Variable
+                # For value context, push the stored value with large constant
                 code.append(0xE8)  # VAR form PUSH
-                code.append(0xBF)  # Variable type, rest omit
+                code.append(0x3F)  # Large constant type, rest omit (00 11 11 11)
+                code.append((val_val >> 8) & 0xFF)
                 code.append(val_val & 0xFF)
+            else:
+                # STORE is 2OP opcode 0x0D
+                # Long form: bit6=var type for first op, bit5=var type for second op
+                opcode = 0x0D | (0 << 6) | (val_type << 5)  # First operand always small const
+                code.append(opcode)
+                code.append(var_num & 0xFF)
+                code.append(val_val & 0xFF)
+                # For value context, push the stored value
+                if val_type == 0:  # Small constant
+                    code.append(0xE8)  # VAR form PUSH
+                    code.append(0x7F)  # Small constant type, rest omit
+                    code.append(val_val & 0xFF)
+                else:  # Variable
+                    code.append(0xE8)  # VAR form PUSH
+                    code.append(0xBF)  # Variable type, rest omit
+                    code.append(val_val & 0xFF)
 
         return bytes(code)
 
@@ -2413,13 +2434,22 @@ class ImprovedCodeGenerator:
         if isinstance(node, NumberNode):
             return (0, node.value)  # Small constant
         elif isinstance(node, GlobalVarNode):
-            # ,VARNAME syntax - can be global variable, object, or constant
+            # ,VARNAME syntax - can be global variable, object, constant, or routine
             if node.name in self.globals:
                 return (1, self.globals[node.name])  # Global variable
             elif node.name in self.objects:
                 return (0, self.objects[node.name])  # Object number (constant)
             elif node.name in self.constants:
                 return (0, self.constants[node.name])  # Constant
+            elif hasattr(self, '_routine_names') and node.name in self._routine_names:
+                # Routine address reference (e.g., ,OTHER-ROUTINE)
+                # Create a placeholder for the routine address
+                placeholder_idx = self._next_placeholder_index
+                self._routine_placeholders[placeholder_idx] = node.name
+                self._next_placeholder_index += 1
+                # Return large constant placeholder (0xFD00 | index)
+                # This will be resolved by get_routine_fixups()
+                return (0, 0xFD00 | placeholder_idx)
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (1, 0x10)  # Default to variable 0x10
@@ -9027,6 +9057,47 @@ class ImprovedCodeGenerator:
         """
         code = bytearray()
 
+        # Handle simple number as condition (e.g., from <NOT 0>)
+        if isinstance(condition, NumberNode):
+            # For a constant, we know the truth value at compile time
+            # but we still need to generate valid code with a branch
+            # Use JZ to test the constant: 0 = false, non-zero = true
+            # JZ 1OP opcode 0x00, short form with small constant: 10 01 0000 = 0x90
+            code.append(0x90)  # JZ short form, small constant operand
+            code.append(condition.value & 0xFF)
+            # Add branch byte
+            if branch_on_false:
+                # Branch when value is zero (condition is false)
+                code.append(0xC0)  # Branch on true (JZ true = value is zero)
+            else:
+                # Branch when value is non-zero (condition is true)
+                code.append(0x40)  # Branch on false (JZ false = value is non-zero)
+            return bytes(code)
+
+        # Handle local variable as condition
+        if isinstance(condition, LocalVarNode):
+            var_num = self.locals.get(condition.name, 0)
+            # JZ 1OP opcode 0x00, short form with variable: 10 10 0000 = 0xA0
+            code.append(0xA0)  # JZ short form, variable operand
+            code.append(var_num)
+            if branch_on_false:
+                code.append(0xC0)  # Branch when zero (condition false)
+            else:
+                code.append(0x40)  # Branch when non-zero (condition true)
+            return bytes(code)
+
+        # Handle global variable as condition
+        if isinstance(condition, GlobalVarNode):
+            var_num = self.globals.get(condition.name, 0x10)
+            # JZ 1OP opcode 0x00, short form with variable: 10 10 0000 = 0xA0
+            code.append(0xA0)  # JZ short form, variable operand
+            code.append(var_num)
+            if branch_on_false:
+                code.append(0xC0)  # Branch when zero (condition false)
+            else:
+                code.append(0x40)  # Branch when non-zero (condition true)
+            return bytes(code)
+
         # If condition is a form, it might be a comparison or test
         if isinstance(condition, FormNode):
             op_name = condition.operator.value.upper() if isinstance(condition.operator, AtomNode) else ''
@@ -9371,7 +9442,19 @@ class ImprovedCodeGenerator:
         elif isinstance(node, LocalVarNode):
             return self.locals.get(node.name, 1)
         elif isinstance(node, GlobalVarNode):
-            return self.globals.get(node.name, 0x10)
+            if node.name in self.globals:
+                return self.globals[node.name]
+            elif node.name in self.objects:
+                return self.objects[node.name]
+            elif node.name in self.constants:
+                return self.constants[node.name]
+            elif hasattr(self, '_routine_names') and node.name in self._routine_names:
+                # Routine address - return placeholder
+                placeholder_idx = self._next_placeholder_index
+                self._routine_placeholders[placeholder_idx] = node.name
+                self._next_placeholder_index += 1
+                return 0xFD00 | placeholder_idx
+            return 0x10  # Default
         elif isinstance(node, TableNode):
             # Table literal - store table and return placeholder index
             # The actual address will be resolved during assembly
@@ -10480,20 +10563,20 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_apply(self, operands: List[ASTNode]) -> bytes:
-        """Generate APPLY (call routine with arguments from table).
+        """Generate APPLY (call routine stored in variable).
 
-        <APPLY routine arg-table num-args> calls routine with arguments
-        unpacked from a table.
+        <APPLY routine-addr arg1 arg2 ...> calls the routine at the
+        given address with the provided arguments.
 
-        This is a simplified implementation.
+        In ZIL, APPLY is used for indirect calls where the routine
+        address is stored in a variable.
 
         Args:
-            operands[0]: Routine address
-            operands[1]: Table of arguments
-            operands[2]: Number of arguments
+            operands[0]: Routine address (typically from a variable)
+            operands[1+]: Arguments to pass to the routine
 
         Returns:
-            bytes: Z-machine code (simplified CALL)
+            bytes: Z-machine code (CALL_VS with all operands)
         """
         if len(operands) < 1:
             raise ValueError("APPLY requires at least 1 operand")
@@ -10504,9 +10587,8 @@ class ImprovedCodeGenerator:
             if len(operands) > 8:
                 raise ValueError("APPLY accepts at most 8 operands in V5+")
 
-        # For simplicity, treat like CALL with first operand
-        # Full implementation would unpack args from table
-        return self.gen_call([operands[0]])
+        # APPLY is like CALL - pass all operands including args
+        return self.gen_call(operands)
 
     def gen_call_vs2(self, operands: List[ASTNode]) -> bytes:
         """Generate CALL_VS2 (V5+ extended call with store, up to 8 args).
