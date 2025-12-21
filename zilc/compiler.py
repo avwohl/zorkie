@@ -1252,33 +1252,13 @@ class ZILCompiler:
                     flags[flag] = next_flag_bit
                     next_flag_bit += 1
 
-        # Standard property assignments
+        # Standard property assignments (must match _build_object_table prop_map)
+        # Only DESC and LDESC are pre-defined; others are assigned dynamically
         properties = {
             'P?DESC': 1,
             'P?LDESC': 2,
-            'P?FDESC': 3,
-            'P?ACTION': 4,
-            'P?SYNONYM': 5,
-            'P?ADJECTIVE': 6,
-            'P?STRENGTH': 7,
-            'P?SIZE': 8,
-            'P?CAPACITY': 9,
-            'P?VALUE': 10,
-            'P?TVALUE': 11,
-            # Additional standard properties
-            'P?GLOBAL': 12,      # Global objects list
-            'P?PSEUDO': 13,      # Pseudo-object properties
-            'P?TEXT': 14,        # Text description
-            'P?VTYPE': 15,       # Vehicle type
         }
-
-        # Add direction properties
-        directions = ['NORTH', 'SOUTH', 'EAST', 'WEST', 'NE', 'NW', 'SE', 'SW',
-                     'UP', 'DOWN', 'IN', 'OUT', 'LAND']
-        next_prop = 16  # Start after standard properties (1-15)
-        for d in directions:
-            properties[f'P?{d}'] = next_prop
-            next_prop += 1
+        next_prop = 3  # Custom properties start at 3
 
         # Collect custom properties from PROPDEF declarations
         for propdef in program.propdefs:
@@ -1286,6 +1266,18 @@ class ZILCompiler:
             if prop_name not in properties:
                 properties[prop_name] = next_prop
                 next_prop += 1
+
+        # Collect custom properties from object/room definitions
+        # Properties like (MYPROP 123) need P?MYPROP constants
+        # This must match the order and numbering in _build_object_table
+        reserved_props = {'FLAGS', 'SYNONYM', 'ADJECTIVE', 'IN', 'LOC'}
+        for obj in program.objects + program.rooms:
+            for key in obj.properties.keys():
+                if key not in reserved_props:
+                    prop_name = f'P?{key}'
+                    if prop_name not in properties:
+                        properties[prop_name] = next_prop
+                        next_prop += 1
 
         # Parser part-of-speech constants (matching dictionary flag bits)
         parser_constants = {

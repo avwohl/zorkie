@@ -227,6 +227,16 @@ class ImprovedCodeGenerator:
                 init_val = self.get_operand_value(global_node.initial_value)
                 if isinstance(init_val, int):
                     self.global_values[global_node.name] = init_val
+                elif isinstance(global_node.initial_value, TableNode):
+                    # Handle TABLE/LTABLE/ITABLE/PTABLE initial values
+                    self._compile_global_table_node(global_node.name, global_node.initial_value)
+                elif isinstance(global_node.initial_value, FormNode):
+                    # Handle TABLE/LTABLE/ITABLE/PTABLE initial values (legacy)
+                    if isinstance(global_node.initial_value.operator, AtomNode):
+                        form_op = global_node.initial_value.operator.value.upper()
+                        if form_op in ('TABLE', 'LTABLE', 'ITABLE', 'PTABLE'):
+                            # Compile the table and get placeholder
+                            self._compile_global_table(global_node.name, global_node.initial_value, form_op)
             self.next_global += 1
 
         # Reserve globals for ACTIONS and PREACTIONS tables
@@ -282,6 +292,181 @@ class ImprovedCodeGenerator:
         if 'preactions' in self.action_table and self.action_table['preactions']:
             self.globals['PREACTIONS'] = self.next_global
             self.next_global += 1
+
+    def _compile_global_table_node(self, global_name: str, table_node: 'TableNode'):
+        """Compile a TableNode initial value for a global.
+
+        This creates the table data and sets up the global to point to it.
+        """
+        table_data = bytearray()
+        table_type = table_node.table_type.upper()
+        is_pure = 'PURE' in table_node.flags or table_type == 'PTABLE'
+        is_byte = 'BYTE' in table_node.flags
+        is_string = 'STRING' in table_node.flags
+        if is_string:
+            is_byte = True  # STRING implies BYTE mode
+
+        values = table_node.values
+
+        # For LTABLE, add length prefix
+        if table_type == 'LTABLE':
+            table_data.extend(struct.pack('>H', len(values)))
+
+        # Handle ITABLE size
+        initial_size = table_node.size
+
+        # Encode table values
+        for val in values:
+            # Handle STRING mode - strings become raw character bytes
+            if is_string and isinstance(val, StringNode):
+                for char in val.value:
+                    table_data.append(ord(char) & 0xFF)
+                continue
+
+            val_int = self.get_operand_value(val)
+            if val_int is None:
+                if isinstance(val, AtomNode):
+                    name = val.value
+                    if name in self.objects:
+                        val_int = self.objects[name]
+                    elif name in self.routines:
+                        val_int = self.routines[name]
+                    elif name in self.globals:
+                        val_int = self.globals[name]
+                    elif name in self.constants:
+                        val_int = self.constants[name]
+                    else:
+                        val_int = 0
+                elif isinstance(val, StringNode):
+                    val_int = 0
+                else:
+                    val_int = 0
+
+            if is_byte:
+                table_data.append(val_int & 0xFF)
+            else:
+                table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+
+        # Pad ITABLE to initial size
+        if initial_size and table_type == 'ITABLE':
+            entry_size = 1 if is_byte else 2
+            while len(table_data) < initial_size * entry_size:
+                if is_byte:
+                    table_data.append(0)
+                else:
+                    table_data.extend(struct.pack('>H', 0))
+
+        # Store the table
+        table_idx = len(self.tables)
+        self.table_offsets[table_idx] = self._table_data_size
+        self._table_data_size += len(table_data)
+        self.table_counter += 1
+        self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+
+        # Set placeholder for table address (will be resolved by assembler)
+        self.global_values[global_name] = 0xFF00 | table_idx
+
+    def _compile_global_table(self, global_name: str, form_node: 'FormNode', table_type: str):
+        """Compile a TABLE/LTABLE/ITABLE/PTABLE initial value for a global (legacy FormNode).
+
+        This creates the table data and sets up the global to point to it.
+        """
+        table_data = bytearray()
+        is_pure = table_type == 'PTABLE'
+        is_byte = False
+        is_string = False
+
+        # Process operands from the form
+        values = []
+        for op in form_node.operands:
+            # Check for flags like (PURE), (BYTE), (STRING)
+            if isinstance(op, FormNode):
+                if isinstance(op.operator, AtomNode):
+                    flag_name = op.operator.value.upper()
+                    if flag_name == 'PURE':
+                        is_pure = True
+                        continue
+                    elif flag_name == 'BYTE':
+                        is_byte = True
+                        continue
+                    elif flag_name == 'STRING':
+                        is_string = True
+                        is_byte = True
+                        continue
+            elif isinstance(op, AtomNode):
+                flag_name = op.value.upper()
+                if flag_name == 'PURE':
+                    is_pure = True
+                    continue
+                elif flag_name == 'BYTE':
+                    is_byte = True
+                    continue
+                elif flag_name == 'STRING':
+                    is_string = True
+                    is_byte = True
+                    continue
+            values.append(op)
+
+        # For LTABLE, add length prefix
+        if table_type == 'LTABLE':
+            table_data.extend(struct.pack('>H', len(values)))
+
+        # Handle ITABLE size prefix
+        initial_size = None
+        if table_type == 'ITABLE' and values and isinstance(values[0], NumberNode):
+            initial_size = values[0].value
+            values = values[1:]
+
+        # Encode table values
+        for val in values:
+            # Handle STRING mode - strings become raw character bytes
+            if is_string and isinstance(val, StringNode):
+                for char in val.value:
+                    table_data.append(ord(char) & 0xFF)
+                continue
+
+            val_int = self.get_operand_value(val)
+            if val_int is None:
+                if isinstance(val, AtomNode):
+                    name = val.value
+                    if name in self.objects:
+                        val_int = self.objects[name]
+                    elif name in self.routines:
+                        val_int = self.routines[name]
+                    elif name in self.globals:
+                        val_int = self.globals[name]
+                    elif name in self.constants:
+                        val_int = self.constants[name]
+                    else:
+                        val_int = 0
+                elif isinstance(val, StringNode):
+                    val_int = 0
+                else:
+                    val_int = 0
+
+            if is_byte:
+                table_data.append(val_int & 0xFF)
+            else:
+                table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+
+        # Pad ITABLE to initial size
+        if initial_size and table_type == 'ITABLE':
+            entry_size = 1 if is_byte else 2
+            while len(table_data) < initial_size * entry_size:
+                if is_byte:
+                    table_data.append(0)
+                else:
+                    table_data.extend(struct.pack('>H', 0))
+
+        # Store the table
+        table_idx = len(self.tables)
+        self.table_offsets[table_idx] = self._table_data_size
+        self._table_data_size += len(table_data)
+        self.table_counter += 1
+        self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+
+        # Set placeholder for table address (will be resolved by assembler)
+        self.global_values[global_name] = 0xFF00 | table_idx
 
     def _generate_action_tables(self):
         """Generate ACTIONS and PREACTIONS table data.
@@ -546,14 +731,14 @@ class ImprovedCodeGenerator:
                         'PRINTI', 'PRINT', 'PRINTR', 'PRINTC', 'PRINTB', 'PRINTD',
                         'PRINTN', 'PRINTT', 'PRINTU', 'CRLF', 'TELL',
                         'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
-                        'QUIT', 'RESTART', 'CLEAR', 'SCREEN',
+                        'QUIT', 'RESTART', 'CLEAR', 'SCREEN', 'ERASE', 'COLOR',
                         'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
-                        'BUFOUT', 'DISPLAY', 'THROW'
+                        'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
                     }
                     if op_name in void_ops:
-                        # Void operation - use RET 0
+                        # Void operation - use RET 1 (success/true)
                         routine_code.append(0x9B)
-                        routine_code.append(0x00)
+                        routine_code.append(0x01)
                     else:
                         # The expression pushed its result to the stack
                         # Use RET_POPPED to return that value
@@ -1246,6 +1431,9 @@ class ImprovedCodeGenerator:
         table_type = node.table_type
         is_pure = 'PURE' in node.flags
         is_byte = 'BYTE' in node.flags
+        is_string = 'STRING' in node.flags
+        if is_string:
+            is_byte = True  # STRING implies BYTE mode
 
         # For LTABLE, add length prefix
         if table_type == 'LTABLE':
@@ -1253,6 +1441,12 @@ class ImprovedCodeGenerator:
 
         # Encode values
         for val in node.values:
+            # Handle STRING mode - strings become raw character bytes
+            if is_string and isinstance(val, StringNode):
+                for char in val.value:
+                    table_data.append(ord(char) & 0xFF)
+                continue
+
             val_int = self.get_operand_value(val)
             if val_int is None:
                 if isinstance(val, AtomNode):
@@ -1653,24 +1847,42 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_printb(self, operands: List[ASTNode]) -> bytes:
-        """Generate PRINT_PADDR (print from byte array).
+        """Generate PRINT_ADDR (print from byte address).
 
-        <PRINTB addr> prints text from a byte array at the given address.
-        This uses the PRINT_PADDR opcode (packed address in V3).
+        <PRINTB addr> prints text from a byte address.
+        PRINT_ADDR is 1OP:7.
 
-        In Z-machine V3, PRINT_PADDR is VAR opcode 0x0D.
+        Opcode encoding (short form, 1OP):
+        - 0x87 = large constant operand (2 bytes)
+        - 0x97 = small constant operand (1 byte)
+        - 0xA7 = variable operand (1 byte)
         """
         if len(operands) != 1:
             raise ValueError("PRINTB requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
 
-        # PRINT_PADDR is VAR opcode 0x0D
-        code.append(0xED)  # VAR form, opcode 0x0D
-        type_byte = 0x01 if op_type == 0 else 0x02
-        code.append((type_byte << 6) | 0x3F)
-        code.append(op_val & 0xFF)
+        # Handle FormNode operands - generate the inner code first
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            op_type = 2  # Variable
+            op_val = 0   # Stack
+        else:
+            op_type, op_val = self._get_operand_type_and_value_ext(operands[0])
+
+        # PRINT_ADDR is 1OP:7
+        # Short form: 0x80 + opcode for large, 0x90 for small, 0xA0 for var
+        if op_type == 0:  # Large constant
+            code.append(0x87)  # 1OP:7 with large constant
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
+        elif op_type == 1:  # Small constant
+            code.append(0x97)  # 1OP:7 with small constant
+            code.append(op_val & 0xFF)
+        else:  # Variable
+            code.append(0xA7)  # 1OP:7 with variable
+            code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -2323,9 +2535,23 @@ class ImprovedCodeGenerator:
         """
         code = bytearray()
 
-        # Get operand info
-        op1_type, op1_val = self._get_operand_type_and_value_ext(op1_node)
-        op2_type, op2_val = self._get_operand_type_and_value_ext(op2_node)
+        # Pre-generate any FormNode operands first (they push to stack)
+        # Process in order so stack values are correct
+        if isinstance(op1_node, FormNode):
+            inner_code = self.generate_form(op1_node)
+            code.extend(inner_code)
+            op1_type = 2  # Variable
+            op1_val = 0   # Stack
+        else:
+            op1_type, op1_val = self._get_operand_type_and_value_ext(op1_node)
+
+        if isinstance(op2_node, FormNode):
+            inner_code = self.generate_form(op2_node)
+            code.extend(inner_code)
+            op2_type = 2  # Variable
+            op2_val = 0   # Stack
+        else:
+            op2_type, op2_val = self._get_operand_type_and_value_ext(op2_node)
 
         # Check if we can use long form (both operands are small const or variable)
         # Long form only supports: small constant (0-255) or variable
@@ -3567,10 +3793,11 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         code.append(0xF1)  # BUFFER_MODE (VAR opcode 0x11)
+        # VAR opcode type byte: 2 bits per operand (00=large, 01=small, 10=var, 11=omit)
         if op_type == 1:  # Variable
-            code.append(0x8F)  # Type byte: 1 variable
-        else:  # Constant
-            code.append(0x2F)  # Type byte: 1 small constant
+            code.append(0xBF)  # Type byte: 10 11 11 11 = variable, omit, omit, omit
+        else:  # Small constant
+            code.append(0x7F)  # Type byte: 01 11 11 11 = small, omit, omit, omit
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -3697,25 +3924,35 @@ class ImprovedCodeGenerator:
             raise ValueError("DIROUT accepts at most 3 operands")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         code.append(0xF3)  # OUTPUT_STREAM (VAR opcode 0x13)
 
-        if op_type == 0 and op_val == 0:
-            # Restore normal output (stream -3)
-            code.append(0x15)  # Type byte: 2 small constants
-            code.append(0xFD)  # -3 (close stream 3)
-            code.append(0x00)
-        elif op_type == 1:  # Variable
-            # Direct to table via variable (stream 3)
-            code.append(0x18)  # Type byte: small const, variable
-            code.append(0x03)  # Stream 3
-            code.append(op_val & 0xFF)  # Variable number
-        else:
-            # Direct to table (stream 3)
-            code.append(0x15)  # Type byte: 2 small constants
-            code.append(0x03)  # Stream 3
-            code.append(op_val & 0xFF)
+        # Build operand types and values
+        # VAR type byte: 2 bits per operand (00=large, 01=small, 10=var, 11=omit)
+        op_types = []
+        op_vals = []
+        for operand in operands:
+            # Use _ext version which returns correct VAR type codes
+            op_type, op_val = self._get_operand_type_and_value_ext(operand)
+            op_types.append(op_type)
+            op_vals.append(op_val)
+
+        # Build type byte (up to 4 operands, rest are 11=omit)
+        type_byte = 0
+        for i in range(4):
+            if i < len(op_types):
+                type_byte = (type_byte << 2) | op_types[i]
+            else:
+                type_byte = (type_byte << 2) | 3  # 11 = omit
+        code.append(type_byte)
+
+        # Write operand values with appropriate byte count
+        for i, op_val in enumerate(op_vals):
+            if op_types[i] == 0:  # Large constant (2 bytes)
+                code.append((op_val >> 8) & 0xFF)
+                code.append(op_val & 0xFF)
+            else:  # Small constant or variable (1 byte)
+                code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -3757,10 +3994,11 @@ class ImprovedCodeGenerator:
 
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
+        # VAR opcode type byte: 2 bits per operand (00=large, 01=small, 10=var, 11=omit)
         if op_type == 1:  # Variable
-            code.append(0x8F)  # Type byte: 1 variable
-        else:  # Constant
-            code.append(0x2F)  # Type byte: 1 small constant
+            code.append(0xBF)  # Type byte: 10 11 11 11 = variable, omit, omit, omit
+        else:  # Small constant
+            code.append(0x7F)  # Type byte: 01 11 11 11 = small, omit, omit, omit
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -4404,11 +4642,17 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # PRINT_OBJ (1OP opcode 0x0A)
+        # 1OP short form: 0x80 = large const, 0x90 = small const, 0xA0 = variable
         if op_type == 1:  # Variable
-            code.append(0x9A)  # 0x9A = variable operand
-        else:  # Constant
-            code.append(0x8A)  # 0x8A = small constant
-        code.append(op_val & 0xFF)
+            code.append(0xAA)  # 0xA0 + 0x0A = variable type, opcode 10
+            code.append(op_val & 0xFF)
+        elif op_val <= 255:  # Small constant
+            code.append(0x9A)  # 0x90 + 0x0A = small const type, opcode 10
+            code.append(op_val & 0xFF)
+        else:  # Large constant
+            code.append(0x8A)  # 0x80 + 0x0A = large const type, opcode 10
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -5054,7 +5298,8 @@ class ImprovedCodeGenerator:
         # It branches if the game is a pirate copy
         # We implement it to always return 1 (genuine copy)
         # Push 1 to stack: ADD 0 1 -> stack
-        code.append(0x54)  # ADD (2OP:0x14) short form: small const, small const
+        # 0x14 = 2OP long form, both small constants, opcode 0x14 (ADD)
+        code.append(0x14)  # ADD (2OP:0x14) long form: small const, small const
         code.append(0x00)  # 0
         code.append(0x01)  # 1
         code.append(0x00)  # Store to stack
@@ -6715,19 +6960,62 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_printt(self, operands: List[ASTNode]) -> bytes:
-        """Generate PRINTT (print with tab).
+        """Generate PRINTT (print table - V5+).
 
-        <PRINTT string> prints string with tab formatting.
-        Alias for PRINT with special formatting.
+        <PRINTT table width [height [skip]]> prints text from table.
+        PRINT_TABLE is VAR opcode 0x1E (30).
 
         Args:
-            operands[0]: String to print
+            operands[0]: Table address containing ZSCII text
+            operands[1]: Width (characters per line)
+            operands[2]: Height (optional, default 1)
+            operands[3]: Skip (optional, bytes between lines)
 
         Returns:
-            bytes: Z-machine code (delegates to TELL)
+            bytes: Z-machine code (PRINT_TABLE instruction)
         """
-        # PRINTT is just TELL/PRINT
-        return self.gen_tell(operands)
+        if self.version < 5:
+            raise ValueError("PRINTT/PRINT_TABLE requires V5 or later")
+        if len(operands) < 2 or len(operands) > 4:
+            raise ValueError("PRINTT requires 2-4 operands")
+
+        code = bytearray()
+
+        # PRINT_TABLE is VAR opcode 0x3E (62)
+        code.append(0xFE)  # VAR form, opcode 0x3E (0xC0 + 0x3E)
+
+        # Build operands and type byte
+        op_types = []
+        op_vals = []
+        for operand in operands:
+            if isinstance(operand, FormNode):
+                inner_code = self.generate_form(operand)
+                code.extend(inner_code)
+                op_types.append(2)  # Variable
+                op_vals.append(0)   # Stack
+            else:
+                op_type, op_val = self._get_operand_type_and_value_ext(operand)
+                op_types.append(op_type)
+                op_vals.append(op_val)
+
+        # Build type byte (up to 4 operands)
+        type_byte = 0
+        for i in range(4):
+            if i < len(op_types):
+                type_byte = (type_byte << 2) | op_types[i]
+            else:
+                type_byte = (type_byte << 2) | 3  # 11 = omit
+        code.append(type_byte)
+
+        # Write operand values
+        for i, op_val in enumerate(op_vals):
+            if op_types[i] == 0:  # Large constant
+                code.append((op_val >> 8) & 0xFF)
+                code.append(op_val & 0xFF)
+            else:
+                code.append(op_val & 0xFF)
+
+        return bytes(code)
 
     def gen_fstack(self, operands: List[ASTNode]) -> bytes:
         """Generate FSTACK (V6 flush stack).
@@ -7205,9 +7493,9 @@ class ImprovedCodeGenerator:
             op2_type, op2_val = self._get_operand_type_and_value(operands[1])  # dst
             op3_type, op3_val = self._get_operand_type_and_value(operands[2])  # length
 
-            # COPY_TABLE opcode 0xBE + 0x1D (EXT opcode 29)
-            code.append(0xBE)
-            code.append(0x1D)  # Extended opcode number for COPY_TABLE
+            # COPY_TABLE is VAR opcode 0x3D (61)
+            # Opcode byte is 0xC0 + 0x3D = 0xFD
+            code.append(0xFD)
 
             # Build type byte for 3 operands
             types = []
@@ -8394,8 +8682,10 @@ class ImprovedCodeGenerator:
         """Generate ASSIGNED? test (check if local variable argument was passed).
 
         <ASSIGNED? var> checks if a local variable was passed an argument
-        when the routine was called. Uses CHECK_ARG_COUNT (EXT opcode 0xFF).
+        when the routine was called. Uses CHECK_ARG_COUNT (VAR opcode 0x3F).
         V5+ only.
+
+        Returns 1 if the argument was passed, 0 otherwise.
         """
         if self.version < 5:
             raise ValueError("ASSIGNED? requires V5 or later")
@@ -8411,14 +8701,35 @@ class ImprovedCodeGenerator:
         var_num = self.locals[var_name]
 
         code = bytearray()
-        # CHECK_ARG_COUNT: EXT opcode 0xFF
-        # Checks if argument number was passed
-        code.append(0xBE)  # EXT marker
-        code.append(0xFF)  # CHECK_ARG_COUNT
-        code.append(0x01)  # Type byte for 1 small constant
-        code.append(var_num & 0xFF)  # Local variable number
-        # Branch offset placeholder (caller fills in)
-        code.append(0xC0)  # Branch on true, short offset
+        # CHECK_ARG_COUNT is VAR opcode 0x3F (63) per frotz source
+        # Opcode byte is 0xC0 + 0x3F = 0xFF
+        # It's a branch instruction that branches if arg was passed
+        #
+        # Structure:
+        # 0: FF        CHECK_ARG_COUNT (VAR:63)
+        # 1: 7F        type byte (small const, omit, omit, omit)
+        # 2: var_num   argument number to check
+        # 3: C8        branch on true, short form, offset 8 (to byte 10)
+        # 4-6: E8 7F 00  PUSH 0 (not passed)
+        # 7-9: 8C 00 04  JUMP +4 (to byte 13)
+        # 10-12: E8 7F 01  PUSH 1 (passed)
+        # 13: (end)
+        code.append(0xFF)  # CHECK_ARG_COUNT (VAR:63)
+        code.append(0x7F)  # Type byte: small const (01), omit, omit, omit
+        code.append(var_num & 0xFF)  # Argument number to check
+        code.append(0xC8)  # Branch on true, short form, offset 8
+        # Push 0 (argument not passed)
+        code.append(0xE8)  # PUSH VAR form
+        code.append(0x7F)  # Type: small const
+        code.append(0x00)  # Value 0
+        # JUMP to end (skip PUSH 1)
+        code.append(0x8C)  # JUMP 1OP with large const
+        code.append(0x00)  # High byte of offset
+        code.append(0x04)  # Low byte of offset (jump +4 from PC after reading)
+        # Push 1 (argument was passed)
+        code.append(0xE8)  # PUSH VAR form
+        code.append(0x7F)  # Type: small const
+        code.append(0x01)  # Value 1
 
         return bytes(code)
 
@@ -8828,19 +9139,36 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
-        op3_type, op3_val = self._get_operand_type_and_value(operands[2])
+        # Get operand types and values using extended version
+        # which returns 0=large, 1=small, 2=variable
+        op1_type, op1_val = self._get_operand_type_and_value_ext(operands[0])
+        op2_type, op2_val = self._get_operand_type_and_value_ext(operands[1])
+        op3_type, op3_val = self._get_operand_type_and_value_ext(operands[2])
 
         # PUT_PROP is VAR opcode 0x03
         code.append(0xE3)  # VAR form, opcode 0x03
         # Type byte: 2 bits per operand, 00=large, 01=small, 10=var, 11=omitted
-        type_byte = ((op1_type + 1) << 6) | ((op2_type + 1) << 4) | ((op3_type + 1) << 2) | 0x03
+        type_byte = (op1_type << 6) | (op2_type << 4) | (op3_type << 2) | 0x03
         code.append(type_byte)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(op3_val & 0xFF)
+
+        # Write operand bytes based on type
+        if op1_type == 0:  # Large constant
+            code.append((op1_val >> 8) & 0xFF)
+            code.append(op1_val & 0xFF)
+        else:
+            code.append(op1_val & 0xFF)
+
+        if op2_type == 0:  # Large constant
+            code.append((op2_val >> 8) & 0xFF)
+            code.append(op2_val & 0xFF)
+        else:
+            code.append(op2_val & 0xFF)
+
+        if op3_type == 0:  # Large constant
+            code.append((op3_val >> 8) & 0xFF)
+            code.append(op3_val & 0xFF)
+        else:
+            code.append(op3_val & 0xFF)
 
         return bytes(code)
 
@@ -8849,19 +9177,29 @@ class ImprovedCodeGenerator:
 
         <PTSIZE prop-addr> returns the length of a property.
         Uses GET_PROP_LEN - 1OP opcode 0x04.
+
+        If operand is a FormNode, generate that form's code first.
         """
         if len(operands) != 1:
             raise ValueError("PTSIZE requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+
+        # Handle nested form operand
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            op_type = 1  # Variable (stack)
+            op_val = 0   # Stack
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_PROP_LEN is 1OP opcode 0x04
-        # 0x84 = small constant, 0x94 = variable
+        # 1OP short form: 0x80 = large const, 0x90 = small const, 0xA0 = variable
         if op_type == 1:  # Variable
-            code.append(0x94)
+            code.append(0xA4)  # 0xA0 + 0x04 = variable type, opcode 4
         else:  # Constant
-            code.append(0x84)
+            code.append(0x84)  # 0x80 + 0x04 = large const type, opcode 4
         code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
 
@@ -8986,9 +9324,9 @@ class ImprovedCodeGenerator:
                             'PRINTI', 'PRINT', 'PRINTR', 'PRINTC', 'PRINTB', 'PRINTD',
                             'PRINTN', 'PRINTT', 'PRINTU', 'CRLF', 'TELL',
                             'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
-                            'FSET', 'FCLEAR', 'QUIT', 'RESTART', 'CLEAR', 'SCREEN',
+                            'FSET', 'FCLEAR', 'QUIT', 'RESTART', 'CLEAR', 'SCREEN', 'ERASE', 'COLOR',
                             'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
-                            'BUFOUT', 'DISPLAY', 'THROW'
+                            'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
                         }
                         if op_name in void_ops:
                             # Push 0 to stack: ADD 0 0 -> stack
@@ -9694,21 +10032,37 @@ class ImprovedCodeGenerator:
 
         <GET table index> reads word from table[index].
         Uses Z-machine LOADW instruction.
+
+        If any operand is a FormNode, generate that form's code first
+        (which puts result on stack) then use stack as the operand.
         """
         if len(operands) != 2:
             raise ValueError("GET requires exactly 2 operands")
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Process each operand - FormNodes need code generation first
+        op_types = []
+        op_vals = []
+
+        for op in operands:
+            if isinstance(op, FormNode):
+                # Generate code for nested form - result goes to stack
+                inner_code = self.generate_form(op)
+                code.extend(inner_code)
+                # Use stack (variable 0) as the operand
+                op_types.append(1)  # Variable
+                op_vals.append(0)   # Stack
+            else:
+                op_type, op_val = self._get_operand_type_and_value(op)
+                op_types.append(op_type)
+                op_vals.append(op_val)
 
         # LOADW is 2OP opcode 0x0F
-        opcode = 0x0F | (op1_type << 6) | (op2_type << 5)
+        opcode = 0x0F | (op_types[0] << 6) | (op_types[1] << 5)
         code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.append(op_vals[0] & 0xFF)
+        code.append(op_vals[1] & 0xFF)
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -10325,12 +10679,13 @@ class ImprovedCodeGenerator:
         # 9-12: ADD 0 0 -> stack (push 0, verify failed)
         # 13: next instruction
 
-        # VERIFY with branch offset 7 (relative to address after branch byte)
+        # VERIFY with branch offset to "push 0" if verify fails
         # Branch if verify FAILS (bit7=0), to go to "push 0"
-        # After VERIFY+branch_byte (2 bytes), PC is at offset 2
-        # We want to branch to the "push 0" at offset 9, so offset = 9 - 2 = 7
+        # Layout: 0-1=VERIFY+branch, 2-5=ADD(push 1), 6-8=JUMP, 9-12=ADD(push 0)
+        # After branch byte, PC is at offset 2. Target is offset 9.
+        # Branch offset = 9 (target), encoded as: offset = 9, byte = 0x40 | 9 = 0x49
         code.append(0xBD)  # VERIFY (0OP:13)
-        code.append(0x47)  # Branch byte: bit7=0 (branch on false), bit6=1 (short), bits5-0=7
+        code.append(0x49)  # Branch byte: bit7=0 (branch on false), bit6=1 (short), bits5-0=9
 
         # Push 1 (verify succeeded) - use ADD 0 1 -> stack
         code.append(0x14)  # ADD
@@ -10340,11 +10695,12 @@ class ImprovedCodeGenerator:
 
         # JUMP over push 0 (skip 4 bytes: the ADD 0 0 -> stack)
         # JUMP is 1OP:12, short form with large constant: 0x8C
-        # After JUMP (3 bytes at offset 6), PC is at offset 9
-        # Target is offset 13 (after ADD 0 0), so offset = 13 - 9 = 4
+        # JUMP adds offset to address of operand (not opcode)
+        # Opcode at offset 6, operand at offset 7
+        # Target is offset 13, so offset = 13 - 7 = 6
         code.append(0x8C)  # JUMP with large constant
         code.append(0x00)  # High byte of offset
-        code.append(0x04)  # Low byte of offset (4)
+        code.append(0x06)  # Low byte of offset (6)
 
         # Push 0 (verify failed) - use ADD 0 0 -> stack
         code.append(0x14)  # ADD
@@ -10765,7 +11121,7 @@ class ImprovedCodeGenerator:
             operands[3]: Flag (optional)
 
         Returns:
-            bytes: Z-machine code (TOKENISE EXT opcode)
+            bytes: Z-machine code (TOKENISE VAR opcode)
         """
         if self.version < 5:
             raise ValueError("LEX requires V5 or later")
@@ -10774,32 +11130,36 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # TOKENISE is EXT opcode 0x00
-        code.append(0xBE)  # EXT opcode marker
-        code.append(0x00)  # TOKENISE
+        # TOKENISE is VAR opcode 0x1B (27)
+        # VAR opcode byte = 0xC0 + opcode = 0xC0 + 0x1B = 0xDB
+        code.append(0xDB)
 
         # Get operand types and values
         op_types = []
         op_vals = []
         for i in range(min(4, len(operands))):
-            op_type, op_val = self._get_operand_type_and_value(operands[i])
+            op_type, op_val = self._get_operand_type_and_value_ext(operands[i])
             op_types.append(op_type)
             op_vals.append(op_val)
 
-        # Build type byte: 0x01 = small const, 0x02 = variable, 0x03 = omitted
+        # Build type byte: 00=large, 01=small, 10=var, 11=omitted
         type_byte = 0x00
         for i in range(4):
             if i < len(op_types):
-                type_val = 0x01 if op_types[i] == 0 else 0x02
+                type_val = op_types[i]  # Already in correct format
             else:
                 type_val = 0x03  # Omitted
             type_byte |= (type_val << (6 - i*2))
 
         code.append(type_byte)
 
-        # Append operand values
-        for val in op_vals:
-            code.append(val & 0xFF)
+        # Append operand values with correct byte lengths
+        for i, val in enumerate(op_vals):
+            if op_types[i] == 0:  # Large constant (2 bytes)
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:  # Small constant or variable (1 byte)
+                code.append(val & 0xFF)
 
         return bytes(code)
 
@@ -10813,7 +11173,7 @@ class ImprovedCodeGenerator:
             operands[0]: Argument count to check
 
         Returns:
-            bytes: Z-machine code (CHECK_ARG_COUNT EXT opcode)
+            bytes: Z-machine code (CHECK_ARG_COUNT VAR opcode)
         """
         if not operands or self.version < 5:
             return b''
@@ -10821,9 +11181,9 @@ class ImprovedCodeGenerator:
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
-        # CHECK_ARG_COUNT is EXT opcode 0x0F
-        code.append(0xBE)  # EXT opcode marker
-        code.append(0x0F)  # CHECK_ARG_COUNT
+        # CHECK_ARG_COUNT is VAR opcode 0x3F (63)
+        # Opcode byte is 0xC0 + 0x3F = 0xFF
+        code.append(0xFF)  # CHECK_ARG_COUNT
 
         # Type byte: operand type in bits 7-6, rest are 0x03 (omitted)
         # 0x01 = small const, 0x02 = variable, 0x03 = omitted
@@ -10852,7 +11212,7 @@ class ImprovedCodeGenerator:
             operands[3]: Destination buffer address
 
         Returns:
-            bytes: Z-machine code (ENCODE_TEXT EXT opcode)
+            bytes: Z-machine code (ENCODE_TEXT VAR opcode)
         """
         if self.version < 5:
             raise ValueError("ZWSTR requires V5 or later")
@@ -10861,29 +11221,28 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # ENCODE_TEXT is EXT opcode 0x05
-        code.append(0xBE)  # EXT opcode marker
-        code.append(0x05)  # ENCODE_TEXT
+        # ENCODE_TEXT is VAR opcode 0x3C (60)
+        code.append(0xFC)  # VAR opcode 0x3C (0xC0 + 0x3C)
 
         # Get operand types and values
         op_types = []
         op_vals = []
         for i in range(4):
-            op_type, op_val = self._get_operand_type_and_value(operands[i])
+            op_type, op_val = self._get_operand_type_and_value_ext(operands[i])
             op_types.append(op_type)
             op_vals.append(op_val)
 
-        # Build type byte
-        type_byte = 0x00
-        for i in range(4):
-            type_val = 0x01 if op_types[i] == 0 else 0x02
-            type_byte |= (type_val << (6 - i*2))
-
+        # Build type byte: 2 bits per operand (00=large, 01=small, 10=var, 11=omit)
+        type_byte = (op_types[0] << 6) | (op_types[1] << 4) | (op_types[2] << 2) | op_types[3]
         code.append(type_byte)
 
         # Append operand values
-        for val in op_vals:
-            code.append(val & 0xFF)
+        for i, val in enumerate(op_vals):
+            if op_types[i] == 0:  # Large constant
+                code.append((val >> 8) & 0xFF)
+                code.append(val & 0xFF)
+            else:
+                code.append(val & 0xFF)
 
         return bytes(code)
 
@@ -10900,40 +11259,15 @@ class ImprovedCodeGenerator:
             operands[3]: Coded text buffer address
 
         Returns:
-            bytes: Z-machine code (ENCODE_TEXT EXT opcode)
+            bytes: Z-machine code (ENCODE_TEXT VAR opcode)
         """
         if self.version < 5:
             raise ValueError("ENCODE_TEXT requires V5 or later")
         if len(operands) != 4:
             raise ValueError("ENCODE_TEXT requires exactly 4 operands")
 
-        code = bytearray()
-
-        # ENCODE_TEXT is EXT opcode 0x05
-        code.append(0xBE)  # EXT opcode marker
-        code.append(0x05)  # ENCODE_TEXT
-
-        # Get operand types and values
-        op_types = []
-        op_vals = []
-        for i in range(4):
-            op_type, op_val = self._get_operand_type_and_value(operands[i])
-            op_types.append(op_type)
-            op_vals.append(op_val)
-
-        # Build type byte
-        type_byte = 0x00
-        for i in range(4):
-            type_val = 0x01 if op_types[i] == 0 else 0x02
-            type_byte |= (type_val << (6 - i*2))
-
-        code.append(type_byte)
-
-        # Append operand values
-        for val in op_vals:
-            code.append(val & 0xFF)
-
-        return bytes(code)
+        # Delegate to gen_zwstr which has the correct implementation
+        return self.gen_zwstr(operands)
 
     def gen_print_table(self, operands: List[ASTNode]) -> bytes:
         """Generate PRINT_TABLE (V5+ print formatted table).
@@ -12470,12 +12804,13 @@ class ImprovedCodeGenerator:
         table_data = bytearray()
         is_pure = table_type == 'PTABLE'
         is_byte = False
+        is_string = False  # STRING flag - store strings as raw characters
         initial_size = None
 
         # Process operands
         values = []
         for op in operands:
-            # Check for flags like (PURE), (BYTE)
+            # Check for flags like (PURE), (BYTE), (STRING)
             if isinstance(op, FormNode):
                 if isinstance(op.operator, AtomNode):
                     flag_name = op.operator.value.upper()
@@ -12485,6 +12820,10 @@ class ImprovedCodeGenerator:
                     elif flag_name == 'BYTE':
                         is_byte = True
                         continue
+                    elif flag_name == 'STRING':
+                        is_string = True
+                        is_byte = True  # STRING implies BYTE mode
+                        continue
             elif isinstance(op, AtomNode):
                 flag_name = op.value.upper()
                 if flag_name == 'PURE':
@@ -12492,6 +12831,10 @@ class ImprovedCodeGenerator:
                     continue
                 elif flag_name == 'BYTE':
                     is_byte = True
+                    continue
+                elif flag_name == 'STRING':
+                    is_string = True
+                    is_byte = True  # STRING implies BYTE mode
                     continue
 
             values.append(op)
@@ -12508,6 +12851,13 @@ class ImprovedCodeGenerator:
 
         # Encode table values
         for val in values:
+            # Handle STRING mode - strings become raw character bytes
+            if is_string and isinstance(val, StringNode):
+                # Encode string as raw ZSCII characters (one byte per char)
+                for char in val.value:
+                    table_data.append(ord(char) & 0xFF)
+                continue
+
             val_int = self.get_operand_value(val)
             if val_int is None:
                 # Try to resolve as object/routine/global reference
