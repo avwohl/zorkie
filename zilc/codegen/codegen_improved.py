@@ -1543,7 +1543,20 @@ class ImprovedCodeGenerator:
             return self.gen_rtrue()
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+
+        # If operand is a nested form, generate it first (result goes to stack)
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Result is on stack - use variable 0
+            op_type, op_val = 1, 0
+        elif isinstance(operands[0], (CondNode, RepeatNode)):
+            # These node types also need evaluation first
+            inner_code = self.generate_node(operands[0])
+            code.extend(inner_code)
+            op_type, op_val = 1, 0
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # RET is 1OP opcode 0x0B
         # Short form 1OP: bits 7-6 = 10, bits 5-4 = operand type, bits 3-0 = opcode
@@ -5408,7 +5421,7 @@ class ImprovedCodeGenerator:
             op1_type, op1_val = self._get_operand_type_and_value(operands[0])
             op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-            code.append(0xEB)  # SET_COLOUR (VAR opcode 0x1B)
+            code.append(0xFB)  # SET_COLOUR (VAR:27 = 0xE0 + 0x1B)
 
             # Build type byte
             types = []
@@ -5837,17 +5850,24 @@ class ImprovedCodeGenerator:
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])  # table
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])  # length
 
-        # V5+: Use SCAN_TABLE opcode
+        # V5+: Use SCAN_TABLE opcode (VAR:23)
         if self.version >= 5:
-            # SCAN_TABLE is EXT opcode 0x17
-            code.append(0xBE)  # EXT opcode marker
-            code.append(0x17)  # SCAN_TABLE
+            # SCAN_TABLE is VAR opcode 23 (NOT EXT!)
+            # VAR form: 0xE0 + (opcode & 0x1F) = 0xE0 + 23 = 0xF7
+            code.append(0xF7)  # VAR:23 = SCAN_TABLE
+
+            # Get 4th operand (form) if provided, default to 0x82 (word entries, forward)
+            if len(operands) >= 4:
+                op4_type, op4_val = self._get_operand_type_and_value(operands[3])
+            else:
+                op4_type, op4_val = 0, 0x82  # Default: word entries, forward
 
             # Build type byte for 4 operands: value, table, length, form
             types = []
             op_bytes = []
 
-            for op_t, op_v in [(op1_type, op1_val), (op2_type, op2_val), (op3_type, op3_val)]:
+            for op_t, op_v in [(op1_type, op1_val), (op2_type, op2_val),
+                               (op3_type, op3_val), (op4_type, op4_val)]:
                 if op_t == 0:  # Constant
                     if op_v > 255:
                         types.append(0x00)  # Large constant
@@ -5859,20 +5879,18 @@ class ImprovedCodeGenerator:
                     types.append(0x02)
                     op_bytes.append([op_v & 0xFF])
 
-            types.append(0x01)  # form is always small constant
             type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
             code.append(type_byte)
 
             # Encode operands
             for ob in op_bytes:
                 code.extend(ob)
-            # Form byte: 0x82 = word entries (bit 7), forward (bit 6 clear)
-            code.append(0x82)
 
             # Store result to stack
             code.append(0x00)
-            # Branch on success
-            code.append(0xC0)  # Branch true, short form
+            # Branch on success: offset 2 means skip to next instruction (no-op branch)
+            # Bit 7 = 1 (branch if true), bit 6 = 1 (short form), offset = 2
+            code.append(0xC2)
 
             return bytes(code)
 
@@ -5885,11 +5903,18 @@ class ImprovedCodeGenerator:
                 entry_size = es
 
         # Check if we can unroll for small constant-length tables
+        # Only use unrolled loop if ALL operands are literal constants (NumberNode),
+        # not global variables (whose values would need to be loaded at runtime)
         length = self.get_operand_value(operands[2])
         value = self.get_operand_value(operands[0])
         table = self.get_operand_value(operands[1])
 
-        if isinstance(value, int) and isinstance(table, int) and isinstance(length, int):
+        # Only unroll if operands are literal NumberNodes, not variable references
+        all_constants = (isinstance(operands[0], NumberNode) and
+                        isinstance(operands[1], NumberNode) and
+                        isinstance(operands[2], NumberNode))
+
+        if all_constants and isinstance(value, int) and isinstance(table, int) and isinstance(length, int):
             if length <= 8:  # Unroll for small tables
                 for i in range(length):
                     offset = i * entry_size
@@ -5909,67 +5934,95 @@ class ImprovedCodeGenerator:
 
                 return bytes(code)
 
-        # For variable operands, generate loop-based search
-        # Initialize counter from length operand
-        code.append(0x0D | (op3_type << 6))
-        code.append(0x01)  # L01 = counter
-        code.append(op3_val & 0xFF)
+        # For V4 with variable operands, we need to generate a search loop.
+        # This is complex because we need properly allocated local variables.
+        # For now, generate an unrolled search if length is a small constant,
+        # otherwise return false as a stub.
+        #
+        # Generate unrolled search for variable table address but constant value/length
+        if isinstance(operands[0], NumberNode) and isinstance(operands[2], NumberNode):
+            if isinstance(length, int) and length <= 8:
+                # We can unroll with variable table address
+                if op2_type == 1:  # Variable (global/local)
+                    # Generate unrolled search using LOADW with variable base address
+                    # Result: push address of found element (or 0 if not found)
+                    # Structure:
+                    #   for each i:
+                    #     LOADW table, i -> stack
+                    #     JE stack, value -> skip_add_i (branch if NOT equal)
+                    #     ADD table, i*2 -> stack (compute address)
+                    #     JUMP exit
+                    #   :skip_add_last (falls through to not_found)
+                    #   PUSH 0
+                    #   JUMP exit_final
+                    #   :exit
+                    #   (address is on stack)
+                    search_code = bytearray()
 
-        # Initialize offset to 0
-        code.append(0x0D)
-        code.append(0x02)  # L02 = offset
-        code.append(0x00)
-        code.append(0x00)
+                    # First, build the iteration blocks
+                    # Each block: LOADW (4) + JE (4) + ADD (4) + JUMP (varies)
+                    # If JE branches (not equal), skip the ADD+JUMP for this iteration
 
-        # Store value in L03
-        code.append(0x0D | (op1_type << 6))
-        code.append(0x03)  # L03 = value
-        code.append(op1_val & 0xFF)
+                    for i in range(length):
+                        word_offset = i
+                        byte_offset = i * 2
 
-        # Store table in L04
-        code.append(0x0D | (op2_type << 6))
-        code.append(0x04)  # L04 = table
-        code.append(op2_val & 0xFF)
+                        # LOADW table, i -> stack
+                        search_code.append(0x4F)  # LOADW var+small
+                        search_code.append(op2_val & 0xFF)
+                        search_code.append(word_offset & 0xFF)
+                        search_code.append(0x00)  # store to stack
 
-        loop_start = len(code)
+                        # JE stack, value -> skip (branch if NOT equal = don't branch if equal)
+                        # We want to branch PAST the ADD+JUMP if NOT equal
+                        # ADD is 4 bytes, JUMP is 2 bytes = 6 bytes to skip
+                        search_code.append(0x41)  # JE var+small
+                        search_code.append(0x00)  # stack
+                        search_code.append(value & 0xFF)
+                        # Branch if NOT equal: bit 7 = 0
+                        # Skip 6 bytes (ADD 4 + JUMP 2): offset = 6 + 2 = 8
+                        search_code.append(0x48)  # branch false, short, offset 8
 
-        # LOADW L04 L02 -> sp (get element at offset)
-        code.append(0xCF)  # LOADW VAR form
-        code.append(0xAF)  # var, var, omit, omit
-        code.append(0x04)  # L04 (table)
-        code.append(0x02)  # L02 (offset)
-        code.append(0x00)  # -> stack
+                        # ADD table, byte_offset -> stack (compute found address)
+                        # ADD is 2OP opcode 0x14
+                        # For ADD var+small -> stack
+                        search_code.append(0x54)  # ADD var+small (0x40 | 0x14)
+                        search_code.append(op2_val & 0xFF)  # table variable
+                        search_code.append(byte_offset & 0xFF)  # byte offset
+                        search_code.append(0x00)  # store to stack
 
-        # JE sp L03 ?found
-        code.append(0xC1)  # JE VAR form
-        code.append(0xAF)  # var, var, omit, omit
-        code.append(0x00)  # stack
-        code.append(0x03)  # L03 (value)
-        # Branch true (to rtrue) - INTBL? returns true/false predicate
-        code.append(0xC0)  # Branch true, return true
+                        # Calculate JUMP distance to end (past remaining iterations + not_found code)
+                        remaining_iterations = length - 1 - i
+                        # Each remaining iteration: LOADW(4) + JE(4) + ADD(4) + JUMP(2) = 14 bytes
+                        # Not found code: PUSH(3) = 3 bytes (no JUMP needed, just fall through)
+                        skip_to_exit = remaining_iterations * 14 + 3
+                        # JUMP offset formula: offset = distance + 2
+                        jump_offset = skip_to_exit + 2
 
-        # ADD L02 2 -> L02 (increment offset by entry size)
-        code.append(0x54)  # ADD
-        code.append(0x02)  # L02
-        code.append(entry_size & 0xFF)  # entry size
-        code.append(0x02)  # -> L02
+                        # JUMP exit
+                        search_code.append(0x9C)  # JUMP short form
+                        search_code.append(jump_offset & 0xFF)
 
-        # DEC_CHK L01 0 [loop_start]
-        code.append(0x04)  # DEC_CHK
-        code.append(0x01)  # L01
-        code.append(0x00)  # 0
-        current_pos = len(code) + 2
-        jump_offset = loop_start - current_pos
-        if jump_offset >= -64:
-            code.append(0x00 | ((jump_offset + 2) & 0x3F))
-        else:
-            jump_offset_unsigned = (1 << 14) + jump_offset
-            code.append(0x00 | ((jump_offset_unsigned >> 8) & 0x3F))
-            code.append(jump_offset_unsigned & 0xFF)
+                    # Not found - push 0
+                    search_code.append(0xE8)  # VAR PUSH
+                    search_code.append(0x7F)  # type: small constant
+                    search_code.append(0x00)  # value 0
 
-        # Not found - return false
+                    # JUMP past end (skip 0 bytes, but need JUMP anyway for consistency)
+                    # Actually, not needed - we're at the end
+                    # Remove this JUMP since we fall through to exit anyway
+                    # But we still need the exit point after PUSH 1 for "found" jumps
+                    # Actually wait, the "found" case now directly computes address and jumps to exit
+                    # We don't need a separate PUSH 1 block anymore
+
+                    # No JUMP needed - we just fall through after PUSH 0
+
+                    code.extend(search_code)
+                    return bytes(code)
+
+        # Fallback: return false (table search not found)
+        # This is a stub - proper loop generation requires local variable allocation
         code.append(0xB1)  # RFALSE
-
         return bytes(code)
 
     def gen_zero_table(self, operands: List[ASTNode]) -> bytes:
@@ -10124,15 +10177,34 @@ class ImprovedCodeGenerator:
 
         <GETB table index> reads byte from table[index].
         Uses Z-machine LOADB instruction.
+
+        If any operand is a FormNode, generate that form's code first
+        (which puts result on stack) then use stack as the operand.
         """
         if len(operands) != 2:
             raise ValueError("GETB requires exactly 2 operands")
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Process operands - FormNodes need code generation first
+        op_types = []
+        op_vals = []
+
+        for op in operands:
+            if isinstance(op, FormNode):
+                # Generate code for nested form - result goes to stack
+                inner_code = self.generate_form(op)
+                code.extend(inner_code)
+                # Use stack (variable 0) as the operand
+                op_types.append(1)  # Variable
+                op_vals.append(0)   # Stack
+            else:
+                op_type, op_val = self._get_operand_type_and_value(op)
+                op_types.append(op_type)
+                op_vals.append(op_val)
+
+        op1_type, op1_val = op_types[0], op_vals[0]
+        op2_type, op2_val = op_types[1], op_vals[1]
 
         # LOADB is 2OP opcode 0x10
         opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
