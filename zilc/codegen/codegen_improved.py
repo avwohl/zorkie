@@ -1849,6 +1849,12 @@ class ImprovedCodeGenerator:
             elif isinstance(activation_op, AtomNode):
                 # Also handle atom form (just in case)
                 activation_name = activation_op.value
+            else:
+                # Invalid activation - must be a variable/atom reference
+                raise ValueError(
+                    "RETURN with 2 operands requires an activation name as "
+                    "the second argument (e.g., <RETURN value .ACTIVATION>)"
+                )
 
         # If activation is specified, check if it matches the routine
         if activation_name:
