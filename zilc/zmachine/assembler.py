@@ -212,6 +212,45 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_string_placeholders(self, routines: bytes, string_placeholders: dict,
+                                       string_table) -> bytes:
+        """
+        Resolve string operand placeholders in routine bytecode.
+
+        Scans bytecode for 0xFC00 | index values and replaces them with actual
+        packed string addresses.
+
+        Args:
+            routines: Routine bytecode with string placeholders
+            string_placeholders: Dict mapping placeholder index to string text
+            string_table: StringTable instance with resolved addresses
+
+        Returns:
+            Patched routine bytecode
+        """
+        if not string_placeholders or not string_table:
+            return routines
+
+        result = bytearray(routines)
+
+        # Scan for 0xFC00 | index patterns (16-bit values)
+        i = 0
+        while i < len(result) - 1:
+            # Check for 0xFC high byte
+            if result[i] == 0xFC:
+                placeholder_idx = result[i + 1]
+                if placeholder_idx in string_placeholders:
+                    text = string_placeholders[placeholder_idx]
+                    # Get packed address from string table
+                    packed_addr = string_table.get_packed_address(text, self.version)
+                    if packed_addr is not None:
+                        # Patch the 16-bit address
+                        result[i] = (packed_addr >> 8) & 0xFF
+                        result[i + 1] = packed_addr & 0xFF
+            i += 1
+
+        return bytes(result)
+
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
                                      prop_defaults_size: int) -> bytes:
         """
@@ -286,7 +325,8 @@ class ZAssembler:
                         table_offsets: dict = None,
                         routine_fixups: list = None,
                         table_routine_fixups: list = None,
-                        extension_table: bytes = b'') -> bytes:
+                        extension_table: bytes = b'',
+                        string_placeholders: dict = None) -> bytes:
         """
         Build complete story file.
 
@@ -302,6 +342,7 @@ class ZAssembler:
             routine_fixups: List of (code_offset, routine_offset) for call address patching
             table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
             extension_table: Header extension table bytes (V5+)
+            string_placeholders: Dict mapping placeholder index to string text for operand resolution
 
         Returns:
             Complete story file as bytes
@@ -539,18 +580,50 @@ class ZAssembler:
 
         # If string table is present, add string table after routines and resolve markers
         if string_table is not None:
-            # Calculate where string table will be located (after routines)
-            string_table_base = self.high_mem_base + len(routines)
+            # Calculate final routine length AFTER marker resolution
+            # Each marker (0x8D 0xFF 0xFE <len16> <text>) becomes 3 bytes (0x8D <addr16>)
+            # So we shrink by (5 + text_len - 3) = (2 + text_len) per marker
+            final_routines_len = len(routines)
+            i = 0
+            while i < len(routines):
+                if (i + 4 < len(routines) and
+                    routines[i] == 0x8D and
+                    routines[i+1] == 0xFF and
+                    routines[i+2] == 0xFE):
+                    text_len = routines[i+3] | (routines[i+4] << 8)
+                    # This marker will shrink from (5 + text_len) to 3 bytes
+                    final_routines_len -= (2 + text_len)
+                    i += 5 + text_len
+                else:
+                    i += 1
 
-            # Align to word boundary
-            if string_table_base % 2 != 0:
+            # Now calculate where string table will be located
+            string_table_base = self.high_mem_base + final_routines_len
+
+            # Align based on version (packed address requirements)
+            # V1-3: 2-byte alignment
+            # V4-7: 4-byte alignment
+            # V8:   8-byte alignment
+            if self.version >= 8:
+                alignment = 8
+            elif self.version >= 4:
+                alignment = 4
+            else:
+                alignment = 2
+            while string_table_base % alignment != 0:
                 string_table_base += 1
 
             # Set the base address in string table
             string_table.set_base_address(string_table_base)
 
-            # Resolve string table markers in routines
+            # Now resolve string table markers with correct addresses
             routines = self._resolve_string_markers(routines, string_table)
+
+            # Resolve string operand placeholders (0xFC00 | index -> packed address)
+            if string_placeholders:
+                routines = self._resolve_string_placeholders(
+                    routines, string_placeholders, string_table
+                )
 
         # Resolve routine call fixups (patch call addresses)
         if routine_fixups:
@@ -561,8 +634,14 @@ class ZAssembler:
 
         # Add string table data if present
         if string_table is not None:
-            # Align to word boundary
-            while len(story) % 2 != 0:
+            # Align based on version (must match the string_table_base calculation)
+            if self.version >= 8:
+                alignment = 8
+            elif self.version >= 4:
+                alignment = 4
+            else:
+                alignment = 2
+            while len(story) % alignment != 0:
                 story.append(0)
 
             # Add all encoded strings

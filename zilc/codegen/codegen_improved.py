@@ -93,6 +93,11 @@ class ImprovedCodeGenerator:
         # Track relative offset within current routine for placeholder tracking
         self._routine_code_offset: int = 0
 
+        # String operand placeholders - map placeholder_index to string text
+        # Placeholders are encoded as 0xFC + index (high byte) + index (low byte)
+        self._string_placeholders: Dict[int, str] = {}
+        self._next_string_placeholder_index = 0
+
         # Track missing routines (referenced but not defined)
         self._missing_routines: set = set()
 
@@ -233,6 +238,51 @@ class ImprovedCodeGenerator:
     def get_warnings(self) -> List[str]:
         """Return all warnings generated during code generation."""
         return self._warnings.copy()
+
+    def _parse_char_literal(self, value: str) -> Optional[int]:
+        r"""Parse a ZIL character literal and return its ASCII code.
+
+        ZIL character literal formats:
+        - !\x - escaped character (e.g., !\! = '!' = 33, !\n = newline = 10)
+        - \x - backslash character (e.g., \. = '.' = 46)
+
+        Returns ASCII code or None if not a character literal.
+        """
+        # !\x format - two-character escape after !
+        if value.startswith('!\\') and len(value) == 3:
+            char = value[2]
+            # Handle common escape sequences
+            if char == 'n':
+                return 10  # newline
+            elif char == 't':
+                return 9   # tab
+            elif char == 'r':
+                return 13  # carriage return
+            elif char == '0':
+                return 0   # null
+            else:
+                return ord(char)
+
+        # \x format - backslash followed by character
+        if value.startswith('\\') and len(value) == 2:
+            char = value[1]
+            # Handle common escape sequences
+            if char == 'n':
+                return 10  # newline
+            elif char == 't':
+                return 9   # tab
+            elif char == 'r':
+                return 13  # carriage return
+            elif char == '0':
+                return 0   # null
+            else:
+                return ord(char)
+
+        # !x format (single char after !) - less common but possible
+        if value.startswith('!') and len(value) == 2:
+            return ord(value[1])
+
+        return None
 
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
@@ -713,6 +763,15 @@ class ImprovedCodeGenerator:
             Set of routine names that are missing.
         """
         return self._missing_routines
+
+    def get_string_placeholders(self) -> Dict[int, str]:
+        """Get string operand placeholders for the assembler to resolve.
+
+        Returns a mapping of placeholder index to string text.
+        Placeholder values are encoded as 0xFC00 | index in the bytecode.
+        The assembler should replace these with actual packed addresses.
+        """
+        return self._string_placeholders.copy()
 
     def eval_constant(self, const_node: ConstantNode):
         """Evaluate and store a constant."""
@@ -1886,8 +1945,9 @@ class ImprovedCodeGenerator:
                 i += 1
 
             elif isinstance(op, GlobalVarNode) or isinstance(op, LocalVarNode):
-                # Variable reference - print as object name (PRINT_OBJ)
-                var_code = self._gen_tell_operand_code(op, 0x0A)  # PRINT_OBJ
+                # Variable reference - print from packed address (PRINT_PADDR)
+                # The variable contains a packed address pointing to a string
+                var_code = self._gen_tell_operand_code(op, 0x0D)  # PRINT_PADDR
                 code.extend(var_code)
                 i += 1
 
@@ -1910,11 +1970,11 @@ class ImprovedCodeGenerator:
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operand)
 
-        # 1OP form: 0x8X for small constant, 0x9X for variable
+        # 1OP form: 0x8X for large constant (16-bit), 0x9X for small constant, 0xAX for variable
         if op_type == 1:  # Variable
-            code.append(0x90 | opcode_1op)
+            code.append(0xA0 | opcode_1op)
         else:  # Constant
-            code.append(0x80 | opcode_1op)
+            code.append(0x90 | opcode_1op)  # Small constant (8-bit)
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -2847,6 +2907,12 @@ class ImprovedCodeGenerator:
             # Return large constant (table index as placeholder)
             return (0, table_id)
         elif isinstance(node, AtomNode):
+            # Check for character literals first
+            # !\x - escaped character literal (e.g., !\! = '!', !\n = newline)
+            # \x - backslash character literal (e.g., \. = '.', \, = ',')
+            char_code = self._parse_char_literal(node.value)
+            if char_code is not None:
+                return (0, char_code)
             # Check if it's a known constant
             if node.value in self.constants:
                 return (0, self.constants[node.value])
@@ -2886,10 +2952,18 @@ class ImprovedCodeGenerator:
             # The calling code should evaluate it first, result will be on stack
             return (1, 0)  # Variable 0 = stack
         elif isinstance(node, StringNode):
-            # StringNode as operand - this should have been handled by the caller
-            # or be used in a string context. Return 0 as placeholder.
-            # Don't warn - some contexts legitimately pass strings
-            return (0, 0)
+            # StringNode as operand - used when passing strings to routines
+            # Add the string to the string table and create a placeholder
+            # that will be resolved to the packed address later
+            if self.string_table is not None:
+                self.string_table.add_string(node.value)
+            # Create a placeholder: 0xFC + index
+            placeholder_idx = self._next_string_placeholder_index
+            self._string_placeholders[placeholder_idx] = node.value
+            self._next_string_placeholder_index += 1
+            # Return large constant with placeholder marker
+            # Format: 0xFC00 | index (will be resolved by assembler)
+            return (0, 0xFC00 | placeholder_idx)
         else:
             self._warn(f"Cannot determine operand type for {type(node).__name__} - using 0")
             return (0, 0)

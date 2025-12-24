@@ -1507,13 +1507,14 @@ class ZILCompiler:
             abbreviations_table.analyze_strings(all_strings, max_abbrevs=96)
             self.log(f"  Generated {len(abbreviations_table)} non-overlapping abbreviations")
 
-        # Create string table for deduplication (optional - controlled by flag)
-        string_table = None
+        # Create string table for deduplication and string operand resolution
+        # The string table is always needed for resolving string operand placeholders
+        # (e.g., when passing strings to routines), so we always create it
+        from .zmachine.string_table import StringTable
+        from .zmachine.text_encoding import ZTextEncoder
+        text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table)
+        string_table = StringTable(text_encoder)
         if self.enable_string_dedup:
-            from .zmachine.string_table import StringTable
-            from .zmachine.text_encoding import ZTextEncoder
-            text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table)
-            string_table = StringTable(text_encoder)
             self.log("String table deduplication enabled")
 
         # Code generation
@@ -1961,6 +1962,9 @@ class ZILCompiler:
         if extension_table:
             self.log(f"  Built extension table: {len(extension_table)} bytes")
 
+        # Get string placeholders for operand resolution
+        string_placeholders = codegen.get_string_placeholders()
+
         # Assemble story file
         self.log("Assembling story file...")
         assembler = ZAssembler(self.version)
@@ -1975,7 +1979,8 @@ class ZILCompiler:
             table_offsets=table_offsets,
             routine_fixups=routine_fixups,
             table_routine_fixups=table_routine_fixups,
-            extension_table=extension_table
+            extension_table=extension_table,
+            string_placeholders=string_placeholders
         )
 
         return story

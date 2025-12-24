@@ -593,6 +593,7 @@ class Parser:
     def parse_routine(self, line: int, col: int) -> RoutineNode:
         """Parse ROUTINE definition."""
         # <ROUTINE name (params "AUX" aux-vars) body...>
+        # or <ROUTINE name activation-name (params "AUX" aux-vars) body...>
 
         # Get routine name
         if self.current_token.type != TokenType.ATOM:
@@ -600,10 +601,21 @@ class Parser:
         name = self.current_token.value
         self.advance()
 
+        # Check for optional activation name (e.g., FOO-ACT in <ROUTINE FOO FOO-ACT (...)>)
+        activation_name = None
+        if self.current_token.type == TokenType.ATOM:
+            # This is an activation name, add it as first aux variable
+            activation_name = self.current_token.value
+            self.advance()
+
         # Parse parameter list
         params = []
         aux_vars = []
         local_defaults = {}  # Map from variable name to default value
+
+        # If activation name was present, add it as first aux variable
+        if activation_name:
+            aux_vars.append(activation_name)
 
         if self.current_token.type == TokenType.LPAREN:
             self.advance()
