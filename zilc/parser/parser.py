@@ -106,6 +106,9 @@ class Parser:
         elif isinstance(node, SynonymNode):
             # Add all synonym words to program's synonym_words list
             program.synonym_words.extend(node.words)
+        elif isinstance(node, DirectionsNode):
+            # Add all direction names to program's directions list
+            program.directions.extend(node.names)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -409,6 +412,16 @@ class Parser:
                 node = self.parse_buzz(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
+
+            elif op_name == "DIRECTIONS":
+                # <DIRECTIONS NORTH SOUTH EAST WEST>
+                # Parse all direction names
+                names = []
+                while self.current_token.type == TokenType.ATOM:
+                    names.append(self.current_token.value.upper())
+                    self.advance()
+                self.expect(TokenType.RANGLE)
+                return DirectionsNode(names, line, col)
 
             elif op_name == "SYNONYM":
                 # Standalone SYNONYM declaration (not in an object)

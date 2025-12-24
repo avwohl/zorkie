@@ -53,6 +53,9 @@ class NodeType(Enum):
     UNQUOTE = auto()       # ~ (tilde) - evaluate and insert
     SPLICE_UNQUOTE = auto() # ~! - evaluate and splice list
 
+    # Declarations
+    DIRECTIONS = auto()    # <DIRECTIONS north south ...>
+
 
 @dataclass
 class ASTNode:
@@ -348,6 +351,22 @@ class SpliceUnquoteNode(ASTNode):
         return f"SpliceUnquote({self.expr})"
 
 
+class DirectionsNode(ASTNode):
+    """Directions declaration: <DIRECTIONS NORTH SOUTH EAST WEST>
+
+    Defines direction names and their property numbers.
+    Directions are assigned property numbers from MaxProperties down.
+    For V3 (max 31 properties): NORTH=31, SOUTH=30, EAST=29, WEST=28
+    Also creates LOW-DIRECTION constant = lowest direction property.
+    """
+    def __init__(self, names: List[str], line: int = 0, column: int = 0):
+        super().__init__(NodeType.DIRECTIONS, line, column)
+        self.names = names  # List of direction names
+
+    def __repr__(self):
+        return f"Directions({self.names})"
+
+
 @dataclass
 class Program:
     """Top-level program node containing all definitions."""
@@ -363,6 +382,7 @@ class Program:
     macros: List[MacroNode] = field(default_factory=list)
     buzz_words: List[str] = field(default_factory=list)
     synonym_words: List[str] = field(default_factory=list)
+    directions: List[str] = field(default_factory=list)  # Direction names
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "

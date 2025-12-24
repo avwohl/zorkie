@@ -292,7 +292,8 @@ class TestMapDirections:
         AssertRoutine(
             "",
             '<MAP-DIRECTIONS (D P ,CENTER) <TELL N .D " " D <GETB .P ,REXIT> CR>>'
-        ).with_global("<DIRECTIONS NORTH SOUTH EAST WEST>") \
+        ).with_global("<CONSTANT REXIT 0>") \
+            .with_global("<DIRECTIONS NORTH SOUTH EAST WEST>") \
             .with_global('<OBJECT CENTER (NORTH TO N-ROOM) (WEST TO W-ROOM)>') \
             .with_global('<OBJECT N-ROOM (DESC "north room")>') \
             .with_global('<OBJECT W-ROOM (DESC "west room")>') \
@@ -304,7 +305,8 @@ class TestMapDirections:
         AssertRoutine(
             "",
             '<MAP-DIRECTIONS (D P ,CENTER) (END <TELL "done" CR>) <TELL N .D " " D <GETB .P ,REXIT> CR>>'
-        ).with_global("<DIRECTIONS NORTH SOUTH EAST WEST>") \
+        ).with_global("<CONSTANT REXIT 0>") \
+            .with_global("<DIRECTIONS NORTH SOUTH EAST WEST>") \
             .with_global('<OBJECT CENTER (NORTH TO N-ROOM) (WEST TO W-ROOM)>') \
             .with_global('<OBJECT N-ROOM (DESC "north room")>') \
             .with_global('<OBJECT W-ROOM (DESC "west room")>') \

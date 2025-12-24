@@ -1204,6 +1204,72 @@ class ZILCompiler:
         # Default: can't evaluate, return False
         return False
 
+    def _extract_direction_exit(self, value, obj_name_to_num) -> Optional[int]:
+        """Extract destination object number from direction exit property.
+
+        Handles formats like:
+        - (NORTH TO LIVING-ROOM) -> value is [AtomNode('TO'), AtomNode('LIVING-ROOM')]
+        - (NORTH PER EXIT-FUNC) -> value is [AtomNode('PER'), AtomNode('EXIT-FUNC')]
+        - (NORTH SORRY "msg") -> value is [AtomNode('SORRY'), StringNode('msg')]
+
+        Returns:
+            Object number for TO exits, or special values for other exit types.
+            None if the value format is not recognized.
+        """
+        from .parser.ast_nodes import AtomNode, StringNode
+
+        # Simple object reference (just the room name)
+        if isinstance(value, AtomNode):
+            return obj_name_to_num.get(value.value, 0)
+
+        # List format: [keyword, value] or [keyword, value, ...]
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            keyword = value[0]
+            keyword_name = keyword.value if isinstance(keyword, AtomNode) else str(keyword)
+            keyword_name = keyword_name.upper()
+
+            if keyword_name == 'TO':
+                # (NORTH TO DEST-ROOM) -> get object number
+                dest = value[1]
+                if isinstance(dest, AtomNode):
+                    return obj_name_to_num.get(dest.value, 0)
+                elif isinstance(dest, str):
+                    return obj_name_to_num.get(dest, 0)
+
+            elif keyword_name == 'PER':
+                # (NORTH PER ROUTINE) -> conditional exit
+                # For now, return 0 (no exit) - PER exits need routine addresses
+                # which are resolved later
+                # TODO: Implement PER exit handling with routine address placeholders
+                return 0
+
+            elif keyword_name == 'SORRY':
+                # (NORTH SORRY "message") -> blocked exit
+                # Return 0 (no exit), the message is for display only
+                return 0
+
+            elif keyword_name in ('NEXIT', 'UEXIT', 'CEXIT', 'DEXIT', 'FEXIT'):
+                # Various exit types from ZILF
+                # NEXIT = no exit
+                # UEXIT = unconditional exit (with room number)
+                # CEXIT = conditional exit
+                # DEXIT = door exit
+                # FEXIT = function exit
+                if keyword_name == 'NEXIT':
+                    return 0
+                elif keyword_name == 'UEXIT' and len(value) >= 2:
+                    dest = value[1]
+                    if isinstance(dest, AtomNode):
+                        return obj_name_to_num.get(dest.value, 0)
+                # Other exit types need more complex handling
+                return 0
+
+        # Try to interpret as object name directly
+        if isinstance(value, str):
+            return obj_name_to_num.get(value, 0)
+
+        return None
+
     def _build_symbol_tables(self, program) -> dict:
         """Pre-scan program to build flag and property symbol tables.
 
@@ -1278,6 +1344,18 @@ class ZILCompiler:
                 properties[prop_name] = next_prop
                 next_prop += 1
 
+        # Handle DIRECTIONS - assign property numbers from MaxProperties down
+        # V3: max 31, V4+: max 63
+        max_properties = 31 if self.version <= 3 else 63
+        low_direction = max_properties + 1  # Will be set if directions exist
+
+        if program.directions:
+            # Assign property numbers for each direction (descending from max)
+            for i, dir_name in enumerate(program.directions):
+                prop_num = max_properties - i
+                properties[f'P?{dir_name}'] = prop_num
+            low_direction = max_properties - len(program.directions) + 1
+
         # Collect custom properties from object/room definitions
         # Properties like (MYPROP 123) need P?MYPROP constants
         # This must match the order and numbering in _build_object_table
@@ -1323,10 +1401,21 @@ class ZILCompiler:
             'VERBS': 0,
         }
 
+        # Add LOW-DIRECTION constant if directions are defined
+        if program.directions:
+            parser_constants['LOW-DIRECTION'] = low_direction
+
+        # Add direction name constants (same as property numbers)
+        for i, dir_name in enumerate(program.directions):
+            parser_constants[dir_name] = max_properties - i
+
         return {
             'flags': flags,
             'properties': properties,
             'parser_constants': parser_constants,
+            'directions': program.directions,  # List of direction names
+            'low_direction': low_direction if program.directions else None,
+            'max_properties': max_properties,
         }
 
     def _build_action_tables(self, program) -> dict:
@@ -1711,6 +1800,20 @@ class ZILCompiler:
         }
         next_prop_num = 3
 
+        # Handle DIRECTIONS - assign property numbers from MaxProperties down
+        # V3: max 31, V4+: max 63
+        max_properties = 31 if self.version <= 3 else 63
+        low_direction = max_properties + 1  # Will be set if directions exist
+
+        if program.directions:
+            # Assign property numbers for each direction (descending from max)
+            for i, dir_name in enumerate(program.directions):
+                prop_num = max_properties - i
+                prop_map[dir_name] = prop_num
+                self.log(f"  Direction {dir_name} -> property #{prop_num}")
+            low_direction = max_properties - len(program.directions) + 1
+            self.log(f"  LOW-DIRECTION = {low_direction}")
+
         # Check if SYNONYM or ADJECTIVE are used - add to prop_map
         uses_synonym = any('SYNONYM' in obj.properties for obj in program.objects + program.rooms)
         uses_adjective = any('ADJECTIVE' in obj.properties for obj in program.objects + program.rooms)
@@ -1789,8 +1892,14 @@ class ZILCompiler:
                             props[prop_num] = 0
                 elif key in prop_map:
                     prop_num = prop_map[key]
+                    # Check if this is a direction property (e.g., NORTH, SOUTH, etc.)
+                    if key in program.directions:
+                        # Direction property: extract destination from (DIR TO DEST) or (DIR PER ROUTINE)
+                        exit_value = self._extract_direction_exit(value, obj_name_to_num)
+                        if exit_value is not None:
+                            props[prop_num] = exit_value
                     # Extract value from AST node
-                    if hasattr(value, 'value'):
+                    elif hasattr(value, 'value'):
                         props[prop_num] = value.value
                     else:
                         props[prop_num] = value
@@ -1862,11 +1971,16 @@ class ZILCompiler:
             parent_of[obj_num] = parent_num
 
         # Build child lists (parent -> list of children in order)
+        # ZILF inserts new children at position 1 (after first child), not at end
         children_of = {}  # parent_num -> [child_nums...]
         for obj_num, parent_num in parent_of.items():
             if parent_num not in children_of:
                 children_of[parent_num] = []
-            children_of[parent_num].append(obj_num)
+            # Insert at position 1 to match ZILF's sibling ordering
+            if len(children_of[parent_num]) > 0:
+                children_of[parent_num].insert(1, obj_num)
+            else:
+                children_of[parent_num].append(obj_num)
 
         # Build sibling chains and first-child pointers
         sibling_of = {}  # obj_num -> next_sibling_num
