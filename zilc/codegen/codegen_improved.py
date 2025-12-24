@@ -811,6 +811,25 @@ class ImprovedCodeGenerator:
                     f"Use a separate routine and call it from GO, or use V6."
                 )
 
+        # Validate argument count limits
+        num_params = len(routine.params)
+        if self.version <= 3:
+            # V1-3: Maximum 3 required arguments (CALL can only pass 3 args)
+            if num_params > 3:
+                raise ValueError(
+                    f"Routine {routine.name} has {num_params} required parameters, "
+                    f"but V{self.version} only supports up to 3. "
+                    f"Use \"OPT\" or \"AUX\" for additional variables."
+                )
+        elif self.version <= 7:
+            # V4-7: Maximum 7 required arguments
+            if num_params > 7:
+                raise ValueError(
+                    f"Routine {routine.name} has {num_params} required parameters, "
+                    f"but V{self.version} only supports up to 7. "
+                    f"Use \"OPT\" or \"AUX\" for additional variables."
+                )
+
         # Align routine to proper boundary for packed addresses
         # V1-3: Even addresses (divisible by 2)
         # V4-7: Addresses divisible by 4
