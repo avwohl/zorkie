@@ -796,6 +796,21 @@ class ImprovedCodeGenerator:
         """Generate bytecode for a routine."""
         self._current_routine = routine.name  # Track for warnings
 
+        # Validate GO routine constraints
+        if routine.name == "GO":
+            # GO routine cannot have required (positional) parameters in any version
+            if len(routine.params) > 0:
+                raise ValueError(
+                    "GO routine cannot have required parameters. "
+                    "Use \"AUX\" or \"OPT\" for local variables."
+                )
+            # GO routine cannot have any locals in V1-V5
+            if len(routine.aux_vars) > 0 and self.version < 6:
+                raise ValueError(
+                    f"GO routine cannot have local variables in V{self.version}. "
+                    f"Use a separate routine and call it from GO, or use V6."
+                )
+
         # Align routine to proper boundary for packed addresses
         # V1-3: Even addresses (divisible by 2)
         # V4-7: Addresses divisible by 4
@@ -1824,8 +1839,11 @@ class ImprovedCodeGenerator:
                 # Return from routine (ignore block stack)
                 return self._gen_routine_return(operands[:1])
 
-            # TODO: Check block stack for matching activation and return from that block
-            # For now, fall through to block/routine return
+            # Check block stack for matching activation
+            for idx, block_ctx in enumerate(self.block_stack):
+                if block_ctx.get('activation_name') == activation_name:
+                    # Found matching block - return from it
+                    return self._gen_targeted_block_return(operands[:1], idx)
 
         # Check if we're inside a block scope
         if self.block_stack and not activation_name:
@@ -1844,9 +1862,14 @@ class ImprovedCodeGenerator:
             code.extend(inner_code)
             # Result is on stack - use variable 0
             op_type, op_val = 1, 0
-        elif isinstance(operands[0], (CondNode, RepeatNode)):
-            # These node types also need evaluation first
-            inner_code = self.generate_node(operands[0])
+        elif isinstance(operands[0], CondNode):
+            # CondNode needs evaluation first
+            inner_code = self.generate_cond(operands[0])
+            code.extend(inner_code)
+            op_type, op_val = 1, 0
+        elif isinstance(operands[0], RepeatNode):
+            # RepeatNode needs evaluation first
+            inner_code = self.generate_repeat(operands[0])
             code.extend(inner_code)
             op_type, op_val = 1, 0
         else:
@@ -1885,9 +1908,14 @@ class ImprovedCodeGenerator:
             code.extend(inner_code)
             # Result is on stack - use variable 0
             op_type, op_val = 1, 0
-        elif isinstance(operands[0], (CondNode, RepeatNode)):
-            # These node types also need evaluation first
-            inner_code = self.generate_node(operands[0])
+        elif isinstance(operands[0], CondNode):
+            # CondNode needs evaluation first
+            inner_code = self.generate_cond(operands[0])
+            code.extend(inner_code)
+            op_type, op_val = 1, 0
+        elif isinstance(operands[0], RepeatNode):
+            # RepeatNode needs evaluation first
+            inner_code = self.generate_repeat(operands[0])
             code.extend(inner_code)
             op_type, op_val = 1, 0
         else:
@@ -1923,9 +1951,14 @@ class ImprovedCodeGenerator:
                 code.extend(inner_code)
                 # Result is on stack - use variable 0
                 op_type, op_val = 1, 0
-            elif isinstance(operands[0], (CondNode, RepeatNode)):
-                # These node types also need evaluation first
-                inner_code = self.generate_node(operands[0])
+            elif isinstance(operands[0], CondNode):
+                # CondNode needs evaluation first
+                inner_code = self.generate_cond(operands[0])
+                code.extend(inner_code)
+                op_type, op_val = 1, 0
+            elif isinstance(operands[0], RepeatNode):
+                # RepeatNode needs evaluation first
+                inner_code = self.generate_repeat(operands[0])
                 code.extend(inner_code)
                 op_type, op_val = 1, 0
             else:
@@ -1959,6 +1992,52 @@ class ImprovedCodeGenerator:
         # We use 0x8C (JUMP) with special marker bytes 0xFF 0xBB
         # The block's patching code will scan for this pattern and fix the offset
         code.extend([0x8C, 0xFF, 0xBB])  # JUMP with placeholder offset
+
+        return bytes(code)
+
+    def _gen_targeted_block_return(self, operands: List[ASTNode], block_idx: int) -> bytes:
+        """Generate a RETURN targeting a specific block by its stack index.
+
+        This is used for RETURN with activation that targets an outer block.
+        Uses a unique placeholder pattern (0x8C 0xFE <idx>) so that only
+        the targeted block will patch this JUMP.
+        """
+        block_ctx = self.block_stack[block_idx]
+        code = bytearray()
+
+        # Get return value (default to 1/TRUE if none specified)
+        if operands:
+            # If operand is a nested form, generate it first (result goes to stack)
+            if isinstance(operands[0], FormNode):
+                inner_code = self.generate_form(operands[0])
+                code.extend(inner_code)
+                op_type, op_val = 1, 0
+            elif isinstance(operands[0], CondNode):
+                inner_code = self.generate_cond(operands[0])
+                code.extend(inner_code)
+                op_type, op_val = 1, 0
+            elif isinstance(operands[0], RepeatNode):
+                inner_code = self.generate_repeat(operands[0])
+                code.extend(inner_code)
+                op_type, op_val = 1, 0
+            else:
+                op_type, op_val = self._get_operand_type_and_value(operands[0])
+        else:
+            op_type, op_val = 0, 1  # Small constant 1 (TRUE)
+
+        # Store value to block's result variable (stack, var 0)
+        result_var = block_ctx['result_var']
+        if op_type == 1:  # Variable operand
+            code.extend([0x34, 0x00, op_val, result_var])
+        else:  # Constant operand
+            if op_val < 256:
+                code.extend([0x14, 0x00, op_val & 0xFF, result_var])
+            else:
+                code.extend([0xD4, 0x4F, 0x00, (op_val >> 8) & 0xFF, op_val & 0xFF, result_var])
+
+        # Generate JUMP placeholder with targeted block index
+        # Pattern: 0x8C 0xFE <block_idx> - only the targeted block patches this
+        code.extend([0x8C, 0xFE, block_idx & 0xFF])
 
         return bytes(code)
 
@@ -8450,34 +8529,50 @@ class ImprovedCodeGenerator:
         """Generate PROG (sequential execution block).
 
         <PROG bindings body...> executes body statements sequentially.
-        First operand can be empty list () or list of bindings.
-        Remaining operands are statements to execute in order.
+        <PROG name bindings body...> executes with named activation.
+        First operand can be activation name (AtomNode) or bindings (list).
         RETURN inside PROG exits the block (not the routine) and provides
         the block's result value.
 
         Example: <PROG () <SETG X 1> <SETG Y 2> <RETURN 3>>
+        Example: <PROG MYBLOCK () <RETURN 5 .MYBLOCK>>
 
         Args:
-            operands[0]: Bindings (usually empty list ())
-            operands[1:]: Statements to execute sequentially
+            operands: Bindings and body statements, optionally with activation name
 
         Returns:
             bytes: Z-machine code for sequential execution
         """
         code = bytearray()
 
-        # First operand is bindings (skip if empty list)
-        if len(operands) < 2:
+        if len(operands) < 1:
             return b''
 
-        # Process bindings if present (operands[0])
+        # Check if first operand is an activation name (AtomNode) or bindings
+        activation_name = None
+        body_start = 1  # Default: body starts after bindings (index 1)
+        bindings_index = 0  # Default: bindings at index 0
+
+        if isinstance(operands[0], AtomNode):
+            # First operand is activation name
+            activation_name = operands[0].value
+            bindings_index = 1  # Bindings at index 1
+            body_start = 2  # Body starts at index 2
+            if len(operands) < 2:
+                return b''
+
+        if len(operands) <= body_start:
+            # No body statements
+            return b''
+
+        # Process bindings if present (operands[bindings_index])
         # Bindings can be:
         #   () - empty, no bindings
         #   (X) - just variable name, initialize to 0
         #   (X Y) - multiple variable names
         #   ((X 10) (Y 20)) - variables with initializers
         # Note: PROG/BIND bindings shadow outer variables - always create new slots
-        bindings_list = operands[0]
+        bindings_list = operands[bindings_index]
         saved_locals = {}  # Save old mappings for shadowed variables
         if isinstance(bindings_list, list):
             for binding in bindings_list:
@@ -8545,11 +8640,14 @@ class ImprovedCodeGenerator:
 
         # Push block context onto block_stack (for RETURN support)
         # Use stack (variable 0) to store the block result
+        block_idx = len(self.block_stack)  # Index this block will have
         block_ctx = {
             'code_buffer': code,
             'return_placeholders': [],  # Positions of RETURN jumps to patch
             'block_type': 'PROG',
             'result_var': 0,  # Stack (SP) - result is pushed onto stack
+            'activation_name': activation_name,  # Named activation for targeted RETURN
+            'block_idx': block_idx,  # Index for targeted return patching
         }
         self.block_stack.append(block_ctx)
 
@@ -8560,6 +8658,7 @@ class ImprovedCodeGenerator:
             'loop_start': loop_start,
             'loop_type': 'PROG',
             'again_placeholders': [],
+            'activation_name': activation_name,  # For AGAIN with activation
         }
         if not hasattr(self, 'loop_stack'):
             self.loop_stack = []
@@ -8567,7 +8666,7 @@ class ImprovedCodeGenerator:
 
         try:
             # Generate code for each statement in sequence
-            for i in range(1, len(operands)):
+            for i in range(body_start, len(operands)):
                 stmt = operands[i]
                 stmt_code = self.generate_statement(stmt)
                 if stmt_code:
@@ -8585,6 +8684,21 @@ class ImprovedCodeGenerator:
                     # Found RETURN placeholder at position i
                     # Z-machine JUMP: Target = PC + Offset - 2
                     # Offset = Target - PC + 2 = exit_point - (i + 3) + 2
+                    return_offset = exit_point - (i + 1)
+                    if return_offset < 0:
+                        return_offset_unsigned = (1 << 16) + return_offset
+                    else:
+                        return_offset_unsigned = return_offset
+                    code[i+1] = (return_offset_unsigned >> 8) & 0xFF
+                    code[i+2] = return_offset_unsigned & 0xFF
+                i += 1
+
+            # Patch all TARGETED RETURN placeholders (0x8C 0xFE <block_idx>)
+            # These are from RETURN with activation targeting this specific block
+            i = 0
+            while i < len(code) - 2:
+                if code[i] == 0x8C and code[i+1] == 0xFE and code[i+2] == block_idx:
+                    # Found targeted RETURN placeholder for this block
                     return_offset = exit_point - (i + 1)
                     if return_offset < 0:
                         return_offset_unsigned = (1 << 16) + return_offset

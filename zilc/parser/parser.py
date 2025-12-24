@@ -648,7 +648,8 @@ class Parser:
                     # Parse the default value expression
                     default_value = self.parse_expression()
                     self.expect(TokenType.RPAREN)
-                    if in_aux:
+                    if in_aux or in_optional:
+                        # Both AUX and OPT params go to aux_vars
                         aux_vars.append(param_name)
                     else:
                         params.append(param_name)
@@ -658,7 +659,9 @@ class Parser:
 
                 # Handle simple parameter name
                 if self.current_token.type == TokenType.ATOM:
-                    if in_aux:
+                    if in_aux or in_optional:
+                        # Both AUX and OPT params go to aux_vars
+                        # (OPT are optional, treated as locals for codegen)
                         aux_vars.append(self.current_token.value)
                     else:
                         params.append(self.current_token.value)

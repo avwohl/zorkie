@@ -304,6 +304,9 @@ class ObList(ZilObject):
             self.atoms[key] = ZilAtom(key, self)
         return self.atoms[key]
 
+    def __setitem__(self, key: str, value: ZilAtom):
+        self.atoms[key] = value
+
     def structurally_equals(self, other: ZilObject) -> bool:
         return self is other
 
