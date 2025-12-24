@@ -131,7 +131,7 @@ class RoutineNode(ASTNode):
     """ROUTINE definition node."""
     def __init__(self, name: str, params: List[str] = None, aux_vars: List[str] = None,
                  body: List[ASTNode] = None, line: int = 0, column: int = 0,
-                 local_defaults: Dict[str, 'ASTNode'] = None):
+                 local_defaults: Dict[str, 'ASTNode'] = None, activation: str = None):
         super().__init__(NodeType.ROUTINE, line, column)
         self.name = name
         self.params = params or []
@@ -140,6 +140,8 @@ class RoutineNode(ASTNode):
         self.declarations = {}
         # Map from variable name to default value expression
         self.local_defaults = local_defaults or {}
+        # Activation name for RETURN/AGAIN with activation support
+        self.activation = activation
 
     def __repr__(self):
         return f"Routine({self.name}, {len(self.params)} params, {len(self.body)} stmts)"

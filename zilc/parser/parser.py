@@ -673,7 +673,7 @@ class Parser:
         while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
             body.append(self.parse_expression())
 
-        return RoutineNode(name, params, aux_vars, body, line, col, local_defaults)
+        return RoutineNode(name, params, aux_vars, body, line, col, local_defaults, activation_name)
 
     def parse_object(self, line: int, col: int) -> ObjectNode:
         """Parse OBJECT definition."""

@@ -889,8 +889,12 @@ class ImprovedCodeGenerator:
             'loop_start': routine_init_start,
             'loop_type': 'ROUTINE',
             'again_placeholders': [],
+            'activation': routine.activation,  # For RETURN/AGAIN with activation
         }
         self.loop_stack.append(routine_loop_ctx)
+
+        # Track current routine's activation for RETURN
+        self._current_routine_activation = routine.activation
 
         # Generate code for routine body
         for stmt in routine.body:
@@ -1791,16 +1795,42 @@ class ImprovedCodeGenerator:
 
         If not inside a block, RETURN exits the routine normally.
 
+        With 2 operands: <RETURN value activation>
+        The activation specifies which block/routine to return from.
+
         Note: DO-FUNNY-RETURN? feature (changing RETURN behavior based on version
         or explicit setting) is not yet fully implemented.
         """
-        if len(operands) > 1:
-            raise ValueError("RETURN requires 0 or 1 operand")
+        if len(operands) > 2:
+            raise ValueError("RETURN requires 0-2 operands")
+
+        # Check for activation-based return
+        activation_name = None
+        if len(operands) == 2:
+            # Second operand is activation (e.g., .FOO-ACT)
+            activation_op = operands[1]
+            if isinstance(activation_op, LocalVarNode):
+                # Get the name from the local variable reference
+                activation_name = activation_op.name
+            elif isinstance(activation_op, AtomNode):
+                # Also handle atom form (just in case)
+                activation_name = activation_op.value
+
+        # If activation is specified, check if it matches the routine
+        if activation_name:
+            # Check if the activation matches the routine's activation
+            current_act = getattr(self, '_current_routine_activation', None)
+            if current_act and current_act == activation_name:
+                # Return from routine (ignore block stack)
+                return self._gen_routine_return(operands[:1])
+
+            # TODO: Check block stack for matching activation and return from that block
+            # For now, fall through to block/routine return
 
         # Check if we're inside a block scope
-        if self.block_stack:
+        if self.block_stack and not activation_name:
             # Block-scoped return: jump to block exit
-            return self._gen_block_return(operands)
+            return self._gen_block_return(operands[:1] if operands else [])
 
         # Routine-level return
         if not operands:
@@ -1828,6 +1858,42 @@ class ImprovedCodeGenerator:
         # 0x8B = 10 00 1011 = large constant
         # 0x9B = 10 01 1011 = small constant
         # 0xAB = 10 10 1011 = variable
+        if op_type == 1:  # Variable
+            code.append(0xAB)
+        elif op_val >= 0 and op_val <= 255:  # Small constant
+            code.append(0x9B)
+        else:  # Large constant
+            code.append(0x8B)
+            code.append((op_val >> 8) & 0xFF)
+        code.append(op_val & 0xFF)
+
+        return bytes(code)
+
+    def _gen_routine_return(self, operands: List[ASTNode]) -> bytes:
+        """Generate a routine-level RETURN (exits routine, not just block).
+
+        Used when RETURN has an activation that matches the routine.
+        """
+        if not operands:
+            return self.gen_rtrue()
+
+        code = bytearray()
+
+        # If operand is a nested form, generate it first (result goes to stack)
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Result is on stack - use variable 0
+            op_type, op_val = 1, 0
+        elif isinstance(operands[0], (CondNode, RepeatNode)):
+            # These node types also need evaluation first
+            inner_code = self.generate_node(operands[0])
+            code.extend(inner_code)
+            op_type, op_val = 1, 0
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
+
+        # RET is 1OP opcode 0x0B
         if op_type == 1:  # Variable
             code.append(0xAB)
         elif op_val >= 0 and op_val <= 255:  # Small constant
@@ -2533,10 +2599,15 @@ class ImprovedCodeGenerator:
             return bytes(code)
 
         # Direct variable assignment
-        # Check if value is an expression (FormNode) that needs evaluation
-        if isinstance(value_node, FormNode):
+        # Check if value is an expression (FormNode, RepeatNode, CondNode) that needs evaluation
+        if isinstance(value_node, (FormNode, RepeatNode, CondNode)):
             # Generate code to evaluate expression (result goes to stack)
-            expr_code = self.generate_form(value_node)
+            if isinstance(value_node, FormNode):
+                expr_code = self.generate_form(value_node)
+            elif isinstance(value_node, RepeatNode):
+                expr_code = self.generate_repeat(value_node)
+            else:  # CondNode
+                expr_code = self.generate_cond(value_node)
             code.extend(expr_code)
 
             # Pop result from stack into target variable using PULL
@@ -11061,9 +11132,21 @@ class ImprovedCodeGenerator:
         loop_context = {
             'start_offset': loop_start_pos,
             'code_buffer': code,  # Reference to the code being built
-            'again_patches': []   # List of positions that need patching
+            'loop_start': loop_start_pos,  # For compatibility with gen_again
+            'loop_type': 'REPEAT',
+            'again_patches': [],   # List of positions that need patching
+            'again_placeholders': [],  # For compatibility
         }
         self.loop_stack.append(loop_context)
+
+        # Push block context onto block_stack (for RETURN support)
+        block_ctx = {
+            'code_buffer': code,
+            'return_placeholders': [],  # Positions of RETURN jumps to patch
+            'block_type': 'REPEAT',
+            'result_var': 0,  # Stack (SP) - result is pushed onto stack
+        }
+        self.block_stack.append(block_ctx)
 
         # Generate body statements
         for stmt in repeat.body:
@@ -11090,13 +11173,33 @@ class ImprovedCodeGenerator:
         code.append((jump_offset_unsigned >> 8) & 0xFF)  # High byte
         code.append(jump_offset_unsigned & 0xFF)  # Low byte
 
+        # Exit point is right after the backward jump (this is where RETURN jumps to)
+        exit_point = len(code)
+
+        # Patch all RETURN placeholders (0x8C 0xFF 0xBB -> jump to exit_point)
+        # Z-machine JUMP formula: Target = PC + Offset - 2, where PC is after instruction
+        # So: Offset = Target - PC + 2 = exit_point - (i + 3) + 2
+        i = 0
+        while i < len(code) - 2:
+            if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xBB:
+                # Found RETURN placeholder at position i
+                return_offset = exit_point - (i + 3) + 2  # +2 for Z-machine JUMP formula
+                if return_offset < 0:
+                    return_offset_unsigned = (1 << 16) + return_offset
+                else:
+                    return_offset_unsigned = return_offset
+                code[i+1] = (return_offset_unsigned >> 8) & 0xFF
+                code[i+2] = return_offset_unsigned & 0xFF
+            i += 1
+
         # Patch all AGAIN placeholders (0x8C 0xFF 0xAA -> actual jump)
+        # Z-machine JUMP formula: Target = PC + Offset - 2, where PC is after instruction
+        # So: Offset = Target - PC + 2 = loop_start_pos - (i + 3) + 2
         i = 0
         while i < len(code) - 2:
             if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xAA:
                 # Found AGAIN placeholder at position i
-                # Calculate jump offset from position i+3 to loop_start_pos
-                again_offset = loop_start_pos - (i + 3)
+                again_offset = loop_start_pos - (i + 3) + 2  # +2 for Z-machine JUMP formula
                 if again_offset < 0:
                     again_offset_unsigned = (1 << 16) + again_offset
                 else:
@@ -11104,6 +11207,9 @@ class ImprovedCodeGenerator:
                 code[i+1] = (again_offset_unsigned >> 8) & 0xFF
                 code[i+2] = again_offset_unsigned & 0xFF
             i += 1
+
+        # Pop block context
+        self.block_stack.pop()
 
         # Pop loop context
         self.loop_stack.pop()
