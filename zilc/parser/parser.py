@@ -839,9 +839,27 @@ class Parser:
 
         # Skip optional additional routines (pre-action handlers, etc.)
         # Syntax can have multiple routines: = ACTION PRE1 PRE2 ...
+        # Also handle empty forms <> (used for "no preaction") and action names
         # For now, we just ignore them
-        while self.current_token.type == TokenType.ATOM:
-            self.advance()  # Skip additional routines
+        while self.current_token.type != TokenType.RANGLE:
+            if self.current_token.type == TokenType.ATOM:
+                self.advance()  # Skip additional routines/action names
+            elif self.current_token.type == TokenType.LANGLE:
+                # Skip form like <> or <expr>
+                depth = 0
+                while True:
+                    if self.current_token.type == TokenType.LANGLE:
+                        depth += 1
+                    elif self.current_token.type == TokenType.RANGLE:
+                        depth -= 1
+                        if depth == 0:
+                            self.advance()
+                            break
+                    elif self.current_token.type == TokenType.EOF:
+                        self.error("Unclosed form in SYNTAX")
+                    self.advance()
+            else:
+                break  # Unexpected token, let caller handle it
 
         return SyntaxNode(pattern, routine, line, col)
 

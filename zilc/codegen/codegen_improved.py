@@ -834,7 +834,13 @@ class ImprovedCodeGenerator:
 
         num_locals = len(routine.params) + len(routine.aux_vars)
 
-        # Routine header
+        # Save routine locals for SETG fallback (not affected by PROG/BIND shadowing)
+        self.routine_locals = dict(self.locals)
+
+        # Track max local slot for PROG/BIND dynamic locals
+        self.max_local_slot = num_locals
+
+        # Routine header (will be patched later if PROG/BIND add more locals)
         routine_code.append(num_locals & 0x0F)
 
         # Local variable initial values (V1-4 only)
@@ -928,7 +934,12 @@ class ImprovedCodeGenerator:
                         'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
                         'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
                     }
-                    if op_name in void_ops:
+                    if op_name == '<>':
+                        # Empty form <> evaluates to FALSE (0)
+                        # Return 0 (false) instead of RET_POPPED since <> doesn't push
+                        routine_code.append(0x9B)  # RET small constant
+                        routine_code.append(0x00)  # Return 0 (false)
+                    elif op_name in void_ops:
                         # Void operation - use RET 1 (success/true)
                         routine_code.append(0x9B)
                         routine_code.append(0x01)
@@ -950,6 +961,23 @@ class ImprovedCodeGenerator:
                 # 0x9B = 10 01 1011 = 1OP short with small constant, opcode 0x0B
                 routine_code.append(0x9B)  # RET small constant
                 routine_code.append(0x00)  # Return value 0
+
+        # Patch routine header if PROG/BIND added more locals
+        if hasattr(self, 'max_local_slot') and self.max_local_slot > num_locals:
+            # Update local count in header byte
+            routine_code[0] = self.max_local_slot & 0x0F
+
+            # For V1-4, we need to insert initial values for the additional locals
+            if self.version <= 4:
+                # Calculate where to insert: after existing initial values
+                # Header is 1 byte + 2 bytes per original local
+                insert_pos = 1 + 2 * num_locals
+                # Add initial values (0x0000) for each new local
+                extra_locals = self.max_local_slot - num_locals
+                for _ in range(extra_locals):
+                    routine_code.insert(insert_pos, 0x00)
+                    routine_code.insert(insert_pos, 0x00)
+                    insert_pos += 2
 
         # Store routine address for later reference
         self.routines[routine.name] = routine_start
@@ -1023,10 +1051,12 @@ class ImprovedCodeGenerator:
                 raise ValueError("RFALSE takes no operands")
             return self.gen_rfalse()
         elif op_name == '<>':
-            # <> as a form means return false (same as RFALSE)
+            # <> evaluates to FALSE (0) but does NOT return from routine
+            # When used as a statement, it's a no-op
+            # When used as an expression/value, the caller handles it via _get_operand_type_and_value
             if form.operands:
                 raise ValueError("<> takes no operands")
-            return self.gen_rfalse()
+            return b''  # No-op when used as a statement
         elif op_name == 'RFATAL':
             if form.operands:
                 raise ValueError("RFATAL takes no operands")
@@ -1047,6 +1077,8 @@ class ImprovedCodeGenerator:
             return self.gen_repeat(form.operands)
         elif op_name == 'BIND':
             return self.gen_bind(form.operands)
+        elif op_name == 'DO':
+            return self.gen_do(form.operands)
 
         # Output
         elif op_name == 'TELL':
@@ -1780,7 +1812,19 @@ class ImprovedCodeGenerator:
 
         # Get return value (default to 1/TRUE if none specified)
         if operands:
-            op_type, op_val = self._get_operand_type_and_value(operands[0])
+            # If operand is a nested form, generate it first (result goes to stack)
+            if isinstance(operands[0], FormNode):
+                inner_code = self.generate_form(operands[0])
+                code.extend(inner_code)
+                # Result is on stack - use variable 0
+                op_type, op_val = 1, 0
+            elif isinstance(operands[0], (CondNode, RepeatNode)):
+                # These node types also need evaluation first
+                inner_code = self.generate_node(operands[0])
+                code.extend(inner_code)
+                op_type, op_val = 1, 0
+            else:
+                op_type, op_val = self._get_operand_type_and_value(operands[0])
         else:
             op_type, op_val = 0, 1  # Small constant 1 (TRUE)
 
@@ -1820,11 +1864,10 @@ class ImprovedCodeGenerator:
     def gen_again(self) -> bytes:
         """Generate AGAIN (restart current loop).
 
-        AGAIN jumps back to the start of the innermost REPEAT loop.
+        AGAIN jumps back to the start of the innermost REPEAT/PROG/DO loop.
         This is similar to 'continue' in C.
 
-        Returns a placeholder JUMP instruction that will be patched
-        by gen_repeat after all loop body code is generated.
+        Returns a JUMP instruction to the loop start.
         """
         if not self.loop_stack:
             # No active loop - can't generate AGAIN
@@ -1833,17 +1876,38 @@ class ImprovedCodeGenerator:
 
         # Get the innermost loop context
         loop_ctx = self.loop_stack[-1]
+        loop_start = loop_ctx.get('loop_start', 0)
+
+        # Generate JUMP to loop start
+        # The offset will be calculated based on current position
+        # Since we're generating code that will be appended to the main code,
+        # we need to use a marker and patch later, OR calculate the offset now
+        #
+        # For PROG/REPEAT/DO loops, loop_start is the position in the current code block
+        # where the loop begins. AGAIN should jump back to that position.
+        #
+        # JUMP offset formula: target = PC + offset - 2
+        # So: offset = target - PC + 2 = loop_start - (current_pos + 3) + 2
+        # But current_pos is relative to the code block being built, so we need
+        # to track the actual offset needed.
+        #
+        # Since the code returned is appended to the parent's code, we store
+        # a marker that gets patched when the loop finishes generating.
 
         # Track this AGAIN location for later patching
-        # We use a placeholder marker (0xFF, 0xAA, 0xAA) that will be patched
         if 'again_placeholders' not in loop_ctx:
             loop_ctx['again_placeholders'] = []
 
         # Generate placeholder JUMP (will be patched later)
+        # The patching code in gen_prog/gen_repeat/gen_do will replace these bytes
         code = bytearray()
         code.append(0x8C)  # JUMP opcode
         code.append(0xFF)  # Placeholder high byte (marker)
         code.append(0xAA)  # Placeholder low byte (marker)
+
+        # Record position relative to code we're generating (starts at 0 here)
+        # The parent loop handler will add its base offset when patching
+        loop_ctx['again_placeholders'].append(0)  # Position of JUMP offset in this code
 
         return bytes(code)
 
@@ -1874,13 +1938,14 @@ class ImprovedCodeGenerator:
                 # Print literal string
                 if self.string_table is not None:
                     self.string_table.add_string(op.value)
+                    # Use fixed 3-byte placeholder format (same size as final output)
+                    # This ensures JUMP/branch offsets are correct
+                    placeholder_idx = self._next_string_placeholder_index
+                    self._string_placeholders[placeholder_idx] = op.value
+                    self._next_string_placeholder_index += 1
                     code.append(0x8D)  # PRINT_PADDR short form
-                    marker = b'\xFF\xFE'
-                    code.extend(marker)
-                    text_bytes = op.value.encode('utf-8')
-                    code.append(len(text_bytes) & 0xFF)
-                    code.append((len(text_bytes) >> 8) & 0xFF)
-                    code.extend(text_bytes)
+                    code.append(0xFD)  # Marker for string placeholder
+                    code.append(placeholder_idx & 0xFF)
                 else:
                     code.append(0xB2)  # PRINT opcode
                     encoded_words = self.encoder.encode_string(op.value)
@@ -2247,6 +2312,7 @@ class ImprovedCodeGenerator:
 
         # Check for indirect variable assignment (computed variable index)
         indirect_var_num = None  # Variable containing the target variable index
+        computed_var_expr = None  # Expression that computes the target variable index
 
         # Handle LocalVarNode (.FOO)
         if isinstance(var_node, LocalVarNode):
@@ -2283,22 +2349,30 @@ class ImprovedCodeGenerator:
         # Handle AtomNode (bare variable name)
         elif isinstance(var_node, AtomNode):
             var_name = var_node.value
-            # Both SET and SETG check locals first, then globals
-            # SETG will create a new global if the variable doesn't exist
-            var_num = self.locals.get(var_name)
-            if var_num is not None:
-                # Found as local - use it
-                pass  # var_num already set
-            elif var_name in self.globals:
-                # Found as global - use it
-                var_num = self.globals[var_name]
-            elif is_global:
-                # SETG can create a new global
-                var_num = self.next_global
-                self.globals[var_name] = var_num
-                self.next_global += 1
+            if is_global:
+                # SETG with bare atom: check global first, then routine locals
+                # Use routine_locals (not self.locals) to ignore PROG/BIND shadows
+                if var_name in self.globals:
+                    var_num = self.globals[var_name]
+                elif hasattr(self, 'routine_locals') and var_name in self.routine_locals:
+                    # No global but routine local exists - act like SET for routine locals
+                    var_num = self.routine_locals[var_name]
+                else:
+                    # SETG creates a new global if one doesn't exist
+                    var_num = self.next_global
+                    self.globals[var_name] = var_num
+                    self.next_global += 1
             else:
-                raise ValueError(f"{op_name}: Variable '{var_name}' not declared")
+                # SET checks locals first, then globals
+                var_num = self.locals.get(var_name)
+                if var_num is not None:
+                    # Found as local - use it
+                    pass  # var_num already set
+                elif var_name in self.globals:
+                    # Found as global - use it
+                    var_num = self.globals[var_name]
+                else:
+                    raise ValueError(f"{op_name}: Variable '{var_name}' not declared")
         elif isinstance(var_node, NumberNode):
             # Numeric variable reference (e.g., <SET 1 value> to set local variable 1)
             var_num = var_node.value
@@ -2308,6 +2382,11 @@ class ImprovedCodeGenerator:
                 num_locals = len(self.locals)
                 if var_num > num_locals:
                     raise ValueError(f"{op_name}: Local variable {var_num} not declared (only {num_locals} locals)")
+        elif isinstance(var_node, FormNode):
+            # Computed variable reference: <SET <+ .A 1> value>
+            # The expression computes the variable number at runtime
+            # We'll handle this specially below with computed_var_expr
+            computed_var_expr = var_node
         else:
             raise ValueError(f"{op_name}: First operand must be a variable name or number")
 
@@ -2355,6 +2434,63 @@ class ImprovedCodeGenerator:
                     code.append(0xE8)  # VAR form PUSH
                     code.append(0xBF)  # Variable type, rest omit
                     code.append(val_val & 0xFF)
+            return bytes(code)
+
+        # Handle computed variable expression (SET <expr> value)
+        if computed_var_expr is not None:
+            # Computed variable: evaluate expression to get target var number
+            # Strategy: eval var_num expr, save to scratch, eval value, STORE (scratch) (stack)
+
+            # Ensure we have a scratch global for holding computed var number
+            if '_SCRATCH_' not in self.globals:
+                self.globals['_SCRATCH_'] = self.next_global
+                self.next_global += 1
+            scratch_var = self.globals['_SCRATCH_']
+
+            # 1. Evaluate the expression that computes the variable number
+            var_expr_code = self.generate_form(computed_var_expr)
+            code.extend(var_expr_code)
+
+            # 2. Save computed var number to scratch (PULL from stack to scratch)
+            code.append(0xE9)  # PULL
+            code.append(0x7F)  # Type: small constant
+            code.append(scratch_var & 0xFF)
+
+            # 3. Evaluate the value expression
+            if isinstance(value_node, FormNode):
+                value_code = self.generate_form(value_node)
+                code.extend(value_code)
+                # 4. STORE (scratch) (stack) - both operands are variables
+                # 0x6D = 2OP long form with both operands as variables, opcode 0x0D
+                code.append(0x6D)  # STORE var,var
+                code.append(scratch_var & 0xFF)  # First operand: scratch (contains target var num)
+                code.append(0x00)  # Second operand: stack (contains value)
+                # 5. For value context, re-evaluate to push value again
+                # (inefficient but correct - optimization would require temp storage)
+                code.extend(self.generate_form(value_node))
+            else:
+                # Simple value - get type and value
+                val_type, val_val = self._get_operand_type_and_value(value_node)
+                # 4. STORE (scratch) value
+                if val_type == 0:  # Small constant
+                    # 0x4D = 2OP long form: first var, second small, opcode 0x0D
+                    code.append(0x4D)
+                    code.append(scratch_var & 0xFF)
+                    code.append(val_val & 0xFF)
+                else:  # Variable
+                    # 0x6D = 2OP long form: both variables, opcode 0x0D
+                    code.append(0x6D)
+                    code.append(scratch_var & 0xFF)
+                    code.append(val_val & 0xFF)
+                # 5. Push the value for value context
+                code.append(0xE8)  # PUSH
+                if val_type == 0:
+                    code.append(0x7F)  # Small constant
+                    code.append(val_val & 0xFF)
+                else:
+                    code.append(0xBF)  # Variable
+                    code.append(val_val & 0xFF)
+
             return bytes(code)
 
         # Direct variable assignment
@@ -8225,7 +8361,77 @@ class ImprovedCodeGenerator:
             return b''
 
         # Process bindings if present (operands[0])
-        # For now, we skip bindings - they would be handled by parser
+        # Bindings can be:
+        #   () - empty, no bindings
+        #   (X) - just variable name, initialize to 0
+        #   (X Y) - multiple variable names
+        #   ((X 10) (Y 20)) - variables with initializers
+        # Note: PROG/BIND bindings shadow outer variables - always create new slots
+        bindings_list = operands[0]
+        saved_locals = {}  # Save old mappings for shadowed variables
+        if isinstance(bindings_list, list):
+            for binding in bindings_list:
+                if isinstance(binding, AtomNode):
+                    # Just a variable name, initialize to 0
+                    var_name = binding.value
+                    # Save old mapping if it exists (for shadowing)
+                    if var_name in self.locals:
+                        saved_locals[var_name] = self.locals[var_name]
+                    # Always create new local slot for PROG bindings
+                    var_num = len(self.locals) + 1
+                    self.locals[var_name] = var_num
+                    # Track max local slot for routine header
+                    if hasattr(self, 'max_local_slot'):
+                        self.max_local_slot = max(self.max_local_slot, var_num)
+                    # Initialize to 0
+                    code.append(0x0D)  # STORE
+                    code.append(var_num & 0xFF)
+                    code.append(0x00)  # Initial value 0
+                elif isinstance(binding, list) and len(binding) >= 1:
+                    # (VAR) or (VAR VALUE)
+                    if isinstance(binding[0], AtomNode):
+                        var_name = binding[0].value
+                        # Save old mapping if it exists (for shadowing)
+                        if var_name in self.locals:
+                            saved_locals[var_name] = self.locals[var_name]
+                        # Always create new local slot for PROG bindings
+                        var_num = len(self.locals) + 1
+                        self.locals[var_name] = var_num
+                        # Track max local slot for routine header
+                        if hasattr(self, 'max_local_slot'):
+                            self.max_local_slot = max(self.max_local_slot, var_num)
+                        # Initialize with value if provided, else 0
+                        if len(binding) >= 2:
+                            init_value = self.get_operand_value(binding[1])
+                            if isinstance(init_value, int):
+                                if 0 <= init_value <= 255:
+                                    # Small constant - use 0x0D (small, small)
+                                    code.append(0x0D)  # STORE
+                                    code.append(var_num & 0xFF)
+                                    code.append(init_value & 0xFF)
+                                else:
+                                    # Large constant - use 2OP variable form with type bytes
+                                    # 0xCD = 2OP variable form (0xC0 + 0x0D), opcode STORE
+                                    # Type byte 0x4F = 01 00 11 11 (small, large, omit, omit)
+                                    code.append(0xCD)  # 2OP variable form STORE
+                                    code.append(0x4F)  # Type: small const, large const
+                                    code.append(var_num & 0xFF)
+                                    code.append((init_value >> 8) & 0xFF)  # High byte
+                                    code.append(init_value & 0xFF)  # Low byte
+                            else:
+                                # Generate code to compute and store the init value
+                                init_code = self.generate_statement(binding[1])
+                                if init_code:
+                                    code.extend(init_code)
+                                    # Store stack top (variable 0) to local variable
+                                    # Use 0x4D = 0x0D | 0x40 for variable operand form
+                                    code.append(0x4D)  # STORE from var (2OP:13, small/var)
+                                    code.append(var_num & 0xFF)
+                                    code.append(0x00)  # Stack (variable 0)
+                        else:
+                            code.append(0x0D)  # STORE
+                            code.append(var_num & 0xFF)
+                            code.append(0x00)  # Initial value 0
 
         # Push block context onto block_stack (for RETURN support)
         # Use stack (variable 0) to store the block result
@@ -8236,6 +8442,18 @@ class ImprovedCodeGenerator:
             'result_var': 0,  # Stack (SP) - result is pushed onto stack
         }
         self.block_stack.append(block_ctx)
+
+        # PROG also serves as a loop context for AGAIN
+        # loop_start is at the beginning of the PROG body (after bindings)
+        loop_start = len(code)
+        loop_ctx = {
+            'loop_start': loop_start,
+            'loop_type': 'PROG',
+            'again_placeholders': [],
+        }
+        if not hasattr(self, 'loop_stack'):
+            self.loop_stack = []
+        self.loop_stack.append(loop_ctx)
 
         try:
             # Generate code for each statement in sequence
@@ -8266,9 +8484,31 @@ class ImprovedCodeGenerator:
                     code[i+2] = return_offset_unsigned & 0xFF
                 i += 1
 
+            # Patch all AGAIN placeholders (0x8C 0xFF 0xAA -> jump to loop_start)
+            i = 0
+            while i < len(code) - 2:
+                if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xAA:
+                    # Found AGAIN placeholder at position i
+                    # Z-machine JUMP: Target = PC + Offset - 2
+                    # Offset = Target - PC + 2 = loop_start - (i + 3) + 2
+                    again_offset = loop_start - (i + 1)
+                    if again_offset < 0:
+                        again_offset_unsigned = (1 << 16) + again_offset
+                    else:
+                        again_offset_unsigned = again_offset
+                    code[i+1] = (again_offset_unsigned >> 8) & 0xFF
+                    code[i+2] = again_offset_unsigned & 0xFF
+                i += 1
+
         finally:
+            # Pop loop context
+            if hasattr(self, 'loop_stack') and self.loop_stack:
+                self.loop_stack.pop()
             # Pop block context
             self.block_stack.pop()
+            # Restore shadowed locals
+            for var_name, var_num in saved_locals.items():
+                self.locals[var_name] = var_num
 
         return bytes(code)
 
@@ -8296,8 +8536,76 @@ class ImprovedCodeGenerator:
             return b''
 
         # Process bindings from operands[0]
-        # For now, we just execute the body statements
-        # Full binding support would require parser-level local scope tracking
+        # Bindings can be:
+        #   (X) - just variable name, initialize to 0
+        #   (X Y) - multiple variable names
+        #   ((X 10) (Y 20)) - variables with initializers
+        # Note: BIND bindings shadow outer variables - always create new slots
+        bindings_list = operands[0]
+        saved_locals = {}  # Save old mappings for shadowed variables
+        if isinstance(bindings_list, list):
+            for binding in bindings_list:
+                if isinstance(binding, AtomNode):
+                    # Just a variable name, initialize to 0
+                    var_name = binding.value
+                    # Save old mapping if it exists (for shadowing)
+                    if var_name in self.locals:
+                        saved_locals[var_name] = self.locals[var_name]
+                    # Always create new local slot for BIND bindings
+                    var_num = len(self.locals) + 1
+                    self.locals[var_name] = var_num
+                    # Track max local slot for routine header
+                    if hasattr(self, 'max_local_slot'):
+                        self.max_local_slot = max(self.max_local_slot, var_num)
+                    # Initialize to 0
+                    code.append(0x0D)  # STORE
+                    code.append(var_num & 0xFF)
+                    code.append(0x00)  # Initial value 0
+                elif isinstance(binding, list) and len(binding) >= 1:
+                    # (VAR) or (VAR VALUE)
+                    if isinstance(binding[0], AtomNode):
+                        var_name = binding[0].value
+                        # Save old mapping if it exists (for shadowing)
+                        if var_name in self.locals:
+                            saved_locals[var_name] = self.locals[var_name]
+                        # Always create new local slot for BIND bindings
+                        var_num = len(self.locals) + 1
+                        self.locals[var_name] = var_num
+                        # Track max local slot for routine header
+                        if hasattr(self, 'max_local_slot'):
+                            self.max_local_slot = max(self.max_local_slot, var_num)
+                        # Initialize with value if provided, else 0
+                        if len(binding) >= 2:
+                            init_value = self.get_operand_value(binding[1])
+                            if isinstance(init_value, int):
+                                if 0 <= init_value <= 255:
+                                    # Small constant - use 0x0D (small, small)
+                                    code.append(0x0D)  # STORE
+                                    code.append(var_num & 0xFF)
+                                    code.append(init_value & 0xFF)
+                                else:
+                                    # Large constant - use 2OP variable form with type bytes
+                                    # 0xCD = 2OP variable form (0xC0 + 0x0D), opcode STORE
+                                    # Type byte 0x4F = 01 00 11 11 (small, large, omit, omit)
+                                    code.append(0xCD)  # 2OP variable form STORE
+                                    code.append(0x4F)  # Type: small const, large const
+                                    code.append(var_num & 0xFF)
+                                    code.append((init_value >> 8) & 0xFF)  # High byte
+                                    code.append(init_value & 0xFF)  # Low byte
+                            else:
+                                # Generate code to compute and store the init value
+                                init_code = self.generate_statement(binding[1])
+                                if init_code:
+                                    code.extend(init_code)
+                                    # Store stack top (variable 0) to local variable
+                                    # Use 0x4D = 0x0D | 0x40 for variable operand form
+                                    code.append(0x4D)  # STORE from var (2OP:13, small/var)
+                                    code.append(var_num & 0xFF)
+                                    code.append(0x00)  # Stack (variable 0)
+                        else:
+                            code.append(0x0D)  # STORE
+                            code.append(var_num & 0xFF)
+                            code.append(0x00)  # Initial value 0
 
         # Push block context onto block_stack (for RETURN support)
         # Use stack (variable 0) to store the block result
@@ -8308,6 +8616,18 @@ class ImprovedCodeGenerator:
             'result_var': 0,  # Stack (SP) - result is pushed onto stack
         }
         self.block_stack.append(block_ctx)
+
+        # BIND also serves as a loop context for AGAIN
+        # loop_start is at the beginning of the BIND body (after bindings)
+        loop_start = len(code)
+        loop_ctx = {
+            'loop_start': loop_start,
+            'loop_type': 'BIND',
+            'again_placeholders': [],
+        }
+        if not hasattr(self, 'loop_stack'):
+            self.loop_stack = []
+        self.loop_stack.append(loop_ctx)
 
         try:
             # Generate code for each statement in sequence
@@ -8338,9 +8658,396 @@ class ImprovedCodeGenerator:
                     code[i+2] = return_offset_unsigned & 0xFF
                 i += 1
 
+            # Patch all AGAIN placeholders (0x8C 0xFF 0xAA -> jump to loop_start)
+            i = 0
+            while i < len(code) - 2:
+                if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xAA:
+                    # Found AGAIN placeholder at position i
+                    # Z-machine JUMP: Target = PC + Offset - 2
+                    # Offset = Target - PC + 2 = loop_start - (i + 3) + 2
+                    again_offset = loop_start - (i + 1)
+                    if again_offset < 0:
+                        again_offset_unsigned = (1 << 16) + again_offset
+                    else:
+                        again_offset_unsigned = again_offset
+                    code[i+1] = (again_offset_unsigned >> 8) & 0xFF
+                    code[i+2] = again_offset_unsigned & 0xFF
+                i += 1
+
         finally:
+            # Pop loop context
+            if hasattr(self, 'loop_stack') and self.loop_stack:
+                self.loop_stack.pop()
             # Pop block context
             self.block_stack.pop()
+            # Restore shadowed locals
+            for var_name, var_num in saved_locals.items():
+                self.locals[var_name] = var_num
+
+        return bytes(code)
+
+    def gen_do(self, operands: List[ASTNode]) -> bytes:
+        """Generate DO loop.
+
+        <DO (var start end [step]) body...> creates a counted loop.
+
+        The loop:
+        1. Initialize var = start
+        2. Check termination: if counting up and var > end, exit; if counting down and var < end, exit
+        3. Execute body
+        4. Increment/decrement var by step
+        5. Go back to step 2
+
+        Args:
+            operands[0]: Loop spec - a FormNode containing (var start end [step])
+            operands[1:]: Body statements
+
+        Returns:
+            bytes: Z-machine code for the loop
+        """
+        if len(operands) < 1:
+            raise ValueError("DO requires at least a loop specification")
+
+        code = bytearray()
+
+        # Parse loop specification: (var start end [step])
+        loop_spec = operands[0]
+        if isinstance(loop_spec, FormNode):
+            spec_parts = [loop_spec.operator] + loop_spec.operands if loop_spec.operator else loop_spec.operands
+        elif isinstance(loop_spec, list):
+            # Parser returns loop spec as a raw list
+            spec_parts = loop_spec
+        else:
+            raise ValueError("DO loop specification must be a list (var start end [step])")
+
+        if len(spec_parts) < 3:
+            raise ValueError("DO loop specification requires at least (var start end)")
+
+        var_node = spec_parts[0]
+        start_node = spec_parts[1]
+        end_node = spec_parts[2]
+        step_node = spec_parts[3] if len(spec_parts) > 3 else None
+
+        # Get variable name
+        if isinstance(var_node, AtomNode):
+            var_name = var_node.value
+        else:
+            raise ValueError("DO loop variable must be an atom")
+
+        # Save current local if it exists (for shadowing)
+        saved_local = self.locals.get(var_name)
+
+        # Allocate a local slot for the loop variable
+        if var_name in self.locals:
+            var_num = self.locals[var_name]
+        else:
+            # Create new local for loop variable
+            var_num = len(self.locals) + 1
+            self.locals[var_name] = var_num
+            if hasattr(self, 'max_local_slot'):
+                self.max_local_slot = max(self.max_local_slot, var_num)
+
+        # Initialize loop variable to start value
+        if isinstance(start_node, NumberNode):
+            start_val = start_node.value
+            if 0 <= start_val <= 255:
+                code.append(0x0D)  # STORE small, small
+                code.append(var_num & 0xFF)
+                code.append(start_val & 0xFF)
+            else:
+                code.append(0xCD)  # 2OP variable form STORE
+                code.append(0x4F)  # Type: small const, large const
+                code.append(var_num & 0xFF)
+                code.append((start_val >> 8) & 0xFF)
+                code.append(start_val & 0xFF)
+        else:
+            # Evaluate expression for start value
+            start_code = self.generate_statement(start_node)
+            code.extend(start_code)
+            code.append(0xE9)  # PULL
+            code.append(0x7F)  # Type: small constant
+            code.append(var_num & 0xFF)
+
+        # Push start value as default return value
+        # When DO exits normally, it returns the initial value of the loop variable
+        if isinstance(start_node, NumberNode):
+            start_val = start_node.value
+            if 0 <= start_val <= 255:
+                # PUSH small constant
+                code.append(0xE8)  # PUSH (VAR form 0xE0 + opcode 0x08)
+                code.append(0x7F)  # Type byte: small constant (01), omit, omit, omit
+                code.append(start_val & 0xFF)
+            else:
+                # PUSH large constant
+                code.append(0xE8)  # PUSH
+                code.append(0x3F)  # Type: large constant (00), omit, omit, omit
+                code.append((start_val >> 8) & 0xFF)
+                code.append(start_val & 0xFF)
+        else:
+            # Push the loop variable value (which now holds start)
+            code.append(0xE8)  # PUSH
+            code.append(0xBF)  # Type: variable (10), omit, omit, omit
+            code.append(var_num & 0xFF)
+
+        # Determine if counting up or down
+        # If step is negative, count down. Otherwise, if start > end, count down.
+        counting_up = True
+        step_val = 1
+        if step_node:
+            if isinstance(step_node, NumberNode):
+                step_val = step_node.value
+                if step_val < 0:
+                    counting_up = False
+                    step_val = -step_val
+            # If step is an expression, we assume counting up with step 1 for now
+        else:
+            # No step provided - determine direction from start/end
+            if isinstance(start_node, NumberNode) and isinstance(end_node, NumberNode):
+                if start_node.value > end_node.value:
+                    counting_up = False
+
+        # Loop start position (for AGAIN/continue)
+        loop_start = len(code)
+
+        # Check termination condition
+        # If counting up: var > end -> exit
+        # If counting down: var < end -> exit
+        # Use JG (jump if greater) or JL (jump if less)
+        if counting_up:
+            # JG var end ?exit (jump to exit if var > end)
+            # 2OP opcode 0x03 = JG, branch on true
+            # Long form encoding: 0 a b OOOOO where a=first type, b=second type
+            # a=1 for variable, b=0 for small constant -> 0x43
+            if isinstance(end_node, NumberNode):
+                end_val = end_node.value
+                if 0 <= end_val <= 255:
+                    code.append(0x43)  # JG var, small (0100 0011)
+                    code.append(var_num & 0xFF)
+                    code.append(end_val & 0xFF)
+                else:
+                    code.append(0xC3)  # JG 2OP variable form
+                    code.append(0x6F)  # var, large (01 10 11 11)
+                    code.append(var_num & 0xFF)
+                    code.append((end_val >> 8) & 0xFF)
+                    code.append(end_val & 0xFF)
+            else:
+                # Evaluate end expression
+                end_code = self.generate_statement(end_node)
+                code.extend(end_code)
+                code.append(0x63)  # JG var, var (0110 0011)
+                code.append(var_num & 0xFF)
+                code.append(0x00)  # Stack
+        else:
+            # JL var end ?exit (jump to exit if var < end)
+            # 2OP opcode 0x02 = JL, branch on true
+            if isinstance(end_node, NumberNode):
+                end_val = end_node.value
+                if 0 <= end_val <= 255:
+                    code.append(0x42)  # JL var, small (0100 0010)
+                    code.append(var_num & 0xFF)
+                    code.append(end_val & 0xFF)
+                else:
+                    code.append(0xC2)  # JL 2OP variable form
+                    code.append(0x6F)  # var, large
+                    code.append(var_num & 0xFF)
+                    code.append((end_val >> 8) & 0xFF)
+                    code.append(end_val & 0xFF)
+            else:
+                # Evaluate end expression
+                end_code = self.generate_statement(end_node)
+                code.extend(end_code)
+                code.append(0x62)  # JL var, var (0110 0010)
+                code.append(var_num & 0xFF)
+                code.append(0x00)  # Stack
+
+        # Branch offset placeholder (will be patched)
+        exit_branch_pos = len(code)
+        code.append(0x80)  # Branch on true, 1-byte offset placeholder
+        code.append(0x00)  # Placeholder
+
+        # Push block context onto block_stack (for RETURN support)
+        # RETURN inside DO loop should exit the loop and provide a result
+        block_ctx = {
+            'code_buffer': code,
+            'return_placeholders': [],
+            'block_type': 'DO',
+            'result_var': 0,  # Stack (SP) - result is pushed onto stack
+        }
+        self.block_stack.append(block_ctx)
+
+        # Push loop context for AGAIN support
+        loop_ctx = {
+            'loop_start': loop_start,
+            'exit_placeholders': [exit_branch_pos],
+            'loop_type': 'DO',
+        }
+        if not hasattr(self, 'loop_stack'):
+            self.loop_stack = []
+        self.loop_stack.append(loop_ctx)
+
+        try:
+            # Generate body code
+            for i in range(1, len(operands)):
+                stmt = operands[i]
+                stmt_code = self.generate_statement(stmt)
+                if stmt_code:
+                    code.extend(stmt_code)
+
+            # Increment/decrement loop variable
+            if step_node and not isinstance(step_node, NumberNode):
+                # Variable step - need to add/subtract at runtime
+                # Check if it's a local variable reference
+                step_var_name = None
+                if isinstance(step_node, LocalVarNode):
+                    # Direct local variable node (parsed .N becomes LocalVarNode with name='N')
+                    step_var_name = step_node.name
+                elif isinstance(step_node, FormNode) and isinstance(step_node.operator, AtomNode):
+                    if step_node.operator.value == 'LVAL' and len(step_node.operands) == 1:
+                        # <LVAL N> form - local variable reference
+                        name_node = step_node.operands[0]
+                        if isinstance(name_node, AtomNode):
+                            step_var_name = name_node.value
+                elif isinstance(step_node, AtomNode) and step_node.value.startswith('.'):
+                    # Old-style .N reference (if parser didn't convert)
+                    step_var_name = step_node.value[1:]
+                elif isinstance(step_node, AtomNode) and step_node.value in self.locals:
+                    # Direct local variable name
+                    step_var_name = step_node.value
+
+                if step_var_name and step_var_name in self.locals:
+                    step_var_num = self.locals[step_var_name]
+                    if counting_up:
+                        # ADD var, step_var -> var
+                        code.append(0x74)  # ADD var, var (0111 0100)
+                        code.append(var_num & 0xFF)
+                        code.append(step_var_num & 0xFF)
+                        code.append(var_num & 0xFF)
+                    else:
+                        # SUB var, step_var -> var
+                        code.append(0x75)  # SUB var, var (0111 0101)
+                        code.append(var_num & 0xFF)
+                        code.append(step_var_num & 0xFF)
+                        code.append(var_num & 0xFF)
+                else:
+                    # Complex expression - evaluate and assign (not add)
+                    # When step is a complex expression, I = step_expr (assignment, not increment)
+                    step_code = self.generate_statement(step_node)
+                    code.extend(step_code)
+                    # PULL stack value into variable (store stack to var)
+                    code.append(0xE9)  # PULL (VAR form)
+                    code.append(0x7F)  # Type: small constant (variable number)
+                    code.append(var_num & 0xFF)
+            elif counting_up:
+                if step_val == 1:
+                    # INC var
+                    code.append(0x95)  # 1OP INC short form with small constant type
+                    code.append(var_num & 0xFF)
+                else:
+                    # ADD var step -> var
+                    code.append(0x54)  # ADD var, small
+                    code.append(var_num & 0xFF)
+                    code.append(step_val & 0xFF)
+                    code.append(var_num & 0xFF)  # Store result back to var
+            else:
+                if step_val == 1:
+                    # DEC var
+                    code.append(0x96)  # 1OP DEC short form with small constant type
+                    code.append(var_num & 0xFF)
+                else:
+                    # SUB var step -> var
+                    code.append(0x55)  # SUB var, small
+                    code.append(var_num & 0xFF)
+                    code.append(step_val & 0xFF)
+                    code.append(var_num & 0xFF)  # Store result back to var
+
+            # Jump back to loop start
+            # Z-machine JUMP: target = PC + offset - 2
+            # where PC is the address after the JUMP instruction
+            # So: offset = target - PC + 2 = loop_start - (jump_pos + 3) + 2
+            jump_pos = len(code)
+            code.append(0x8C)  # JUMP
+            # PC after JUMP = jump_pos + 3 (opcode + 2 offset bytes)
+            jump_offset = loop_start - (jump_pos + 3) + 2
+            if jump_offset < 0:
+                jump_offset_unsigned = (1 << 16) + jump_offset
+            else:
+                jump_offset_unsigned = jump_offset
+            code.append((jump_offset_unsigned >> 8) & 0xFF)
+            code.append(jump_offset_unsigned & 0xFF)
+
+            # Exit point - patch branch offset
+            exit_point = len(code)
+            # For short branch (1 byte offset):
+            # After deletion, PC after branch = exit_branch_pos + 1
+            # target = exit_point - 1 (since we'll delete one placeholder byte)
+            # offset = target - PC + 2 = (exit_point - 1) - (exit_branch_pos + 1) + 2
+            #        = exit_point - exit_branch_pos
+            short_branch_offset = exit_point - exit_branch_pos
+            if 0 <= short_branch_offset <= 63:
+                # Short branch: bit 7=polarity, bit 6=1 (short), bits 5-0=offset
+                # 0xC0 = 1100 0000 (branch on true, short form)
+                code[exit_branch_pos] = 0xC0 | (short_branch_offset & 0x3F)
+                # Remove the extra placeholder byte
+                del code[exit_branch_pos + 1]
+                # Update exit_point since we deleted a byte
+                exit_point -= 1
+                # Fix the JUMP offset - deleting a byte before it shifts everything
+                # The JUMP is at position (jump_pos - 1) after deletion
+                # Its offset bytes are at (jump_pos - 1) + 1 and (jump_pos - 1) + 2
+                # The target is now 1 byte closer, so increment offset by 1
+                jump_offset_pos = jump_pos  # After deletion, offset bytes are here
+                old_offset_hi = code[jump_offset_pos]
+                old_offset_lo = code[jump_offset_pos + 1]
+                old_offset = (old_offset_hi << 8) | old_offset_lo
+                if old_offset >= 0x8000:
+                    old_offset = old_offset - 0x10000
+                new_offset = old_offset + 1  # Target is 1 byte closer
+                if new_offset < 0:
+                    new_offset_unsigned = (1 << 16) + new_offset
+                else:
+                    new_offset_unsigned = new_offset
+                code[jump_offset_pos] = (new_offset_unsigned >> 8) & 0xFF
+                code[jump_offset_pos + 1] = new_offset_unsigned & 0xFF
+            else:
+                # Long branch: bit 7=polarity, bit 6=0 (long), bits 13-8 in bits 5-0, bits 7-0 in byte 2
+                # Recalculate offset for 2-byte branch
+                branch_offset = exit_point - (exit_branch_pos + 2)
+                if branch_offset < 0:
+                    branch_offset_unsigned = (1 << 14) + branch_offset  # 14-bit signed
+                else:
+                    branch_offset_unsigned = branch_offset
+                code[exit_branch_pos] = 0x80 | ((branch_offset_unsigned >> 8) & 0x3F)
+                code[exit_branch_pos + 1] = branch_offset_unsigned & 0xFF
+
+            # Patch all RETURN placeholders (0x8C 0xFF 0xBB -> jump to exit_point)
+            # Use pattern scanning since RETURN may be inside nested structures
+            i = 0
+            while i < len(code) - 2:
+                if code[i] == 0x8C and code[i+1] == 0xFF and code[i+2] == 0xBB:
+                    # Found RETURN placeholder at position i
+                    # Z-machine JUMP: Target = PC + Offset - 2
+                    # PC after JUMP = i + 3, so Offset = Target - (i + 3) + 2 = Target - i - 1
+                    return_offset = exit_point - (i + 1)
+                    if return_offset < 0:
+                        return_offset_unsigned = (1 << 16) + return_offset
+                    else:
+                        return_offset_unsigned = return_offset
+                    code[i+1] = (return_offset_unsigned >> 8) & 0xFF
+                    code[i+2] = return_offset_unsigned & 0xFF
+                i += 1
+
+        finally:
+            # Pop block context
+            if self.block_stack:
+                self.block_stack.pop()
+            # Pop loop context
+            if hasattr(self, 'loop_stack') and self.loop_stack:
+                self.loop_stack.pop()
+            # Restore shadowed local
+            if saved_local is not None:
+                self.locals[var_name] = saved_local
+            elif var_name in self.locals and saved_local is None:
+                del self.locals[var_name]
 
         return bytes(code)
 
@@ -8377,7 +9084,8 @@ class ImprovedCodeGenerator:
         # Push loop context onto loop_stack (for AGAIN support)
         loop_ctx = {
             'code_buffer': code,
-            'start_offset': loop_start,
+            'loop_start': loop_start,  # Consistent with gen_prog, gen_bind, gen_do
+            'loop_type': 'REPEAT',
             'again_placeholders': []  # Will be populated by gen_again
         }
         self.loop_stack.append(loop_ctx)
@@ -10911,10 +11619,16 @@ class ImprovedCodeGenerator:
         var_num = self.get_variable_number(operands[0])
 
         # PULL is VAR opcode 0x09 (V1-5)
+        # PULL takes a variable NUMBER as a small/large constant operand
         if self.version <= 5:
             code.append(0xE9)  # VAR form, opcode 0x09
-            code.append(0x02)  # Type byte: 1 variable
-            code.append(var_num)
+            if var_num <= 255:
+                code.append(0x7F)  # Type byte: small constant, omit, omit, omit
+                code.append(var_num)
+            else:
+                code.append(0x3F)  # Type byte: large constant, omit, omit, omit
+                code.append((var_num >> 8) & 0xFF)
+                code.append(var_num & 0xFF)
 
         return bytes(code)
 

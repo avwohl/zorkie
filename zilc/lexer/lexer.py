@@ -658,12 +658,15 @@ class Lexer:
                 else:
                     self.tokens.append(Token(TokenType.ATOM, '!', line, col))
 
-            # Backslash (character constant or escape)
+            # Backslash (character constant or escape prefix for identifiers)
             elif ch == '\\':
                 chars = [self.advance()]  # Read \
                 # If followed by another character, include it as part of the atom
                 # This handles \. \, \" \\ etc. as complete atoms
                 if self.peek() and self.peek() not in ' \t\n\r\f':
+                    chars.append(self.advance())
+                # Continue reading if more atom characters follow (e.g., \,TELL -> single atom)
+                while self.peek() and self.is_atom_char(self.peek()):
                     chars.append(self.advance())
                 value = ''.join(chars)
                 self.tokens.append(Token(TokenType.ATOM, value, line, col))
