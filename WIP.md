@@ -1,11 +1,15 @@
 # Work In Progress Notes
 
 ## Current Status (2025-12-24)
-- **Tests:** 358 passed, 131 failed, 142 skipped
+- **Tests:** 355 passed, 129 failed, 142 skipped
 - **Started session at:** 349 passed, 135 failed
-- **Fixed this session:** +9 passing, -4 failing
+- **Fixed this session:** +6 passing, -6 failing
 
 ## Recent Changes (This Session)
+- Added warning infrastructure for unused variable checks (ZIL0210)
+  - Compiler now tracks local variable usage
+  - Warns for unused routine-level locals, PROG/BIND/REPEAT bindings
+  - Side-effect initializers (FormNode) exempt from warning
 - Implemented MAP-DIRECTIONS loop construct for iterating over room exits
 - Implemented MAP-CONTENTS loop construct for iterating over object contents
 - Added DirectionsNode to AST and parser for `<DIRECTIONS>` declarations
@@ -63,10 +67,10 @@
 - ITABLE multi-element initializers
 - Compile-time table manipulation (ZPUT, ZREST)
 
-### Variables (~7 failing)
+### Variables (~6 failing)
 - Funny globals (globals beyond 240 limit)
 - DEFINE-GLOBALS
-- Unused locals warning (ZIL0210)
+- Unused locals warning (ZIL0210) - PARTIALLY FIXED (basic case works)
 
 ### Syntax (~7 failing)
 - REMOVE-SYNTAX matching
@@ -86,9 +90,10 @@
 - flow_control: 10 failing
 - macros: 8 failing
 - syntax: 7 failing
-- variables: 7 failing
+- variables: 6 failing (ZIL0210 fixed)
 
 ### Priority Items
-1. Add warning infrastructure for unused variable checks
+1. ~~Add warning infrastructure for unused variable checks~~ DONE (ZIL0210 works)
 2. Fix #BYTE element handling in tables
 3. Fix DO-FUNNY-RETURN feature
+4. Add ZIL0211 warning for unused flags

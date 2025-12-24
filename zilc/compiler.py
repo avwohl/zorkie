@@ -5,7 +5,7 @@ Coordinates lexing, parsing, code generation, and assembly.
 """
 
 import sys
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 
 from .lexer import Lexer
@@ -26,11 +26,23 @@ class ZILCompiler:
         self.compilation_flags = {}  # ZILF compilation flags
         self.include_paths = include_paths or []  # Additional paths to search for includes
         self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
+        self.warnings: List[str] = []  # Compilation warnings
 
     def log(self, message: str):
         """Print log message if verbose mode is enabled."""
         if self.verbose:
             print(f"[zilc] {message}", file=sys.stderr)
+
+    def warn(self, code: str, message: str):
+        """Add a compilation warning with a code."""
+        warning = f"{code}: {message}"
+        self.warnings.append(warning)
+        if self.verbose:
+            print(f"[zilc] Warning: {warning}", file=sys.stderr)
+
+    def get_warnings(self) -> List[str]:
+        """Get all warnings generated during compilation."""
+        return self.warnings.copy()
 
     def compile_file(self, input_path: str, output_path: Optional[str] = None) -> bool:
         """
@@ -1486,6 +1498,9 @@ class ZILCompiler:
         Returns:
             Z-machine story file as bytes
         """
+        # Clear warnings from any previous compilation
+        self.warnings = []
+
         # Preprocess control characters (^L etc.)
         source = self.preprocess_control_characters(source)
 
@@ -1614,7 +1629,8 @@ class ZILCompiler:
         codegen = ImprovedCodeGenerator(self.version, abbreviations_table=abbreviations_table,
                                        string_table=string_table,
                                        action_table=action_table_info,
-                                       symbol_tables=symbol_tables)
+                                       symbol_tables=symbol_tables,
+                                       compiler=self)
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
 

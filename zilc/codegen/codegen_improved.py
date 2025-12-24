@@ -18,12 +18,13 @@ class ImprovedCodeGenerator:
     """Enhanced code generator with extensive opcode support."""
 
     def __init__(self, version: int = 3, abbreviations_table=None, string_table=None,
-                 action_table=None, symbol_tables=None):
+                 action_table=None, symbol_tables=None, compiler=None):
         self.version = version
         self.abbreviations_table = abbreviations_table
         self.string_table = string_table
         self.action_table = action_table
         self.symbol_tables = symbol_tables  # Store for later access (e.g., MAP-DIRECTIONS)
+        self.compiler = compiler  # Reference to compiler for warnings
         self.encoder = ZTextEncoder(version, abbreviations_table=abbreviations_table)
         self.opcodes = OpcodeTable()
 
@@ -869,6 +870,18 @@ class ImprovedCodeGenerator:
 
         num_locals = len(routine.params) + len(routine.aux_vars)
 
+        # Track local variable usage for ZIL0210 warnings
+        self.used_locals = set()  # Locals that have been read
+        self.locals_with_side_effect_init = set()  # Locals initialized with routine calls
+        self.routine_level_locals = set(local_names)  # Routine-level locals (for warning scope)
+
+        # Mark locals with side-effect initializers (FormNode = routine call)
+        for local_name in local_names:
+            if local_name in routine.local_defaults:
+                default_node = routine.local_defaults[local_name]
+                if isinstance(default_node, FormNode):
+                    self.locals_with_side_effect_init.add(local_name)
+
         # Save routine locals for SETG fallback (not affected by PROG/BIND shadowing)
         self.routine_locals = dict(self.locals)
 
@@ -963,6 +976,9 @@ class ImprovedCodeGenerator:
                 if isinstance(last_stmt, LocalVarNode):
                     # Return the local variable
                     var_num = self.locals.get(last_stmt.name, 1)
+                    # Mark local as used (for ZIL0210 warning tracking)
+                    if hasattr(self, 'used_locals'):
+                        self.used_locals.add(last_stmt.name)
                     routine_code.append(0xAB)  # RET variable
                     routine_code.append(var_num)
                     implicit_ret_generated = True
@@ -1083,6 +1099,13 @@ class ImprovedCodeGenerator:
             self._placeholder_positions.append((base_offset + rel_offset, placeholder_idx))
         self._pending_placeholders.clear()
 
+        # Check for unused routine-level locals (ZIL0210)
+        if hasattr(self, 'routine_level_locals') and self.compiler is not None:
+            for local_name in self.routine_level_locals:
+                if (local_name not in self.used_locals and
+                        local_name not in self.locals_with_side_effect_init):
+                    self.compiler.warn("ZIL0210", f"local variable '{local_name}' is never used")
+
         self.code.extend(routine_code)
         return bytes(routine_code)
 
@@ -1118,6 +1141,11 @@ class ImprovedCodeGenerator:
         elif isinstance(node, TableNode):
             # Standalone table - generate and return address
             return self.generate_table_node(node)
+        elif isinstance(node, LocalVarNode):
+            # Mark local as used (for ZIL0210 warning tracking)
+            if hasattr(self, 'used_locals'):
+                self.used_locals.add(node.name)
+            return b''
         elif isinstance(node, AtomNode):
             # Standalone atom - evaluate and potentially push to stack
             return b''
@@ -3293,6 +3321,9 @@ class ImprovedCodeGenerator:
                 return (2, 0x10)
         elif isinstance(node, LocalVarNode):
             var_num = self.locals.get(node.name, 1)
+            # Mark local as used (for ZIL0210 warning tracking)
+            if hasattr(self, 'used_locals'):
+                self.used_locals.add(node.name)
             return (2, var_num)
         elif isinstance(node, TableNode):
             table_id = self._add_table(node)
@@ -3351,6 +3382,9 @@ class ImprovedCodeGenerator:
             if var_num is None:
                 self._warn(f"Unknown local variable '{node.name}' - using default")
                 var_num = 1
+            # Mark local as used (for ZIL0210 warning tracking)
+            if hasattr(self, 'used_locals'):
+                self.used_locals.add(node.name)
             return (1, var_num)  # Variable
         elif isinstance(node, TableNode):
             # Table literal - generate table and return placeholder address
@@ -8700,6 +8734,8 @@ class ImprovedCodeGenerator:
         # Note: PROG/BIND bindings shadow outer variables - always create new slots
         bindings_list = operands[bindings_index]
         saved_locals = {}  # Save old mappings for shadowed variables
+        prog_bound_vars = set()  # Track variables bound in this PROG
+        prog_side_effect_vars = set()  # Variables with side-effect initializers
         if isinstance(bindings_list, list):
             for binding in bindings_list:
                 if isinstance(binding, AtomNode):
@@ -8711,6 +8747,7 @@ class ImprovedCodeGenerator:
                     # Always create new local slot for PROG bindings
                     var_num = len(self.locals) + 1
                     self.locals[var_name] = var_num
+                    prog_bound_vars.add(var_name)  # Track for unused warning
                     # Track max local slot for routine header
                     if hasattr(self, 'max_local_slot'):
                         self.max_local_slot = max(self.max_local_slot, var_num)
@@ -8728,12 +8765,16 @@ class ImprovedCodeGenerator:
                         # Always create new local slot for PROG bindings
                         var_num = len(self.locals) + 1
                         self.locals[var_name] = var_num
+                        prog_bound_vars.add(var_name)  # Track for unused warning
                         # Track max local slot for routine header
                         if hasattr(self, 'max_local_slot'):
                             self.max_local_slot = max(self.max_local_slot, var_num)
                         # Initialize with value if provided, else 0
                         if len(binding) >= 2:
                             init_value = self.get_operand_value(binding[1])
+                            # Check for side-effect initializer (FormNode = routine call)
+                            if isinstance(binding[1], FormNode):
+                                prog_side_effect_vars.add(var_name)
                             if isinstance(init_value, int):
                                 if 0 <= init_value <= 255:
                                     # Small constant - use 0x0D (small, small)
@@ -8851,6 +8892,12 @@ class ImprovedCodeGenerator:
                 i += 1
 
         finally:
+            # Check for unused PROG locals (ZIL0210)
+            if hasattr(self, 'used_locals') and self.compiler is not None:
+                for var_name in prog_bound_vars:
+                    if (var_name not in self.used_locals and
+                            var_name not in prog_side_effect_vars):
+                        self.compiler.warn("ZIL0210", f"local variable '{var_name}' is never used")
             # Pop loop context
             if hasattr(self, 'loop_stack') and self.loop_stack:
                 self.loop_stack.pop()
@@ -8893,6 +8940,8 @@ class ImprovedCodeGenerator:
         # Note: BIND bindings shadow outer variables - always create new slots
         bindings_list = operands[0]
         saved_locals = {}  # Save old mappings for shadowed variables
+        bind_bound_vars = set()  # Track variables bound in this BIND
+        bind_side_effect_vars = set()  # Variables with side-effect initializers
         if isinstance(bindings_list, list):
             for binding in bindings_list:
                 if isinstance(binding, AtomNode):
@@ -8904,6 +8953,7 @@ class ImprovedCodeGenerator:
                     # Always create new local slot for BIND bindings
                     var_num = len(self.locals) + 1
                     self.locals[var_name] = var_num
+                    bind_bound_vars.add(var_name)  # Track for unused warning
                     # Track max local slot for routine header
                     if hasattr(self, 'max_local_slot'):
                         self.max_local_slot = max(self.max_local_slot, var_num)
@@ -8921,12 +8971,16 @@ class ImprovedCodeGenerator:
                         # Always create new local slot for BIND bindings
                         var_num = len(self.locals) + 1
                         self.locals[var_name] = var_num
+                        bind_bound_vars.add(var_name)  # Track for unused warning
                         # Track max local slot for routine header
                         if hasattr(self, 'max_local_slot'):
                             self.max_local_slot = max(self.max_local_slot, var_num)
                         # Initialize with value if provided, else 0
                         if len(binding) >= 2:
                             init_value = self.get_operand_value(binding[1])
+                            # Check for side-effect initializer (FormNode = routine call)
+                            if isinstance(binding[1], FormNode):
+                                bind_side_effect_vars.add(var_name)
                             if isinstance(init_value, int):
                                 if 0 <= init_value <= 255:
                                     # Small constant - use 0x0D (small, small)
@@ -9025,6 +9079,12 @@ class ImprovedCodeGenerator:
                 i += 1
 
         finally:
+            # Check for unused BIND locals (ZIL0210)
+            if hasattr(self, 'used_locals') and self.compiler is not None:
+                for var_name in bind_bound_vars:
+                    if (var_name not in self.used_locals and
+                            var_name not in bind_side_effect_vars):
+                        self.compiler.warn("ZIL0210", f"local variable '{var_name}' is never used")
             # Pop loop context
             if hasattr(self, 'loop_stack') and self.loop_stack:
                 self.loop_stack.pop()
@@ -12239,12 +12299,20 @@ class ImprovedCodeGenerator:
         from ..parser.ast_nodes import RepeatNode
         code = bytearray()
 
+        # Track variables bound in this REPEAT for unused warning
+        repeat_bound_vars = set()
+        repeat_side_effect_vars = set()
+
         # Initialize loop variable bindings
         for var_name, init_value in repeat.bindings:
             # Create local variable if not already in locals
             if var_name not in self.locals:
                 var_num = len(self.locals) + 1
                 self.locals[var_name] = var_num
+                repeat_bound_vars.add(var_name)  # Track for unused warning
+                # Check for side-effect initializer
+                if isinstance(init_value, FormNode):
+                    repeat_side_effect_vars.add(var_name)
 
             # Generate assignment
             var_num = self.locals[var_name]
@@ -12339,6 +12407,13 @@ class ImprovedCodeGenerator:
                 code[i+1] = (again_offset_unsigned >> 8) & 0xFF
                 code[i+2] = again_offset_unsigned & 0xFF
             i += 1
+
+        # Check for unused REPEAT locals (ZIL0210)
+        if hasattr(self, 'used_locals') and self.compiler is not None:
+            for var_name in repeat_bound_vars:
+                if (var_name not in self.used_locals and
+                        var_name not in repeat_side_effect_vars):
+                    self.compiler.warn("ZIL0210", f"local variable '{var_name}' is never used")
 
         # Pop block context
         self.block_stack.pop()
