@@ -853,28 +853,44 @@ class ImprovedCodeGenerator:
                     if isinstance(default_node, NumberNode):
                         init_val = default_node.value & 0xFFFF
                 routine_code.extend(struct.pack('>H', init_val))
-        else:
-            # V5+: Local variables don't have initial values in header
-            # Generate SET instructions for variables with defaults
-            for local_name in local_names:
-                if local_name in routine.local_defaults:
-                    default_node = routine.local_defaults[local_name]
-                    if isinstance(default_node, NumberNode):
-                        init_val = default_node.value
-                        local_num = self.locals[local_name]
-                        # Generate STORE instruction: store local init_val
-                        if 0 <= init_val <= 255:
-                            # Small constant: long form 0 0 0D = 0x0D
-                            routine_code.append(0x0D)
-                            routine_code.append(local_num & 0xFF)
-                            routine_code.append(init_val & 0xFF)
-                        else:
-                            # Large constant: VAR form
-                            routine_code.append(0xED)  # VAR form STOREW
-                            routine_code.append(0x4F)  # small, large, omit, omit
-                            routine_code.append(local_num & 0xFF)
-                            routine_code.append((init_val >> 8) & 0xFF)
-                            routine_code.append(init_val & 0xFF)
+
+        # Track position for routine-level AGAIN (local initialization start)
+        # For V3/V4, we also generate STORE instructions so AGAIN can reset locals
+        routine_init_start = len(routine_code)
+
+        # Generate local initialization code
+        # V5+: Required for initial values since header doesn't have them
+        # V3/V4: Needed for routine-level AGAIN to reset locals
+        for local_name in local_names:
+            if local_name in routine.local_defaults:
+                default_node = routine.local_defaults[local_name]
+                if isinstance(default_node, NumberNode):
+                    init_val = default_node.value
+                    local_num = self.locals[local_name]
+                    # Generate STORE instruction: store local init_val
+                    if 0 <= init_val <= 255:
+                        # Small constant: long form 0 0 0D = 0x0D
+                        routine_code.append(0x0D)
+                        routine_code.append(local_num & 0xFF)
+                        routine_code.append(init_val & 0xFF)
+                    else:
+                        # Large constant: VAR form
+                        routine_code.append(0xED)  # VAR form STOREW
+                        routine_code.append(0x4F)  # small, large, omit, omit
+                        routine_code.append(local_num & 0xFF)
+                        routine_code.append((init_val >> 8) & 0xFF)
+                        routine_code.append(init_val & 0xFF)
+
+        # Push routine-level loop context for AGAIN support
+        # AGAIN at routine level should jump to routine_init_start to reset locals
+        if not hasattr(self, 'loop_stack'):
+            self.loop_stack = []
+        routine_loop_ctx = {
+            'loop_start': routine_init_start,
+            'loop_type': 'ROUTINE',
+            'again_placeholders': [],
+        }
+        self.loop_stack.append(routine_loop_ctx)
 
         # Generate code for routine body
         for stmt in routine.body:
@@ -978,6 +994,26 @@ class ImprovedCodeGenerator:
                     routine_code.insert(insert_pos, 0x00)
                     routine_code.insert(insert_pos, 0x00)
                     insert_pos += 2
+
+        # Pop routine loop context and patch AGAIN placeholders
+        if hasattr(self, 'loop_stack') and self.loop_stack:
+            routine_loop_ctx = self.loop_stack.pop()
+            if routine_loop_ctx.get('loop_type') == 'ROUTINE':
+                # Patch all AGAIN placeholders (0x8C 0xFF 0xAA -> jump to routine_init_start)
+                i = 0
+                while i < len(routine_code) - 2:
+                    if routine_code[i] == 0x8C and routine_code[i+1] == 0xFF and routine_code[i+2] == 0xAA:
+                        # Found AGAIN placeholder at position i
+                        # Z-machine JUMP: Target = PC + Offset - 2
+                        # PC after JUMP = i + 3, so Offset = Target - (i + 3) + 2 = Target - i - 1
+                        again_offset = routine_init_start - (i + 1)
+                        if again_offset < 0:
+                            again_offset_unsigned = (1 << 16) + again_offset
+                        else:
+                            again_offset_unsigned = again_offset
+                        routine_code[i+1] = (again_offset_unsigned >> 8) & 0xFF
+                        routine_code[i+2] = again_offset_unsigned & 0xFF
+                    i += 1
 
         # Store routine address for later reference
         self.routines[routine.name] = routine_start
@@ -1754,6 +1790,9 @@ class ImprovedCodeGenerator:
         The block's result is set to the return value.
 
         If not inside a block, RETURN exits the routine normally.
+
+        Note: DO-FUNNY-RETURN? feature (changing RETURN behavior based on version
+        or explicit setting) is not yet fully implemented.
         """
         if len(operands) > 1:
             raise ValueError("RETURN requires 0 or 1 operand")
