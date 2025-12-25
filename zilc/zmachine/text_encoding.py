@@ -194,6 +194,18 @@ class ZTextEncoder:
         Returns:
             List of 16-bit words with Z-characters packed in
         """
+        # ZIL string translation:
+        # - | (pipe) becomes newline in output
+        # - Literal newlines immediately after | are absorbed (ignored)
+        # - Other literal newlines (CRLF, CR, LF) become spaces
+        import re
+        # Step 1: Absorb newlines immediately after pipe
+        text = re.sub(r'\|(?:\r\n|\r|\n)', '|', text)
+        # Step 2: Replace remaining literal newlines with space
+        text = re.sub(r'\r\n|\r|\n', ' ', text)
+        # Step 3: Replace | with newline
+        text = text.replace('|', '\n')
+
         # Convert string to Z-characters
         zchars = []
         current_alphabet = 0

@@ -732,10 +732,37 @@ class MacroExpander:
             return None
 
         macro_name = form.operator.value.upper()
+
+        # Handle built-in conditional compilation macros
+        if macro_name == 'IF-IN-ZILCH':
+            # We're in a ZILF-compatible compiler, so return the argument
+            if form.operands:
+                return form.operands[0]
+            return AtomNode("<>", form.line, form.column)
+
+        if macro_name == 'IFN-IN-ZILCH':
+            # We're in a ZILF-compatible compiler, so return empty
+            return AtomNode("<>", form.line, form.column)
+
         if macro_name not in self.macros:
             return None
 
         macro = self.macros[macro_name]
+
+        # Validate argument count
+        num_args = len(form.operands)
+        num_required = 0
+        has_tuple = False
+        for param_name, is_quoted, is_tuple, is_aux in macro.params:
+            if is_tuple:
+                has_tuple = True
+            elif not is_aux:
+                num_required += 1
+
+        if num_args < num_required:
+            raise ValueError(
+                f"Macro {macro_name} requires {num_required} argument(s), but got {num_args}"
+            )
 
         # Build parameter bindings
         bindings = self._bind_parameters(macro, form.operands)
@@ -1117,6 +1144,9 @@ class MacroExpander:
         # Expand macros in routines
         for routine in program.routines:
             routine.body = [self._expand_recursive(stmt) for stmt in routine.body]
+            # Expand macros in local variable initializers
+            for var_name, default_val in list(routine.local_defaults.items()):
+                routine.local_defaults[var_name] = self._expand_recursive(default_val)
 
         # Expand macros in objects
         for obj in program.objects:

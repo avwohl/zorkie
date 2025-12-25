@@ -229,13 +229,15 @@ class ZILCompiler:
         source = re.sub(setg_pattern, extract_setg, source, flags=re.IGNORECASE)
 
         # First pass: Extract COMPILATION-FLAG directives
-        # <COMPILATION-FLAG FLAGNAME <T>> or <COMPILATION-FLAG FLAGNAME <>>
-        flag_pattern = r'<\s*COMPILATION-FLAG\s+(\w+)\s+<([^>]*)>\s*>'
+        # <COMPILATION-FLAG FLAGNAME <T>> or <COMPILATION-FLAG FLAGNAME T>
+        # Supports: <T>, <TRUE>, <>, T, TRUE, <> (bare or in angle brackets)
+        flag_pattern = r'<\s*COMPILATION-FLAG\s+(\w+)\s+(?:<([^>]*)>|(\w+))\s*>'
 
         def extract_flag(match):
             flag_name = match.group(1)
-            flag_value = match.group(2).strip()
-            # <T> or <TRUE> means true, <> or <FALSE> means false
+            # Value could be in group 2 (angle brackets) or group 3 (bare atom)
+            flag_value = (match.group(2) or match.group(3) or '').strip()
+            # <T> or <TRUE> or T means true, <> or <FALSE> or empty means false
             self.compilation_flags[flag_name] = flag_value.upper() in ('T', 'TRUE')
             self.log(f"  Flag: {flag_name} = {self.compilation_flags[flag_name]}")
             return ''  # Remove the directive from source
