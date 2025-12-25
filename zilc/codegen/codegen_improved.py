@@ -2498,6 +2498,20 @@ class ImprovedCodeGenerator:
                     code.extend(addr_code)
                     i += 1
 
+                elif op.value.startswith('!') and len(op.value) >= 2:
+                    # Character literal: !\X or !X - print as character
+                    # Use original value (not uppercased) to preserve character
+                    char_part = op.value[1:]
+                    if char_part.startswith('\\') and len(char_part) >= 2:
+                        char_val = ord(char_part[1])
+                    else:
+                        char_val = ord(char_part[0])
+                    # PRINT_CHAR with immediate value (VAR:0x05)
+                    code.append(0xE5)  # VAR opcode 0x05
+                    code.append(0x7F)  # Type: small constant (01), rest omitted (111111)
+                    code.append(char_val & 0xFF)
+                    i += 1
+
                 else:
                     # Unknown atom - skip
                     i += 1
