@@ -8852,6 +8852,18 @@ class ImprovedCodeGenerator:
         if len(operands) < 1:
             return b''
 
+        # Check for bindings in GO routine (not allowed in V1-V5)
+        if self._current_routine == "GO" and self.version < 6:
+            # Determine bindings location
+            bindings_idx = 1 if isinstance(operands[0], AtomNode) else 0
+            if bindings_idx < len(operands):
+                bindings = operands[bindings_idx]
+                if isinstance(bindings, list) and len(bindings) > 0:
+                    raise ValueError(
+                        f"GO routine cannot have PROG/BIND with local variables in V{self.version}. "
+                        f"Use a separate routine and call it from GO, or use V6."
+                    )
+
         # Check if first operand is an activation name (AtomNode) or bindings
         activation_name = None
         body_start = 1  # Default: body starts after bindings (index 1)
@@ -9075,6 +9087,15 @@ class ImprovedCodeGenerator:
         # First operand should be a list node with bindings
         if len(operands) < 2:
             return b''
+
+        # Check for bindings in GO routine (not allowed in V1-V5)
+        if self._current_routine == "GO" and self.version < 6:
+            bindings = operands[0]
+            if isinstance(bindings, list) and len(bindings) > 0:
+                raise ValueError(
+                    f"GO routine cannot have PROG/BIND with local variables in V{self.version}. "
+                    f"Use a separate routine and call it from GO, or use V6."
+                )
 
         # Process bindings from operands[0]
         # Bindings can be:
