@@ -4,6 +4,16 @@
 - **Tests:** 374 passed, 110 failed, 142 skipped
 - **Started session at:** 360 passed, 124 failed
 - **Fixed this session:** +14 passing, -14 failing
+- **Remaining by category:**
+  - tell: 23 failing
+  - objects: 22 failing
+  - vocab: 18 failing
+  - meta: 11 failing
+  - tables: 10 failing
+  - macros: 8 failing
+  - syntax: 7 failing
+  - flow_control: 6 failing
+  - variables: 6 failing
 
 ## Recent Changes (This Session)
 - Added DESC property newline stripping
