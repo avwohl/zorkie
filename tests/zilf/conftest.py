@@ -255,9 +255,13 @@ class ZILCompiler:
             )
         except Exception as e:
             # Other compilation errors
+            error_msg = str(e)
+            # Extract error codes like ZIL0404, MDL0417, etc.
+            error_codes = re.findall(r'([A-Z]{2,}[0-9]{3,})', error_msg)
             return CompilationResult(
                 success=False,
-                errors=[str(e)],
+                errors=[error_msg],
+                error_codes=error_codes,
             )
 
 

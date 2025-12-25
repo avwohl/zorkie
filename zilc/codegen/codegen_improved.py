@@ -41,6 +41,9 @@ class ImprovedCodeGenerator:
         # Track defined flags for ZIL0211 warning
         self.defined_flags: set = set()
         self.used_flags: set = set()  # Flags that are actually used in code
+        # Track defined properties for ZIL0212 warning
+        self.defined_properties: set = set()
+        self.used_properties: set = set()  # Properties that are actually used in code
 
         if symbol_tables:
             # Add flag constants (TOUCHBIT, FIGHTBIT, etc.)
@@ -52,6 +55,10 @@ class ImprovedCodeGenerator:
             # Add property constants (P?LDESC, P?STRENGTH, etc.)
             for prop_name, prop_num in symbol_tables.get('properties', {}).items():
                 self.constants[prop_name] = prop_num
+                # Track user-defined properties for ZIL0212 warning
+                # Standard properties like P?DESC and P?LDESC are exempt
+                if prop_name not in ('P?DESC', 'P?LDESC'):
+                    self.defined_properties.add(prop_name)
             # Add parser constants (PS?OBJECT, PS?VERB, etc.)
             for const_name, const_val in symbol_tables.get('parser_constants', {}).items():
                 self.constants[const_name] = const_val
@@ -437,6 +444,12 @@ class ImprovedCodeGenerator:
         # LEXV format: byte max_entries, byte count, then 4 bytes per entry
         if is_lexv and table_type == 'ITABLE':
             initial_size = table_node.size or 1
+            # Warn if size isn't a multiple of 3 (each lexeme entry is 3 words)
+            if initial_size % 3 != 0:
+                self.compiler.warn(
+                    "MDL0428",
+                    f"LEXV table size {initial_size} is not a multiple of 3"
+                )
             # Header: max entries (byte), word count (byte, initially 0)
             table_data.append(initial_size & 0xFF)
             table_data.append(0)  # Initially 0 words parsed
@@ -458,6 +471,23 @@ class ImprovedCodeGenerator:
 
         # Handle ITABLE with repeat count
         initial_size = table_node.size
+
+        # Warn about table size overflow (MDL0430)
+        if initial_size and table_type == 'ITABLE':
+            if is_byte and initial_size > 255:
+                self.compiler.warn(
+                    "MDL0430",
+                    f"ITABLE size {initial_size} overflows byte length prefix (max 255)"
+                )
+                # Cap size to prevent memory overflow
+                initial_size = 1
+            elif not is_byte and initial_size > 65535:
+                self.compiler.warn(
+                    "MDL0430",
+                    f"ITABLE size {initial_size} overflows word length prefix (max 65535)"
+                )
+                # Cap size to prevent memory overflow
+                initial_size = 1
 
         if initial_size and table_type == 'ITABLE' and values:
             # ITABLE with size and values: repeat pattern 'size' times
@@ -581,6 +611,12 @@ class ImprovedCodeGenerator:
         # LEXV format: byte max_entries, byte count, then 4 bytes per entry
         if is_lexv and table_type == 'ITABLE':
             num_entries = initial_size if initial_size else 1
+            # Warn if size isn't a multiple of 3 (each lexeme entry is 3 words)
+            if num_entries % 3 != 0:
+                self.compiler.warn(
+                    "MDL0428",
+                    f"LEXV table size {num_entries} is not a multiple of 3"
+                )
             # Header: max entries (byte), word count (byte, initially 0)
             table_data.append(num_entries & 0xFF)
             table_data.append(0)  # Initially 0 words parsed
@@ -595,6 +631,21 @@ class ImprovedCodeGenerator:
             self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
             self.global_values[global_name] = 0xFF00 | table_idx
             return
+
+        # Warn about table size overflow (MDL0430)
+        if initial_size and table_type == 'ITABLE':
+            if is_byte and initial_size > 255:
+                self.compiler.warn(
+                    "MDL0430",
+                    f"ITABLE size {initial_size} overflows byte length prefix (max 255)"
+                )
+                initial_size = 1
+            elif not is_byte and initial_size > 65535:
+                self.compiler.warn(
+                    "MDL0430",
+                    f"ITABLE size {initial_size} overflows word length prefix (max 65535)"
+                )
+                initial_size = 1
 
         # Handle ITABLE with repeat count
         if initial_size and table_type == 'ITABLE' and values:
@@ -759,6 +810,12 @@ class ImprovedCodeGenerator:
 
     def eval_constant(self, const_node: ConstantNode):
         """Evaluate and store a constant."""
+        # Handle TableNode values (ITABLE, TABLE, LTABLE)
+        if isinstance(const_node.value, TableNode):
+            # Compile the table and store reference
+            self._compile_global_table_node(const_node.name, const_node.value)
+            return
+
         value = self.eval_expression(const_node.value)
         if value is not None:
             self.constants[const_node.name] = value
@@ -11525,6 +11582,22 @@ class ImprovedCodeGenerator:
         if flag_name and flag_name in self.defined_flags:
             self.used_flags.add(flag_name)
 
+    def _track_property_usage(self, operand: ASTNode) -> None:
+        """Track usage of a property constant for ZIL0212 warnings.
+
+        Properties can be referenced as:
+        - Bare atoms: P?MYPROP
+        - Global variable references: ,P?MYPROP
+        """
+        prop_name = None
+        if isinstance(operand, AtomNode):
+            prop_name = operand.value
+        elif isinstance(operand, GlobalVarNode):
+            prop_name = operand.name
+
+        if prop_name and prop_name in self.defined_properties:
+            self.used_properties.add(prop_name)
+
     def gen_fset(self, operands: List[ASTNode]) -> bytes:
         """Generate SET_ATTR (set object attribute).
 
@@ -11707,6 +11780,9 @@ class ImprovedCodeGenerator:
         if len(operands) != 2:
             raise ValueError("GETP requires exactly 2 operands")
 
+        # Track property usage for ZIL0212 warning
+        self._track_property_usage(operands[1])
+
         code = bytearray()
 
         # Get operand types and values
@@ -11726,6 +11802,9 @@ class ImprovedCodeGenerator:
         """Generate PUT_PROP (set object property)."""
         if len(operands) != 3:
             raise ValueError("PUTP requires exactly 3 operands")
+
+        # Track property usage for ZIL0212 warning
+        self._track_property_usage(operands[1])
 
         code = bytearray()
 
@@ -15264,6 +15343,9 @@ class ImprovedCodeGenerator:
         """
         if len(operands) != 2:
             raise ValueError("GETPT requires exactly 2 operands")
+
+        # Track property usage for ZIL0212 warning
+        self._track_property_usage(operands[1])
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])

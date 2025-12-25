@@ -1344,9 +1344,13 @@ class ZILCompiler:
             if flag in defined_constants:
                 flags[flag] = defined_constants[flag]
             else:
-                if next_flag_bit < max_attributes:
-                    flags[flag] = next_flag_bit
-                    next_flag_bit += 1
+                if next_flag_bit >= max_attributes:
+                    raise ValueError(
+                        f"ZIL0404: too many attributes defined "
+                        f"(max {max_attributes} in V{self.version}, got {len(all_flags)})"
+                    )
+                flags[flag] = next_flag_bit
+                next_flag_bit += 1
 
         # Standard property assignments (must match _build_object_table prop_map)
         # Only DESC and LDESC are pre-defined; others are assigned dynamically
@@ -1386,6 +1390,14 @@ class ZILCompiler:
                 properties[f'P?{dir_name}'] = prop_num
             low_direction = max_properties - len(program.directions) + 1
 
+        # Check if propdefs exceeded property limit
+        # Properties can't overlap with direction properties
+        if next_prop > low_direction:
+            raise ValueError(
+                f"ZIL0404: too many properties defined "
+                f"(max {low_direction - 1} in V{self.version}, got {next_prop - 1})"
+            )
+
         # Collect custom properties from object/room definitions
         # Properties like (MYPROP 123) need P?MYPROP constants
         # This must match the order and numbering in _build_object_table
@@ -1397,6 +1409,11 @@ class ZILCompiler:
                 if key not in reserved_props:
                     prop_name = f'P?{key}'
                     if prop_name not in properties:
+                        if next_prop > low_direction:
+                            raise ValueError(
+                                f"ZIL0404: too many properties defined "
+                                f"(max {low_direction - 1} in V{self.version})"
+                            )
                         properties[prop_name] = next_prop
                         next_prop += 1
 
@@ -1682,6 +1699,13 @@ class ZILCompiler:
         unused_flags = codegen.defined_flags - codegen.used_flags
         for flag_name in sorted(unused_flags):
             self.warn("ZIL0211", f"flag '{flag_name}' is never used in code")
+
+        # Check for unused properties (ZIL0212 warning)
+        unused_properties = codegen.defined_properties - codegen.used_properties
+        for prop_name in sorted(unused_properties):
+            # Convert P?MYPROP to user-friendly property name
+            display_name = prop_name[2:] if prop_name.startswith('P?') else prop_name
+            self.warn("ZIL0212", f"property '{display_name}' is never used in code")
 
         # Get table data and offsets
         table_data = codegen.get_table_data() if codegen.tables else b''

@@ -1149,8 +1149,14 @@ class Parser:
         size = None
         values = []
 
-        # Check for size (ITABLE/LTABLE)
+        # Check for size or bare flags (ITABLE/LTABLE)
+        # BYTE/WORD can appear as bare atoms before size: <ITABLE BYTE 2500>
         if table_type in ("ITABLE", "LTABLE"):
+            # Handle bare BYTE/WORD flags before size
+            while self.current_token.type == TokenType.ATOM and \
+                  self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH'):
+                flags.append(self.current_token.value)
+                self.advance()
             if self.current_token.type == TokenType.NUMBER:
                 size = self.current_token.value
                 self.advance()

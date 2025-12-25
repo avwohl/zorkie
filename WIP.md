@@ -1,11 +1,27 @@
 # Work In Progress Notes
 
 ## Current Status (2025-12-25)
-- **Tests:** 363 passed, 121 failed, 142 skipped
+- **Tests:** 367 passed, 117 failed, 142 skipped
 - **Started session at:** 360 passed, 124 failed
-- **Fixed this session:** +3 passing, -3 failing
+- **Fixed this session:** +7 passing, -7 failing
 
 ## Recent Changes (This Session)
+- Added ZIL0404 error for too many attributes
+  - V3 max 32, V4+ max 48 attributes
+  - Check in _build_symbol_tables
+- Added ZIL0404 error for too many properties
+  - Checks at propdef and object property assignment
+  - Properties can't overlap with direction properties
+- Added ZIL0212 warning for unused properties
+  - Tracks defined properties (P?* constants)
+  - Tracks property usage in GETP, PUTP, GETPT
+  - Warns for properties never accessed in code
+- Added MDL0428 warning for LEXV table size not multiple of 3
+- Added MDL0430 warning for ITABLE size overflow
+  - Warns when BYTE table size > 255
+  - Warns when WORD table size > 65535
+  - Parser now recognizes bare BYTE/WORD/PURE/LENGTH flags in ITABLE
+- Extended eval_constant to handle TableNode values (CONSTANT with ITABLE/TABLE)
 - Added MDL0417 warning for too many optional arguments
   - Tracks optional params separately in RoutineNode.opt_params
   - Warns when total params + opt_params exceeds CALL limit (3 in V3, 7 in V4+)
