@@ -730,6 +730,8 @@ class Parser:
         - <LIST property value...>  - ZILF shorthand
         """
         properties = {}
+        # Track property aliases (IN and LOC are the same, etc.)
+        location_props = {'IN', 'LOC'}
 
         while self.current_token.type in (TokenType.LPAREN, TokenType.LANGLE, TokenType.QUOTE):
             # Handle quoted properties: '(PROP value)
@@ -767,6 +769,14 @@ class Parser:
 
                     self.expect(TokenType.RANGLE)
 
+                    # Check for duplicate property (but FLAGS can be combined)
+                    if prop_name in properties and prop_name != 'FLAGS':
+                        self.error(f"Duplicate property '{prop_name}' in object definition")
+                    # Check for location property conflicts (IN and LOC are the same)
+                    if prop_name in location_props:
+                        for loc_prop in location_props:
+                            if loc_prop in properties and loc_prop != prop_name:
+                                self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
                     # Store property
                     if len(values) == 1:
                         properties[prop_name] = values[0]
@@ -809,6 +819,14 @@ class Parser:
 
                 self.expect(TokenType.RPAREN)
 
+                # Check for duplicate property (but FLAGS can be combined)
+                if prop_name in properties and prop_name != 'FLAGS':
+                    self.error(f"Duplicate property '{prop_name}' in object definition")
+                # Check for location property conflicts (IN and LOC are the same)
+                if prop_name in location_props:
+                    for loc_prop in location_props:
+                        if loc_prop in properties and loc_prop != prop_name:
+                            self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
                 # Store property
                 if len(values) == 1:
                     properties[prop_name] = values[0]

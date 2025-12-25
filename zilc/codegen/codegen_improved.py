@@ -506,8 +506,18 @@ class ImprovedCodeGenerator:
                     table_data.extend(struct.pack('>H', 0))
         else:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
-            table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
-                                                         is_string=is_string))
+            encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
+                                                     is_string=is_string)
+            # For TABLE with LENGTH flag, add a byte length prefix
+            if is_length and table_type == 'TABLE':
+                data_len = len(encoded_data)
+                if data_len > 255:
+                    self.compiler.warn(
+                        "MDL0430",
+                        f"TABLE size {data_len} overflows byte length prefix (max 255)"
+                    )
+                table_data.append(min(data_len, 255))
+            table_data.extend(encoded_data)
 
         # Store the table
         table_idx = len(self.tables)
@@ -665,8 +675,18 @@ class ImprovedCodeGenerator:
                     table_data.extend(struct.pack('>H', 0))
         else:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
-            table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
-                                                         is_string=is_string))
+            encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
+                                                     is_string=is_string)
+            # For TABLE with LENGTH flag, add a byte length prefix
+            if is_length and table_type == 'TABLE':
+                data_len = len(encoded_data)
+                if data_len > 255:
+                    self.compiler.warn(
+                        "MDL0430",
+                        f"TABLE size {data_len} overflows byte length prefix (max 255)"
+                    )
+                table_data.append(min(data_len, 255))
+            table_data.extend(encoded_data)
 
         # Legacy padding for ITABLE - shouldn't be needed with new logic
         if False and initial_size and table_type == 'ITABLE':
@@ -1647,6 +1667,12 @@ class ImprovedCodeGenerator:
         elif op_name == 'COND':
             if form.operands and isinstance(form.operands[0], CondNode):
                 return self.generate_cond(form.operands[0])
+            else:
+                # COND requires parenthesized clauses, not bare forms
+                raise ValueError(
+                    "ZIL0100: COND requires parenthesized clauses (condition actions...), "
+                    "not bare forms"
+                )
 
         # Memory operations
         elif op_name == 'LOADW':
@@ -1943,6 +1969,11 @@ class ImprovedCodeGenerator:
         Returns:
             int: Table index (placeholder for later address resolution)
         """
+        # Check for local variable references - tables must have compile-time constant values
+        for val in node.values:
+            if self._contains_local_var(val):
+                raise ValueError(f"Table cannot reference local variables - values must be compile-time constants")
+
         table_data = bytearray()
         table_type = node.table_type
         is_pure = 'PURE' in node.flags
@@ -15784,6 +15815,22 @@ class ImprovedCodeGenerator:
 
     # ===== Table Literal Operations =====
 
+    def _contains_local_var(self, node: ASTNode) -> bool:
+        """Check if a node contains any LocalVarNode (local variable reference)."""
+        if isinstance(node, LocalVarNode):
+            return True
+        if isinstance(node, FormNode):
+            for op in node.operands:
+                if self._contains_local_var(op):
+                    return True
+            if self._contains_local_var(node.operator):
+                return True
+        if isinstance(node, list):
+            for item in node:
+                if self._contains_local_var(item):
+                    return True
+        return False
+
     def gen_table(self, operands: List[ASTNode], table_type: str = 'TABLE') -> bytes:
         """Generate TABLE/LTABLE/ITABLE/PTABLE.
 
@@ -15803,6 +15850,11 @@ class ImprovedCodeGenerator:
         Returns:
             bytes: Code to load the table address
         """
+        # Check for local variable references - tables must have compile-time constant values
+        for op in operands:
+            if self._contains_local_var(op):
+                raise ValueError(f"Table cannot reference local variables - values must be compile-time constants")
+
         table_data = bytearray()
         is_pure = table_type == 'PTABLE'
         is_byte = False

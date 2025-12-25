@@ -1,11 +1,21 @@
 # Work In Progress Notes
 
 ## Current Status (2025-12-25)
-- **Tests:** 367 passed, 117 failed, 142 skipped
+- **Tests:** 371 passed, 113 failed, 142 skipped
 - **Started session at:** 360 passed, 124 failed
-- **Fixed this session:** +7 passing, -7 failing
+- **Fixed this session:** +11 passing, -11 failing
 
 ## Recent Changes (This Session)
+- Added DESC property newline stripping
+  - Newlines in DESC property values are replaced with spaces
+- Added duplicate property detection
+  - Properties cannot be defined twice on same object (except FLAGS)
+  - IN and LOC are treated as duplicates (both set parent location)
+- Added local variable validation for tables
+  - Tables cannot reference local variables (.X)
+  - Added _contains_local_var helper for recursive checks
+- Added MDL0430 warning for TABLE with LENGTH prefix overflow
+  - Warns when STRING table length > 255 bytes
 - Added ZIL0404 error for too many attributes
   - V3 max 32, V4+ max 48 attributes
   - Check in _build_symbol_tables

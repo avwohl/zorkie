@@ -5,6 +5,7 @@ Builds the object table with property defaults, object tree, and property tables
 """
 
 from typing import List, Dict, Any, Tuple
+import re
 import struct
 
 
@@ -127,6 +128,9 @@ class ObjectTable:
             obj_desc = obj_desc.value
         if not isinstance(obj_desc, str):
             obj_desc = ''
+        else:
+            # Strip newlines from DESC - replace with spaces per ZILF behavior
+            obj_desc = re.sub(r'\r?\n|\r', ' ', obj_desc)
 
         if self.text_encoder:
             # Encode the description
