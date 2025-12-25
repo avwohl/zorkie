@@ -449,21 +449,28 @@ class ImprovedCodeGenerator:
         if table_type == 'LTABLE':
             table_data.extend(struct.pack('>H', len(values)))
 
-        # Handle ITABLE size
+        # Handle ITABLE with repeat count
         initial_size = table_node.size
 
-        # Encode table values using helper that handles #BYTE/#WORD prefixes
-        table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
-                                                     is_string=is_string))
-
-        # Pad ITABLE to initial size
-        if initial_size and table_type == 'ITABLE':
+        if initial_size and table_type == 'ITABLE' and values:
+            # ITABLE with size and values: repeat pattern 'size' times
+            # <ITABLE 2 1 2 3> = [1, 2, 3, 1, 2, 3] (pattern repeated 2x)
+            pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
+                                                      is_string=is_string)
+            for _ in range(initial_size):
+                table_data.extend(pattern_data)
+        elif initial_size and table_type == 'ITABLE':
+            # ITABLE with just size: create zero-filled table
             entry_size = 1 if is_byte else 2
-            while len(table_data) < initial_size * entry_size:
+            for _ in range(initial_size):
                 if is_byte:
                     table_data.append(0)
                 else:
                     table_data.extend(struct.pack('>H', 0))
+        else:
+            # Encode table values using helper that handles #BYTE/#WORD prefixes
+            table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
+                                                         is_string=is_string))
 
         # Store the table
         table_idx = len(self.tables)
@@ -582,12 +589,29 @@ class ImprovedCodeGenerator:
             self.global_values[global_name] = 0xFF00 | table_idx
             return
 
-        # Encode table values using helper that handles #BYTE/#WORD prefixes
-        table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
-                                                     is_string=is_string))
+        # Handle ITABLE with repeat count
+        if initial_size and table_type == 'ITABLE' and values:
+            # ITABLE with size and values: repeat pattern 'size' times
+            # <ITABLE 2 1 2 3> = [1, 2, 3, 1, 2, 3] (pattern repeated 2x)
+            pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
+                                                      is_string=is_string)
+            for _ in range(initial_size):
+                table_data.extend(pattern_data)
+        elif initial_size and table_type == 'ITABLE':
+            # ITABLE with just size: create zero-filled table
+            entry_size = 1 if is_byte else 2
+            for _ in range(initial_size):
+                if is_byte:
+                    table_data.append(0)
+                else:
+                    table_data.extend(struct.pack('>H', 0))
+        else:
+            # Encode table values using helper that handles #BYTE/#WORD prefixes
+            table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
+                                                         is_string=is_string))
 
-        # Pad ITABLE to initial size
-        if initial_size and table_type == 'ITABLE':
+        # Legacy padding for ITABLE - shouldn't be needed with new logic
+        if False and initial_size and table_type == 'ITABLE':
             entry_size = 1 if is_byte else 2
             while len(table_data) < initial_size * entry_size:
                 if is_byte:
@@ -1848,18 +1872,25 @@ class ImprovedCodeGenerator:
         if table_type == 'LTABLE':
             table_data.extend(struct.pack('>H', len(node.values)))
 
-        # Encode values using helper that handles #BYTE/#WORD prefixes
-        table_data.extend(self._encode_table_values(node.values, default_is_byte=is_byte,
-                                                     is_string=is_string))
-
-        # For ITABLE, pad to size if specified
-        if table_type == 'ITABLE' and node.size:
+        # Handle ITABLE with repeat count
+        if node.size and table_type == 'ITABLE' and node.values:
+            # ITABLE with size and values: repeat pattern 'size' times
+            pattern_data = self._encode_table_values(node.values, default_is_byte=is_byte,
+                                                      is_string=is_string)
+            for _ in range(node.size):
+                table_data.extend(pattern_data)
+        elif node.size and table_type == 'ITABLE':
+            # ITABLE with just size: create zero-filled table
             entry_size = 1 if is_byte else 2
-            while len(table_data) < node.size * entry_size:
+            for _ in range(node.size):
                 if is_byte:
                     table_data.append(0)
                 else:
                     table_data.extend(struct.pack('>H', 0))
+        else:
+            # Encode values using helper that handles #BYTE/#WORD prefixes
+            table_data.extend(self._encode_table_values(node.values, default_is_byte=is_byte,
+                                                         is_string=is_string))
 
         # Store table and track offset
         table_id = f"_TABLE_{self.table_counter}"
@@ -15646,23 +15677,30 @@ class ImprovedCodeGenerator:
             # LTABLE has a length prefix
             table_data.extend(struct.pack('>H', len(values)))
 
-        # For ITABLE, first value might be the size
+        # For ITABLE, first value might be the size (repeat count)
         if table_type == 'ITABLE' and values and isinstance(values[0], NumberNode):
             initial_size = values[0].value
             values = values[1:]  # Rest are initial values
 
-        # Encode table values using helper that handles #BYTE/#WORD prefixes
-        table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
-                                                     is_string=is_string))
-
-        # For ITABLE, pad to initial size if specified
-        if initial_size and table_type == 'ITABLE':
+        # Handle ITABLE with repeat count
+        if initial_size and table_type == 'ITABLE' and values:
+            # ITABLE with size and values: repeat pattern 'size' times
+            pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
+                                                      is_string=is_string)
+            for _ in range(initial_size):
+                table_data.extend(pattern_data)
+        elif initial_size and table_type == 'ITABLE':
+            # ITABLE with just size: create zero-filled table
             entry_size = 1 if is_byte else 2
-            while len(table_data) < initial_size * entry_size:
+            for _ in range(initial_size):
                 if is_byte:
                     table_data.append(0)
                 else:
                     table_data.extend(struct.pack('>H', 0))
+        else:
+            # Encode table values using helper that handles #BYTE/#WORD prefixes
+            table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
+                                                         is_string=is_string))
 
         # Store the table for later assembly
         table_id = f"_TABLE_{self.table_counter}"

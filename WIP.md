@@ -1,9 +1,9 @@
 # Work In Progress Notes
 
 ## Current Status (2025-12-25)
-- **Tests:** 359 passed, 125 failed, 142 skipped
+- **Tests:** 360 passed, 124 failed, 142 skipped
 - **Started session at:** 355 passed, 129 failed (after prev session)
-- **Fixed this session:** +4 passing, -4 failing
+- **Fixed this session:** +5 passing, -5 failing
 
 ## Recent Changes (This Session)
 - Fixed #BYTE and #WORD element handling in TABLE
@@ -19,6 +19,9 @@
   - Tracks which flags are used in FSET/FCLEAR/FSET? operations
   - Tracks flags used in SYNTAX FIND clauses (via regex scan)
   - Warns at end of compilation for flags never used in code
+- Fixed ITABLE multi-element initializers
+  - `<ITABLE 2 1 2 3>` now correctly creates [1,2,3,1,2,3] (pattern repeated 2x)
+  - Updated _compile_global_table_node, _compile_global_table, _add_table, gen_table
 
 ## Previous Session Changes
 - Added warning infrastructure for unused variable checks (ZIL0210)
