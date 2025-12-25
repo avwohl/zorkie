@@ -1282,7 +1282,25 @@ class ZILCompiler:
 
         return None
 
-    def _build_symbol_tables(self, program) -> dict:
+    def _extract_syntax_find_flags(self, source: str) -> set:
+        """Extract flag names used in SYNTAX FIND clauses.
+
+        Scans source for patterns like (FIND FLAGNAME) in SYNTAX definitions.
+
+        Args:
+            source: Raw source code text
+
+        Returns:
+            Set of flag names used in FIND clauses
+        """
+        import re
+        flags = set()
+        # Match (FIND FLAGNAME) patterns - flag names are all caps
+        for match in re.finditer(r'\(FIND\s+([A-Z][A-Z0-9_-]*)\)', source, re.IGNORECASE):
+            flags.add(match.group(1).upper())
+        return flags
+
+    def _build_symbol_tables(self, program, source: str = "") -> dict:
         """Pre-scan program to build flag and property symbol tables.
 
         This must run before code generation so codegen has access to:
@@ -1421,6 +1439,9 @@ class ZILCompiler:
         for i, dir_name in enumerate(program.directions):
             parser_constants[dir_name] = max_properties - i
 
+        # Extract flags used in SYNTAX FIND clauses
+        syntax_flags = self._extract_syntax_find_flags(source) if source else set()
+
         return {
             'flags': flags,
             'properties': properties,
@@ -1428,6 +1449,7 @@ class ZILCompiler:
             'directions': program.directions,  # List of direction names
             'low_direction': low_direction if program.directions else None,
             'max_properties': max_properties,
+            'syntax_flags': syntax_flags,  # Flags used in SYNTAX FIND clauses
         }
 
     def _build_action_tables(self, program) -> dict:
@@ -1544,7 +1566,7 @@ class ZILCompiler:
             self.log(f"  Target version: {self.version}")
 
         # Build symbol tables (flags, properties, parser constants)
-        symbol_tables = self._build_symbol_tables(program)
+        symbol_tables = self._build_symbol_tables(program, source)
         self.log(f"  Pre-scanned {len(symbol_tables['flags'])} flags, {len(symbol_tables['properties'])} properties")
 
         # Build action tables from SYNTAX definitions
@@ -1655,6 +1677,11 @@ class ZILCompiler:
         codegen_warnings = codegen.get_warnings()
         if codegen_warnings:
             self.log(f"  {len(codegen_warnings)} code generation warnings (see stderr)")
+
+        # Check for unused flags (ZIL0211 warning)
+        unused_flags = codegen.defined_flags - codegen.used_flags
+        for flag_name in sorted(unused_flags):
+            self.warn("ZIL0211", f"flag '{flag_name}' is never used in code")
 
         # Get table data and offsets
         table_data = codegen.get_table_data() if codegen.tables else b''

@@ -189,18 +189,18 @@ class ObjectTable:
         """Encode a property value to bytes.
 
         Property values can be:
-        - Integers <= 255: stored as 1 byte (for GETB compatibility)
-        - Integers > 255: stored as 2 bytes
+        - Single integers: stored as 2 bytes (words) for GET compatibility
         - Strings (encoded and stored)
         - Lists of integers
+
+        Note: In ZIL, property values default to words (2 bytes). This allows:
+        - GET <GETPT obj prop> to read the full value
+        - GETP to work correctly for 1 or 2 byte values
         """
         if isinstance(value, int):
-            # For values that fit in a byte, store as 1 byte (GETB compatible)
-            # For larger values, store as 2 bytes (GET compatible)
-            if value <= 255 and value >= 0:
-                return struct.pack('B', value & 0xFF)
-            else:
-                return struct.pack('>H', value & 0xFFFF)
+            # Always store single integers as 2-byte words (GET compatible)
+            # This matches ZIL/ZILF behavior where default property values are words
+            return struct.pack('>H', value & 0xFFFF)
         elif isinstance(value, str):
             # String - encode and store
             if self.text_encoder:

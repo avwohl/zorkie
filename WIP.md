@@ -1,11 +1,26 @@
 # Work In Progress Notes
 
-## Current Status (2025-12-24)
-- **Tests:** 355 passed, 129 failed, 142 skipped
-- **Started session at:** 349 passed, 135 failed
-- **Fixed this session:** +6 passing, -6 failing
+## Current Status (2025-12-25)
+- **Tests:** 359 passed, 125 failed, 142 skipped
+- **Started session at:** 355 passed, 129 failed (after prev session)
+- **Fixed this session:** +4 passing, -4 failing
 
 ## Recent Changes (This Session)
+- Fixed #BYTE and #WORD element handling in TABLE
+  - Added `_encode_table_values()` helper with proper prefix parsing
+  - Added `_get_table_value_int()` to handle lists (parenthesized values like `(12345)`)
+  - Tables now correctly encode byte/word prefixed values: `<TABLE 1 #BYTE 2 #WORD 3>`
+- Fixed property value encoding for GETPT/PUTP/PTSIZE
+  - Single integer property values now stored as 2-byte words (was incorrectly using 1 byte)
+  - This allows `<GET <GETPT obj prop> 0>` to read the full property value
+  - PTSIZE now correctly returns 2 for word properties
+- Added ZIL0211 warning for unused flags
+  - Tracks which flags are defined in object FLAGS properties
+  - Tracks which flags are used in FSET/FCLEAR/FSET? operations
+  - Tracks flags used in SYNTAX FIND clauses (via regex scan)
+  - Warns at end of compilation for flags never used in code
+
+## Previous Session Changes
 - Added warning infrastructure for unused variable checks (ZIL0210)
   - Compiler now tracks local variable usage
   - Warns for unused routine-level locals, PROG/BIND/REPEAT bindings
@@ -15,7 +30,6 @@
 - Added DirectionsNode to AST and parser for `<DIRECTIONS>` declarations
 - Fixed branch offset calculations using Z-machine formula: Target = PC_after_branch + Offset - 2
 - Fixed TELL D with complex expressions (FormNode operands now evaluated before printing)
-- Fixed property value encoding: values <= 255 stored as 1 byte (GETB compatible)
 - Added _extract_direction_exit helper for parsing `(NORTH TO ROOM)` format
 
 ## Previous Changes
@@ -62,8 +76,8 @@
 - SPLICE in void context
 - DEFINE-GLOBALS
 
-### Tables (~16 failing)
-- #BYTE element handling in TABLE
+### Tables (~14 failing)
+- ~~#BYTE element handling in TABLE~~ FIXED
 - ITABLE multi-element initializers
 - Compile-time table manipulation (ZPUT, ZREST)
 
@@ -81,19 +95,20 @@
 
 ## What's Left
 
-### By Category
-- objects: 27 failing
-- tell: 24 failing
-- vocab: 18 failing
-- tables: 16 failing
-- meta: 11 failing
-- flow_control: 10 failing
-- macros: 8 failing
-- syntax: 7 failing
-- variables: 6 failing (ZIL0210 fixed)
+### By Category (approximate)
+- objects: ~25 failing (property fixes helped)
+- tell: ~24 failing
+- vocab: ~18 failing
+- tables: ~14 failing (#BYTE fixed)
+- meta: ~11 failing
+- flow_control: ~10 failing
+- macros: ~8 failing
+- syntax: ~7 failing
+- variables: ~5 failing (ZIL0210/ZIL0211 fixed)
 
 ### Priority Items
 1. ~~Add warning infrastructure for unused variable checks~~ DONE (ZIL0210 works)
-2. Fix #BYTE element handling in tables
+2. ~~Fix #BYTE element handling in tables~~ DONE
 3. Fix DO-FUNNY-RETURN feature
-4. Add ZIL0211 warning for unused flags
+4. ~~Add ZIL0211 warning for unused flags~~ DONE
+5. ~~Fix property value encoding (GETPT/PUTP/PTSIZE)~~ DONE

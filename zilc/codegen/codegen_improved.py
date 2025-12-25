@@ -38,10 +38,17 @@ class ImprovedCodeGenerator:
         self.interrupts: Dict[str, int] = {}  # Interrupt name -> structure address
 
         # Add pre-scanned symbols (flags, properties, parser constants)
+        # Track defined flags for ZIL0211 warning
+        self.defined_flags: set = set()
+        self.used_flags: set = set()  # Flags that are actually used in code
+
         if symbol_tables:
             # Add flag constants (TOUCHBIT, FIGHTBIT, etc.)
             for flag_name, bit_num in symbol_tables.get('flags', {}).items():
                 self.constants[flag_name] = bit_num
+                self.defined_flags.add(flag_name)  # Track as defined
+            # Flags used in SYNTAX FIND clauses count as used
+            self.used_flags.update(symbol_tables.get('syntax_flags', set()))
             # Add property constants (P?LDESC, P?STRENGTH, etc.)
             for prop_name, prop_num in symbol_tables.get('properties', {}).items():
                 self.constants[prop_name] = prop_num
@@ -445,37 +452,9 @@ class ImprovedCodeGenerator:
         # Handle ITABLE size
         initial_size = table_node.size
 
-        # Encode table values
-        for val in values:
-            # Handle STRING mode - strings become raw character bytes
-            if is_string and isinstance(val, StringNode):
-                for char in val.value:
-                    table_data.append(ord(char) & 0xFF)
-                continue
-
-            val_int = self.get_operand_value(val)
-            if val_int is None:
-                if isinstance(val, AtomNode):
-                    name = val.value
-                    if name in self.objects:
-                        val_int = self.objects[name]
-                    elif name in self.routines:
-                        val_int = self.routines[name]
-                    elif name in self.globals:
-                        val_int = self.globals[name]
-                    elif name in self.constants:
-                        val_int = self.constants[name]
-                    else:
-                        val_int = 0
-                elif isinstance(val, StringNode):
-                    val_int = 0
-                else:
-                    val_int = 0
-
-            if is_byte:
-                table_data.append(val_int & 0xFF)
-            else:
-                table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+        # Encode table values using helper that handles #BYTE/#WORD prefixes
+        table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
+                                                     is_string=is_string))
 
         # Pad ITABLE to initial size
         if initial_size and table_type == 'ITABLE':
@@ -603,37 +582,9 @@ class ImprovedCodeGenerator:
             self.global_values[global_name] = 0xFF00 | table_idx
             return
 
-        # Encode table values
-        for val in values:
-            # Handle STRING mode - strings become raw character bytes
-            if is_string and isinstance(val, StringNode):
-                for char in val.value:
-                    table_data.append(ord(char) & 0xFF)
-                continue
-
-            val_int = self.get_operand_value(val)
-            if val_int is None:
-                if isinstance(val, AtomNode):
-                    name = val.value
-                    if name in self.objects:
-                        val_int = self.objects[name]
-                    elif name in self.routines:
-                        val_int = self.routines[name]
-                    elif name in self.globals:
-                        val_int = self.globals[name]
-                    elif name in self.constants:
-                        val_int = self.constants[name]
-                    else:
-                        val_int = 0
-                elif isinstance(val, StringNode):
-                    val_int = 0
-                else:
-                    val_int = 0
-
-            if is_byte:
-                table_data.append(val_int & 0xFF)
-            else:
-                table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+        # Encode table values using helper that handles #BYTE/#WORD prefixes
+        table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
+                                                     is_string=is_string))
 
         # Pad ITABLE to initial size
         if initial_size and table_type == 'ITABLE':
@@ -1769,6 +1720,113 @@ class ImprovedCodeGenerator:
 
     # ===== Table Node Helpers =====
 
+    def _encode_table_values(self, values: List[ASTNode], default_is_byte: bool = False,
+                              is_string: bool = False) -> bytearray:
+        """Encode table values to bytes, handling #BYTE and #WORD prefixes.
+
+        In ZIL/MDL, #BYTE value stores value as a single byte,
+        and #WORD value stores value as a 2-byte word.
+
+        Args:
+            values: List of AST nodes to encode
+            default_is_byte: If True, values without prefix are stored as bytes
+            is_string: If True, strings are encoded as raw character bytes
+
+        Returns:
+            bytearray: Encoded table data
+        """
+        table_data = bytearray()
+        i = 0
+        while i < len(values):
+            val = values[i]
+
+            # Check for #BYTE prefix atom
+            if isinstance(val, AtomNode) and val.value.upper() == '#BYTE':
+                # Next value should be stored as a byte
+                i += 1
+                if i < len(values):
+                    next_val = values[i]
+                    val_int = self._get_table_value_int(next_val)
+                    table_data.append(val_int & 0xFF)
+                i += 1
+                continue
+
+            # Check for #WORD prefix atom
+            if isinstance(val, AtomNode) and val.value.upper() == '#WORD':
+                # Next value should be stored as a word
+                i += 1
+                if i < len(values):
+                    next_val = values[i]
+                    val_int = self._get_table_value_int(next_val)
+                    table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+                i += 1
+                continue
+
+            # Handle STRING mode - strings become raw character bytes
+            if is_string and isinstance(val, StringNode):
+                for char in val.value:
+                    table_data.append(ord(char) & 0xFF)
+                i += 1
+                continue
+
+            # Regular value
+            val_int = self._get_table_value_int(val)
+            if default_is_byte:
+                table_data.append(val_int & 0xFF)
+            else:
+                table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+            i += 1
+
+        return table_data
+
+    def _unwrap_list_value(self, val) -> ASTNode:
+        """Unwrap a list containing a single value, e.g., (12345) -> NumberNode(12345)."""
+        if isinstance(val, list) and len(val) == 1:
+            return val[0]
+        return val
+
+    def _get_table_value_int(self, val) -> int:
+        """Get integer value from a table element AST node.
+
+        Handles NumberNode, AtomNode (for object/routine/global references),
+        StringNode (returns 0 placeholder), FormNode with parenthesized values,
+        and lists (for parenthesized values like (12345)).
+        """
+        # Handle list (parenthesized value like (12345) becomes [NumberNode(12345)])
+        if isinstance(val, list):
+            if len(val) == 1:
+                return self._get_table_value_int(val[0])
+            return 0
+
+        # Handle parenthesized value like (12345) as FormNode
+        if isinstance(val, FormNode):
+            # Check if it's just a parenthesized number
+            if not val.operands and isinstance(val.operator, NumberNode):
+                return val.operator.value
+            # Otherwise try to get operand value
+            return self.get_operand_value(val) or 0
+
+        val_int = self.get_operand_value(val)
+        if val_int is not None:
+            return val_int
+
+        if isinstance(val, AtomNode):
+            name = val.value
+            if name in self.objects:
+                return self.objects[name]
+            elif name in self.routines:
+                return self.routines[name]
+            elif name in self.globals:
+                return self.globals[name]
+            elif name in self.constants:
+                return self.constants[name]
+            else:
+                return 0
+        elif isinstance(val, StringNode):
+            return 0  # Placeholder for string
+        else:
+            return 0
+
     def _add_table(self, node: TableNode) -> int:
         """Add a table from a TableNode and return its index.
 
@@ -1790,37 +1848,9 @@ class ImprovedCodeGenerator:
         if table_type == 'LTABLE':
             table_data.extend(struct.pack('>H', len(node.values)))
 
-        # Encode values
-        for val in node.values:
-            # Handle STRING mode - strings become raw character bytes
-            if is_string and isinstance(val, StringNode):
-                for char in val.value:
-                    table_data.append(ord(char) & 0xFF)
-                continue
-
-            val_int = self.get_operand_value(val)
-            if val_int is None:
-                if isinstance(val, AtomNode):
-                    name = val.value
-                    if name in self.objects:
-                        val_int = self.objects[name]
-                    elif name in self.routines:
-                        val_int = self.routines[name]
-                    elif name in self.globals:
-                        val_int = self.globals[name]
-                    elif name in self.constants:
-                        val_int = self.constants[name]
-                    else:
-                        val_int = 0
-                elif isinstance(val, StringNode):
-                    val_int = 0  # Placeholder for string
-                else:
-                    val_int = 0
-
-            if is_byte:
-                table_data.append(val_int & 0xFF)
-            else:
-                table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+        # Encode values using helper that handles #BYTE/#WORD prefixes
+        table_data.extend(self._encode_table_values(node.values, default_is_byte=is_byte,
+                                                     is_string=is_string))
 
         # For ITABLE, pad to size if specified
         if table_type == 'ITABLE' and node.size:
@@ -11422,6 +11452,22 @@ class ImprovedCodeGenerator:
 
     # ===== Object Operations =====
 
+    def _track_flag_usage(self, operand: ASTNode) -> None:
+        """Track usage of a flag constant for ZIL0211 warnings.
+
+        Flags can be referenced as:
+        - Bare atoms: MYBIT
+        - Global variable references: ,MYBIT
+        """
+        flag_name = None
+        if isinstance(operand, AtomNode):
+            flag_name = operand.value
+        elif isinstance(operand, GlobalVarNode):
+            flag_name = operand.name
+
+        if flag_name and flag_name in self.defined_flags:
+            self.used_flags.add(flag_name)
+
     def gen_fset(self, operands: List[ASTNode]) -> bytes:
         """Generate SET_ATTR (set object attribute).
 
@@ -11429,6 +11475,9 @@ class ImprovedCodeGenerator:
         """
         if len(operands) != 2:
             raise ValueError("FSET requires exactly 2 operands")
+
+        # Track flag usage for ZIL0211 warning
+        self._track_flag_usage(operands[1])
 
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
@@ -11469,6 +11518,9 @@ class ImprovedCodeGenerator:
         if len(operands) != 2:
             raise ValueError("FCLEAR requires exactly 2 operands")
 
+        # Track flag usage for ZIL0211 warning
+        self._track_flag_usage(operands[1])
+
         code = bytearray()
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
@@ -11507,6 +11559,9 @@ class ImprovedCodeGenerator:
         """
         if len(operands) != 2:
             raise ValueError("FSET? requires exactly 2 operands")
+
+        # Track flag usage for ZIL0211 warning
+        self._track_flag_usage(operands[1])
 
         code = bytearray()
 
@@ -15596,41 +15651,9 @@ class ImprovedCodeGenerator:
             initial_size = values[0].value
             values = values[1:]  # Rest are initial values
 
-        # Encode table values
-        for val in values:
-            # Handle STRING mode - strings become raw character bytes
-            if is_string and isinstance(val, StringNode):
-                # Encode string as raw ZSCII characters (one byte per char)
-                for char in val.value:
-                    table_data.append(ord(char) & 0xFF)
-                continue
-
-            val_int = self.get_operand_value(val)
-            if val_int is None:
-                # Try to resolve as object/routine/global reference
-                if isinstance(val, AtomNode):
-                    name = val.value
-                    if name in self.objects:
-                        val_int = self.objects[name]
-                    elif name in self.routines:
-                        val_int = self.routines[name]
-                    elif name in self.globals:
-                        val_int = self.globals[name]
-                    elif name in self.constants:
-                        val_int = self.constants[name]
-                    else:
-                        val_int = 0  # Unknown reference
-                elif isinstance(val, StringNode):
-                    # Encode string and store as packed address
-                    # For now, just use 0 as placeholder
-                    val_int = 0
-                else:
-                    val_int = 0
-
-            if is_byte:
-                table_data.append(val_int & 0xFF)
-            else:
-                table_data.extend(struct.pack('>H', val_int & 0xFFFF))
+        # Encode table values using helper that handles #BYTE/#WORD prefixes
+        table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
+                                                     is_string=is_string))
 
         # For ITABLE, pad to initial size if specified
         if initial_size and table_type == 'ITABLE':
