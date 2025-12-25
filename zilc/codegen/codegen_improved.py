@@ -2513,8 +2513,13 @@ class ImprovedCodeGenerator:
                     i += 1
 
                 else:
-                    # Unknown atom - skip
-                    i += 1
+                    # Unknown atom - error
+                    # Bare atom references in TELL are not allowed
+                    # Use ,ATOM for global references or just "string" for literals
+                    raise ValueError(
+                        f"Unknown token '{op.value}' in TELL. Use ,{op.value} for global "
+                        f"references or a quoted string for literals."
+                    )
 
             elif isinstance(op, FormNode):
                 # Form (likely GVAL or similar) - generate and print result
