@@ -770,10 +770,14 @@ class Parser:
                     self.expect(TokenType.RANGLE)
 
                     # Check for duplicate property (but FLAGS can be combined)
-                    if prop_name in properties and prop_name != 'FLAGS':
+                    # Also, IN can appear twice: (IN OBJECT) for location, (IN "string") for NEXIT
+                    is_nexit_string = (prop_name in location_props and len(values) == 1 and
+                                       isinstance(values[0], StringNode))
+                    if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string:
                         self.error(f"Duplicate property '{prop_name}' in object definition")
                     # Check for location property conflicts (IN and LOC are the same)
-                    if prop_name in location_props:
+                    # Only check when the value is not a NEXIT string
+                    if prop_name in location_props and not is_nexit_string:
                         for loc_prop in location_props:
                             if loc_prop in properties and loc_prop != prop_name:
                                 self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
@@ -820,10 +824,14 @@ class Parser:
                 self.expect(TokenType.RPAREN)
 
                 # Check for duplicate property (but FLAGS can be combined)
-                if prop_name in properties and prop_name != 'FLAGS':
+                # Also, IN can appear twice: (IN OBJECT) for location, (IN "string") for NEXIT
+                is_nexit_string = (prop_name in location_props and len(values) == 1 and
+                                   isinstance(values[0], StringNode))
+                if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string:
                     self.error(f"Duplicate property '{prop_name}' in object definition")
                 # Check for location property conflicts (IN and LOC are the same)
-                if prop_name in location_props:
+                # Only check when the value is not a NEXIT string
+                if prop_name in location_props and not is_nexit_string:
                     for loc_prop in location_props:
                         if loc_prop in properties and loc_prop != prop_name:
                             self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
