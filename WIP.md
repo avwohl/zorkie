@@ -1,9 +1,9 @@
 # Work In Progress Notes
 
 ## Current Status (2025-12-25)
-- **Tests:** 362 passed, 122 failed, 142 skipped
+- **Tests:** 363 passed, 121 failed, 142 skipped
 - **Started session at:** 360 passed, 124 failed
-- **Fixed this session:** +2 passing, -2 failing
+- **Fixed this session:** +3 passing, -3 failing
 
 ## Recent Changes (This Session)
 - Added MDL0417 warning for too many optional arguments
@@ -13,6 +13,10 @@
   - gen_routine_call now checks if call has too many arguments for target routine
   - Stores routine param info in _routine_param_info dict during code generation
   - Raises ValueError if call exceeds (num_required + num_optional) args
+- Fixed CONSTANT FALSE call handling
+  - eval_expression now handles FormNode for `<>` returning 0
+  - Calling a constant with value 0 evaluates args for side effects then returns 0
+  - Uses Z-machine CALL 0 behavior which returns FALSE per spec
 
 ## Previous Session Changes
 - Fixed #BYTE and #WORD element handling in TABLE
@@ -107,15 +111,15 @@
 ## What's Left
 
 ### By Category (approximate)
-- objects: ~25 failing (property fixes helped)
+- objects: ~26 failing
 - tell: ~24 failing
 - vocab: ~18 failing
-- tables: ~14 failing (#BYTE fixed)
+- tables: ~13 failing
 - meta: ~11 failing
-- flow_control: ~10 failing
+- flow_control: ~8 failing
 - macros: ~8 failing
 - syntax: ~7 failing
-- variables: ~5 failing (ZIL0210/ZIL0211 fixed)
+- variables: ~6 failing
 
 ### Priority Items
 1. ~~Add warning infrastructure for unused variable checks~~ DONE (ZIL0210 works)
@@ -125,3 +129,4 @@
 5. ~~Fix property value encoding (GETPT/PUTP/PTSIZE)~~ DONE
 6. ~~Add MDL0417 warning for too many optional args~~ DONE
 7. ~~Add call-site argument count validation~~ DONE
+8. ~~Fix CONSTANT FALSE call handling~~ DONE
