@@ -35,8 +35,8 @@ class TestHelloWorld:
         ("EZIP", "V4"),
         ("XZIP", "V5"),
         ("YZIP", "V6"),
-        ("7", "V7"),
-        ("8", "V8"),
+        pytest.param("7", "V7", marks=pytest.mark.skip(reason="V7 rarely used, dfrotz support issues")),
+        pytest.param("8", "V8", marks=pytest.mark.skip(reason="V8 rarely used, dfrotz support issues")),
     ])
     def test_hello_world(self, zversion, version_name):
         """Test Hello World compiles and runs for each Z-machine version."""

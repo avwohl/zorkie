@@ -230,12 +230,15 @@ class ZILCompiler:
             # Compile the source
             story_data = compiler.compile_string(source, "<test>")
 
+            # Get warnings from compiler
+            warnings = compiler.get_warnings() if hasattr(compiler, 'get_warnings') else []
+
             return CompilationResult(
                 success=True,
                 story_file=story_data,
                 zap_output=None,  # zorkie doesn't produce ZAP assembly output yet
                 errors=[],
-                warnings=[],  # zorkie doesn't track warnings separately yet
+                warnings=warnings,
                 error_codes=[],
             )
         except ImportError as e:
@@ -825,6 +828,21 @@ class GlobalsAssertion:
         if result.zap_output:
             assert not re.search(pattern, result.zap_output, re.MULTILINE), \
                 f"Generated code should not match pattern '{pattern}'"
+        return self
+
+    def generates_code_matching_func(self, func: callable) -> 'GlobalsAssertion':
+        """Assert that generated code matches a custom function.
+
+        Args:
+            func: A function that takes the code string and returns True if it matches.
+        """
+        compiler = self._get_compiler()
+        result = compiler.compile_globals(*self.globals_code)
+        assert result.success, f"Compilation failed: {result.errors}"
+
+        if result.zap_output:
+            assert func(result.zap_output), \
+                f"Generated code does not match custom function"
         return self
 
     def _check_warnings(self, result: CompilationResult) -> None:

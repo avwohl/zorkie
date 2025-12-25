@@ -290,8 +290,8 @@ class ZAssembler:
         """
         Resolve dictionary word placeholders in object property tables.
 
-        Scans property tables for values marked with 0x8000 (SYNONYM) or 0xFE00
-        (ADJECTIVE) high bits and replaces them with actual dictionary addresses.
+        Scans property DATA (not names) for values marked with 0x8000 (SYNONYM)
+        or 0xFE00 (ADJECTIVE) high bits and replaces them with dictionary addresses.
 
         Args:
             objects_data: Object table data with property tables
@@ -304,50 +304,81 @@ class ZAssembler:
         result = bytearray(objects_data)
 
         # Property tables start after property defaults and object entries
-        # We need to scan the property tables for placeholder values
-        # Property table format:
-        #   - Text length byte + encoded name
-        #   - Property entries: size byte + data bytes
-        #   - Terminator (0x00)
-
-        # Start scanning after property defaults table
-        i = prop_defaults_size
-
-        # Skip object entries (we don't modify those)
-        # Find where property tables start by reading first object's prop table addr
         if self.version <= 3:
             obj_entry_size = 9
         else:
             obj_entry_size = 14
 
-        if len(result) > prop_defaults_size + obj_entry_size:
-            # Get first property table address
-            prop_addr_offset = prop_defaults_size + obj_entry_size - 2
-            first_prop_offset = struct.unpack('>H', result[prop_addr_offset:prop_addr_offset+2])[0]
-            # Start scanning from first property table
-            i = first_prop_offset
+        if len(result) <= prop_defaults_size + obj_entry_size:
+            return bytes(result)
 
-        # Scan through data looking for placeholder patterns
-        # Placeholders are 2-byte words with high byte 0x80 (SYNONYM) or 0xFE (ADJ)
-        while i < len(result) - 1:
-            word = (result[i] << 8) | result[i + 1]
+        # Get first property table address
+        prop_addr_offset = prop_defaults_size + obj_entry_size - 2
+        first_prop_offset = struct.unpack('>H', result[prop_addr_offset:prop_addr_offset+2])[0]
 
-            # Check for SYNONYM placeholder: 0x8000 | word_offset
-            # word_offset is typically small (< 0x1000)
-            if (word & 0xF000) == 0x8000:
-                word_offset = word & 0x0FFF
-                actual_addr = dict_addr + word_offset
-                result[i] = (actual_addr >> 8) & 0xFF
-                result[i + 1] = actual_addr & 0xFF
-                i += 2
-            # Check for ADJECTIVE placeholder: 0xFE00 | word_offset
-            elif (word & 0xFF00) == 0xFE00:
-                word_offset = word & 0x00FF
-                actual_addr = dict_addr + word_offset
-                result[i] = (actual_addr >> 8) & 0xFF
-                result[i + 1] = actual_addr & 0xFF
-                i += 2
-            else:
+        # Process each property table by properly parsing its structure
+        i = first_prop_offset
+        while i < len(result):
+            if i >= len(result):
+                break
+
+            # Read name length (in words)
+            name_len = result[i]
+            i += 1
+
+            # Skip over the name bytes (name_len * 2 bytes for 16-bit words)
+            i += name_len * 2
+
+            # Now process properties until terminator (0x00)
+            while i < len(result) and result[i] != 0x00:
+                size_byte = result[i]
+                i += 1
+
+                if self.version <= 3:
+                    # V1-3: size byte = 32 * (len - 1) + prop_num
+                    data_len = (size_byte >> 5) + 1
+                else:
+                    # V4+: more complex encoding
+                    if size_byte & 0x80:
+                        # Two size bytes
+                        if i >= len(result):
+                            break
+                        size_byte2 = result[i]
+                        i += 1
+                        data_len = size_byte2 & 0x3F
+                        if data_len == 0:
+                            data_len = 64  # Special case
+                    else:
+                        # Single size byte
+                        data_len = 2 if (size_byte & 0x40) else 1
+
+                # Scan property DATA for placeholders (aligned to 2-byte boundaries)
+                prop_end = i + data_len
+                j = i
+                while j + 1 < prop_end and j + 1 < len(result):
+                    word = (result[j] << 8) | result[j + 1]
+
+                    # Check for SYNONYM placeholder: 0x8000 | word_offset
+                    if (word & 0xF000) == 0x8000:
+                        word_offset = word & 0x0FFF
+                        actual_addr = dict_addr + word_offset
+                        result[j] = (actual_addr >> 8) & 0xFF
+                        result[j + 1] = actual_addr & 0xFF
+                        j += 2
+                    # Check for ADJECTIVE placeholder: 0xFE00 | word_offset
+                    elif (word & 0xFF00) == 0xFE00:
+                        word_offset = word & 0x00FF
+                        actual_addr = dict_addr + word_offset
+                        result[j] = (actual_addr >> 8) & 0xFF
+                        result[j + 1] = actual_addr & 0xFF
+                        j += 2
+                    else:
+                        j += 2  # Move by words in property data
+
+                i = prop_end
+
+            # Skip terminator
+            if i < len(result) and result[i] == 0x00:
                 i += 1
 
         return bytes(result)
@@ -649,6 +680,11 @@ class ZAssembler:
 
             # Set the base address in string table
             string_table.set_base_address(string_table_base)
+
+            # For V6-7, also set the strings_offset for packed address calculation
+            if self.version in (6, 7):
+                strings_offset = self.high_mem_base // 8
+                string_table.set_strings_offset(strings_offset)
 
             # Now resolve string table markers with correct addresses
             # Pass string_placeholders to handle the new 3-byte format

@@ -25,6 +25,7 @@ class StringTable:
         self.addresses: Dict[str, int] = {}  # text -> address in story file
         self.encoded_data = bytearray()  # All encoded strings concatenated
         self.base_address = 0  # Base address where strings start in story file
+        self.strings_offset = 0  # V6-7: offset value (actual offset = strings_offset * 8)
 
     def add_string(self, text: str) -> int:
         """
@@ -81,12 +82,17 @@ class StringTable:
             return None
 
         # Packed address formula depends on version
+        # V1-3: packed = byte_addr / 2
+        # V4-5: packed = byte_addr / 4
+        # V6-7: packed = (byte_addr - 8 * strings_offset) / 4
+        # V8:   packed = byte_addr / 8
         if version <= 3:
             return addr // 2
         elif version <= 5:
             return addr // 4
         elif version <= 7:
-            return addr // 4
+            # V6-7 use strings_offset
+            return (addr - 8 * self.strings_offset) // 4
         else:  # V8
             return addr // 8
 
@@ -110,6 +116,18 @@ class StringTable:
             address: Base address in story file
         """
         self.base_address = address
+
+    def set_strings_offset(self, offset: int):
+        """
+        Set the V6-7 strings offset value.
+
+        For V6-7, packed string addresses use the formula:
+        packed = (byte_addr - 8 * strings_offset) / 4
+
+        Args:
+            offset: The strings offset value (header bytes 0x2A-0x2B)
+        """
+        self.strings_offset = offset
 
     def get_encoded_data(self) -> bytes:
         """
