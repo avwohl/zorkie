@@ -1,11 +1,20 @@
 # Work In Progress Notes
 
 ## Current Status (2025-12-25)
-- **Tests:** 360 passed, 124 failed, 142 skipped
-- **Started session at:** 355 passed, 129 failed (after prev session)
-- **Fixed this session:** +5 passing, -5 failing
+- **Tests:** 362 passed, 122 failed, 142 skipped
+- **Started session at:** 360 passed, 124 failed
+- **Fixed this session:** +2 passing, -2 failing
 
 ## Recent Changes (This Session)
+- Added MDL0417 warning for too many optional arguments
+  - Tracks optional params separately in RoutineNode.opt_params
+  - Warns when total params + opt_params exceeds CALL limit (3 in V3, 7 in V4+)
+- Added call-site argument count validation
+  - gen_routine_call now checks if call has too many arguments for target routine
+  - Stores routine param info in _routine_param_info dict during code generation
+  - Raises ValueError if call exceeds (num_required + num_optional) args
+
+## Previous Session Changes
 - Fixed #BYTE and #WORD element handling in TABLE
   - Added `_encode_table_values()` helper with proper prefix parsing
   - Added `_get_table_value_int()` to handle lists (parenthesized values like `(12345)`)
@@ -23,7 +32,6 @@
   - `<ITABLE 2 1 2 3>` now correctly creates [1,2,3,1,2,3] (pattern repeated 2x)
   - Updated _compile_global_table_node, _compile_global_table, _add_table, gen_table
 
-## Previous Session Changes
 - Added warning infrastructure for unused variable checks (ZIL0210)
   - Compiler now tracks local variable usage
   - Warns for unused routine-level locals, PROG/BIND/REPEAT bindings
@@ -115,3 +123,5 @@
 3. Fix DO-FUNNY-RETURN feature
 4. ~~Add ZIL0211 warning for unused flags~~ DONE
 5. ~~Fix property value encoding (GETPT/PUTP/PTSIZE)~~ DONE
+6. ~~Add MDL0417 warning for too many optional args~~ DONE
+7. ~~Add call-site argument count validation~~ DONE

@@ -630,6 +630,7 @@ class Parser:
         if activation_name:
             aux_vars.append(activation_name)
 
+        opt_params = []  # Track optional params separately for MDL0417 warning
         if self.current_token.type == TokenType.LPAREN:
             self.advance()
             in_aux = False
@@ -644,6 +645,7 @@ class Parser:
                         in_optional = False
                     elif modifier in ("OPTIONAL", "OPT"):
                         in_optional = True
+                        in_aux = False
                     elif modifier == "ARGS":
                         # Variadic arguments - treat like normal params for now
                         pass
@@ -661,9 +663,11 @@ class Parser:
                     # Parse the default value expression
                     default_value = self.parse_expression()
                     self.expect(TokenType.RPAREN)
-                    if in_aux or in_optional:
-                        # Both AUX and OPT params go to aux_vars
+                    if in_aux:
                         aux_vars.append(param_name)
+                    elif in_optional:
+                        opt_params.append(param_name)
+                        aux_vars.append(param_name)  # Also add to aux_vars for local slot
                     else:
                         params.append(param_name)
                     # Store the default value
@@ -672,10 +676,11 @@ class Parser:
 
                 # Handle simple parameter name
                 if self.current_token.type == TokenType.ATOM:
-                    if in_aux or in_optional:
-                        # Both AUX and OPT params go to aux_vars
-                        # (OPT are optional, treated as locals for codegen)
+                    if in_aux:
                         aux_vars.append(self.current_token.value)
+                    elif in_optional:
+                        opt_params.append(self.current_token.value)
+                        aux_vars.append(self.current_token.value)  # Also add to aux_vars for local slot
                     else:
                         params.append(self.current_token.value)
                     self.advance()
@@ -689,7 +694,7 @@ class Parser:
         while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
             body.append(self.parse_expression())
 
-        return RoutineNode(name, params, aux_vars, body, line, col, local_defaults, activation_name)
+        return RoutineNode(name, params, aux_vars, body, line, col, local_defaults, activation_name, opt_params)
 
     def parse_object(self, line: int, col: int) -> ObjectNode:
         """Parse OBJECT definition."""

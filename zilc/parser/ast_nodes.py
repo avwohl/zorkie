@@ -134,11 +134,13 @@ class RoutineNode(ASTNode):
     """ROUTINE definition node."""
     def __init__(self, name: str, params: List[str] = None, aux_vars: List[str] = None,
                  body: List[ASTNode] = None, line: int = 0, column: int = 0,
-                 local_defaults: Dict[str, 'ASTNode'] = None, activation: str = None):
+                 local_defaults: Dict[str, 'ASTNode'] = None, activation: str = None,
+                 opt_params: List[str] = None):
         super().__init__(NodeType.ROUTINE, line, column)
         self.name = name
         self.params = params or []
         self.aux_vars = aux_vars or []
+        self.opt_params = opt_params or []  # Optional parameters (OPT) that caller can provide
         self.body = body or []
         self.declarations = {}
         # Map from variable name to default value expression

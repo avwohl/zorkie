@@ -351,6 +351,13 @@ class ImprovedCodeGenerator:
         # Pre-populate routine names so we can detect user-defined routines
         # during code generation (before their offsets are known)
         self._routine_names = {routine.name for routine in program.routines}
+        # Store routine parameter info for call validation
+        # Maps routine name -> (num_required, num_optional)
+        self._routine_param_info = {}
+        for routine in program.routines:
+            num_required = len(routine.params)
+            num_optional = len(routine.opt_params)
+            self._routine_param_info[routine.name] = (num_required, num_optional)
 
         # Generate routines - GO must be first as it's the entry point
         # First, find the GO routine and put it at the front
@@ -790,6 +797,7 @@ class ImprovedCodeGenerator:
 
         # Validate argument count limits
         num_params = len(routine.params)
+        num_opt_params = len(routine.opt_params)
         if self.version <= 3:
             # V1-3: Maximum 3 required arguments (CALL can only pass 3 args)
             if num_params > 3:
@@ -798,6 +806,13 @@ class ImprovedCodeGenerator:
                     f"but V{self.version} only supports up to 3. "
                     f"Use \"OPT\" or \"AUX\" for additional variables."
                 )
+            # MDL0417: Warn if some optional args can never be passed
+            if num_params + num_opt_params > 3:
+                self.compiler.warn(
+                    "MDL0417",
+                    f"routine {routine.name} has {num_opt_params} optional parameters, "
+                    f"but only {3 - num_params} can ever be passed in V{self.version}"
+                )
         elif self.version <= 7:
             # V4-7: Maximum 7 required arguments
             if num_params > 7:
@@ -805,6 +820,13 @@ class ImprovedCodeGenerator:
                     f"Routine {routine.name} has {num_params} required parameters, "
                     f"but V{self.version} only supports up to 7. "
                     f"Use \"OPT\" or \"AUX\" for additional variables."
+                )
+            # MDL0417: Warn if some optional args can never be passed
+            if num_params + num_opt_params > 7:
+                self.compiler.warn(
+                    "MDL0417",
+                    f"routine {routine.name} has {num_opt_params} optional parameters, "
+                    f"but only {7 - num_params} can ever be passed in V{self.version}"
                 )
 
         # Align routine to proper boundary for packed addresses
@@ -12642,6 +12664,17 @@ class ImprovedCodeGenerator:
 
     def gen_routine_call(self, routine_name: str, operands: List[ASTNode]) -> bytes:
         """Generate routine call (CALL or CALL_VS)."""
+        # Validate argument count if we have info about this routine
+        num_args = len(operands)
+        if hasattr(self, '_routine_param_info') and routine_name in self._routine_param_info:
+            num_required, num_optional = self._routine_param_info[routine_name]
+            max_allowed = num_required + num_optional
+            if num_args > max_allowed:
+                raise ValueError(
+                    f"Call to {routine_name} has {num_args} arguments, "
+                    f"but routine only accepts {max_allowed} ({num_required} required, {num_optional} optional)"
+                )
+
         code = bytearray()
 
         # CALL is VAR opcode 0x00 (V1-4) / CALL_VS (V4+)
