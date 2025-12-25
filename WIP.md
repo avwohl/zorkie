@@ -1,9 +1,9 @@
 # Work In Progress Notes
 
 ## Current Status (2025-12-25)
-- **Tests:** 373 passed, 111 failed, 142 skipped
+- **Tests:** 374 passed, 110 failed, 142 skipped
 - **Started session at:** 360 passed, 124 failed
-- **Fixed this session:** +13 passing, -13 failing
+- **Fixed this session:** +14 passing, -14 failing
 
 ## Recent Changes (This Session)
 - Added DESC property newline stripping
@@ -21,6 +21,12 @@
 - Added COND validation (ZIL0100)
   - COND requires parenthesized clauses, not bare forms
   - `<COND <SET X 1>>` now fails with proper error
+- Added character literal support in TELL
+  - `<TELL !\A !\B !\C>` now prints "ABC"
+  - Properly encoded PRINT_CHAR with correct type byte
+- Added error for bare atoms in TELL
+  - Unknown tokens now fail with helpful message
+  - Suggests using ,ATOM or quoted string
 - Added ZIL0404 error for too many attributes
   - V3 max 32, V4+ max 48 attributes
   - Check in _build_symbol_tables
