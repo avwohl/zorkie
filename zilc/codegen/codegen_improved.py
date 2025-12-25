@@ -1668,11 +1668,21 @@ class ImprovedCodeGenerator:
             if form.operands and isinstance(form.operands[0], CondNode):
                 return self.generate_cond(form.operands[0])
             else:
-                # COND requires parenthesized clauses, not bare forms
-                raise ValueError(
-                    "ZIL0100: COND requires parenthesized clauses (condition actions...), "
-                    "not bare forms"
-                )
+                # COND may have macro-expanded clauses
+                # Convert operands to COND clauses
+                clauses = []
+                for operand in form.operands:
+                    clause = self._extract_cond_clause(operand)
+                    if clause is not None:
+                        clauses.append(clause)
+
+                if clauses:
+                    # Create CondNode and generate
+                    cond_node = CondNode(clauses, form.line, form.column)
+                    return self.generate_cond(cond_node)
+                else:
+                    # All clauses were empty - return empty
+                    return []
 
         # Memory operations
         elif op_name == 'LOADW':
@@ -9724,6 +9734,20 @@ class ImprovedCodeGenerator:
             end_clause = operands[1]
             body_start_idx = 2
 
+        # Check for misplaced END clauses in the body
+        # An END clause appearing after body statements is an error
+        for i in range(body_start_idx, len(operands)):
+            stmt = operands[i]
+            if isinstance(stmt, list):
+                # Check if this list looks like an END clause
+                if (len(stmt) > 0 and
+                        isinstance(stmt[0], AtomNode) and
+                        stmt[0].value.upper() == 'END'):
+                    raise ValueError(
+                        "DO END clause must appear immediately after the loop specification, "
+                        "not after body statements"
+                    )
+
         try:
             # Generate body code
             for i in range(body_start_idx, len(operands)):
@@ -11460,29 +11484,261 @@ class ImprovedCodeGenerator:
     # ===== Logical Operations =====
 
     def gen_and(self, operands: List[ASTNode]) -> bytes:
-        """Generate AND (bitwise).
+        """Generate AND (short-circuit logical AND).
 
-        Handles variadic AND:
-        - 0 operands: returns -1 (0xFFFF, all bits set - identity)
-        - 1 operand: returns that operand
-        - 2 operands: a & b
-        - 3+ operands: a & b & c & ...
+        <AND a b c ...> evaluates expressions left-to-right:
+        - Returns false (0) as soon as any expression is false
+        - Returns the value of the last expression if all are truthy
+        - 0 operands: returns true (non-zero)
+        - 1 operand: returns that operand's value
+
+        This is logical AND with short-circuit evaluation, NOT bitwise AND.
+        For bitwise AND, use BAND/ANDB.
         """
-        # AND is 2OP opcode 0x09
-        # Identity for AND is -1 (all bits set)
-        return self._gen_variadic_arith(0x09, operands, identity=-1)
+        if len(operands) == 0:
+            # No operands - return true (1)
+            return self._gen_push_const(1)
+
+        if len(operands) == 1:
+            # Single operand - just evaluate and return its value
+            return self._gen_push_operand(operands[0])
+
+        code = bytearray()
+        fail_patches = []  # Positions that need to be patched to jump to failure
+
+        # For each operand except the last, evaluate and jump to failure if false
+        for i, operand in enumerate(operands[:-1]):
+            # Generate code to evaluate this operand
+            if isinstance(operand, FormNode):
+                inner_code = self.generate_form(operand)
+                code.extend(inner_code)
+                op_type = 2  # Variable (stack)
+                op_val = 0   # Stack
+            elif isinstance(operand, CondNode):
+                inner_code = self.generate_cond(operand)
+                code.extend(inner_code)
+                op_type = 2
+                op_val = 0
+            else:
+                op_type, op_val = self._get_operand_type_and_value_ext(operand)
+                # Push non-form operands to stack for consistency
+                if op_type == 2:  # Variable
+                    code.append(0xAE)  # LOAD var -> stack
+                    code.append(op_val & 0xFF)
+                    code.append(0x00)  # -> stack
+                elif op_type == 1:  # Small constant
+                    code.append(0x14)  # ADD 0, const -> stack
+                    code.append(0x00)
+                    code.append(op_val & 0xFF)
+                    code.append(0x00)  # -> stack
+                else:  # Large constant
+                    code.append(0xD4)  # VAR ADD
+                    code.append(0x4F)  # small, large, omit, omit
+                    code.append(0x00)
+                    code.append((op_val >> 8) & 0xFF)
+                    code.append(op_val & 0xFF)
+                    code.append(0x00)  # -> stack
+                op_type = 2
+                op_val = 0
+
+            # JZ stack -> fail (if this operand is false, jump to failure)
+            # JZ is 1OP opcode 0x00, with variable operand: 0xA0
+            code.append(0xA0)  # JZ var
+            code.append(0x00)  # Stack (variable 0)
+            # Branch byte: bit 7=polarity (1=branch on true), bit 6=form (1=short offset)
+            # We want branch on true (if zero), long form for 2-byte offset
+            fail_patches.append(len(code))  # Remember position to patch
+            code.append(0x80)  # Branch on true (condition met = is zero), long form
+            code.append(0x00)  # Placeholder for offset low byte
+
+        # Last operand - evaluate and leave on stack (this is the result)
+        last_op = operands[-1]
+        if isinstance(last_op, FormNode):
+            inner_code = self.generate_form(last_op)
+            code.extend(inner_code)
+        elif isinstance(last_op, CondNode):
+            inner_code = self.generate_cond(last_op)
+            code.extend(inner_code)
+        else:
+            op_type, op_val = self._get_operand_type_and_value_ext(last_op)
+            if op_type == 2:  # Variable
+                code.append(0xAE)  # LOAD var -> stack
+                code.append(op_val & 0xFF)
+                code.append(0x00)
+            elif op_type == 1:  # Small constant
+                code.append(0x14)  # ADD 0, const -> stack
+                code.append(0x00)
+                code.append(op_val & 0xFF)
+                code.append(0x00)
+            else:  # Large constant
+                code.append(0xD4)  # VAR ADD
+                code.append(0x4F)
+                code.append(0x00)
+                code.append((op_val >> 8) & 0xFF)
+                code.append(op_val & 0xFF)
+                code.append(0x00)
+
+        # JUMP over failure block
+        success_jump_pos = len(code)
+        code.append(0x8C)  # JUMP with large constant
+        code.append(0x00)  # Placeholder high byte
+        code.append(0x00)  # Placeholder low byte
+
+        # Failure block - push 0
+        fail_target = len(code)
+        code.append(0x14)  # ADD 0, 0 -> stack
+        code.append(0x00)
+        code.append(0x00)
+        code.append(0x00)  # -> stack
+
+        # End of AND - success jumps here
+        end_pos = len(code)
+
+        # Patch the failure jumps
+        for patch_pos in fail_patches:
+            # Branch offset = target - (instruction_after_branch)
+            # For branch, instruction_after_branch = patch_pos + 2
+            offset = fail_target - (patch_pos + 2) + 2
+            if offset < 0 or offset > 0x3FFF:
+                # Shouldn't happen for reasonable code
+                offset = max(0, min(0x3FFF, offset))
+            code[patch_pos] = 0x80 | ((offset >> 8) & 0x3F)  # Long branch, on true
+            code[patch_pos + 1] = offset & 0xFF
+
+        # Patch success jump
+        # JUMP offset: Target = PC_after_JUMP + Offset - 2
+        # PC_after_JUMP = success_jump_pos + 3
+        # end_pos = success_jump_pos + 3 + Offset - 2
+        # Offset = end_pos - success_jump_pos - 1
+        jump_offset = end_pos - success_jump_pos - 1
+        if jump_offset < 0:
+            jump_offset = (1 << 16) + jump_offset
+        code[success_jump_pos + 1] = (jump_offset >> 8) & 0xFF
+        code[success_jump_pos + 2] = jump_offset & 0xFF
+
+        return bytes(code)
 
     def gen_or(self, operands: List[ASTNode]) -> bytes:
-        """Generate OR (bitwise).
+        """Generate OR (short-circuit logical OR).
 
-        Handles variadic OR:
-        - 0 operands: returns 0 (identity)
-        - 1 operand: returns that operand
-        - 2 operands: a | b
-        - 3+ operands: a | b | c | ...
+        <OR a b c ...> evaluates expressions left-to-right:
+        - Returns the first truthy value encountered
+        - Returns false (0) only if all expressions are false
+        - 0 operands: returns false (0)
+        - 1 operand: returns that operand's value
+
+        This is logical OR with short-circuit evaluation, NOT bitwise OR.
+        For bitwise OR, use BOR/ORB.
         """
-        # OR is 2OP opcode 0x08
-        return self._gen_variadic_arith(0x08, operands, identity=0)
+        if len(operands) == 0:
+            # No operands - return false (0)
+            return self._gen_push_const(0)
+
+        if len(operands) == 1:
+            # Single operand - just evaluate and return its value
+            return self._gen_push_operand(operands[0])
+
+        code = bytearray()
+        success_patches = []  # Positions that need to be patched to jump to success
+
+        # For each operand except the last, evaluate and jump to success if truthy
+        for i, operand in enumerate(operands[:-1]):
+            # Generate code to evaluate this operand
+            if isinstance(operand, FormNode):
+                inner_code = self.generate_form(operand)
+                code.extend(inner_code)
+            elif isinstance(operand, CondNode):
+                inner_code = self.generate_cond(operand)
+                code.extend(inner_code)
+            else:
+                op_type, op_val = self._get_operand_type_and_value_ext(operand)
+                if op_type == 2:  # Variable
+                    code.append(0xAE)  # LOAD var -> stack
+                    code.append(op_val & 0xFF)
+                    code.append(0x00)
+                elif op_type == 1:  # Small constant
+                    code.append(0x14)  # ADD 0, const -> stack
+                    code.append(0x00)
+                    code.append(op_val & 0xFF)
+                    code.append(0x00)
+                else:  # Large constant
+                    code.append(0xD4)  # VAR ADD
+                    code.append(0x4F)
+                    code.append(0x00)
+                    code.append((op_val >> 8) & 0xFF)
+                    code.append(op_val & 0xFF)
+                    code.append(0x00)
+
+            # Duplicate the value on stack so we can test it and still have it
+            # LOAD 0 -> stack (copies top of stack)
+            code.append(0xAE)  # LOAD var -> stack
+            code.append(0x00)  # Stack (variable 0 = top of stack)
+            code.append(0x00)  # -> stack
+
+            # JZ stack -> continue (if zero, try next operand)
+            # If NOT zero, we want to jump to success (keep the duplicated value)
+            # JZ branches if value IS zero, so we branch to "next" on zero
+            code.append(0xA0)  # JZ var
+            code.append(0x00)  # Stack
+            # Branch on true (is zero) - short offset to skip the success jump
+            # We need: if zero, skip to next operand; if non-zero, jump to end
+            # So: JZ +3 (skip JUMP), then JUMP to success
+            code.append(0xC3)  # Branch on true (is zero), short form, offset 3
+
+            # If we get here, value was non-zero - jump to success
+            success_patches.append(len(code))
+            code.append(0x8C)  # JUMP
+            code.append(0x00)  # Placeholder high
+            code.append(0x00)  # Placeholder low
+
+            # Pop the duplicated value since we're trying next operand
+            # PULL to scratch or just use ADD to discard
+            # Actually we need to pop - the JZ consumed one, duplicate is still there
+            # Wait, JZ with var 0 pops from stack. So after JZ (branch not taken):
+            # - The original value was popped by LOAD to duplicate
+            # - The duplicate was popped by JZ
+            # - Nothing left on stack for this operand
+            # That's correct - we continue to next operand
+
+        # Last operand - evaluate and leave on stack (this is the result)
+        last_op = operands[-1]
+        if isinstance(last_op, FormNode):
+            inner_code = self.generate_form(last_op)
+            code.extend(inner_code)
+        elif isinstance(last_op, CondNode):
+            inner_code = self.generate_cond(last_op)
+            code.extend(inner_code)
+        else:
+            op_type, op_val = self._get_operand_type_and_value_ext(last_op)
+            if op_type == 2:  # Variable
+                code.append(0xAE)  # LOAD var -> stack
+                code.append(op_val & 0xFF)
+                code.append(0x00)
+            elif op_type == 1:  # Small constant
+                code.append(0x14)  # ADD 0, const -> stack
+                code.append(0x00)
+                code.append(op_val & 0xFF)
+                code.append(0x00)
+            else:  # Large constant
+                code.append(0xD4)  # VAR ADD
+                code.append(0x4F)
+                code.append(0x00)
+                code.append((op_val >> 8) & 0xFF)
+                code.append(op_val & 0xFF)
+                code.append(0x00)
+
+        # End of OR - success jumps here (with their truthy value on stack)
+        end_pos = len(code)
+
+        # Patch success jumps
+        for patch_pos in success_patches:
+            jump_offset = end_pos - patch_pos - 1
+            if jump_offset < 0:
+                jump_offset = (1 << 16) + jump_offset
+            code[patch_pos + 1] = (jump_offset >> 8) & 0xFF
+            code[patch_pos + 2] = jump_offset & 0xFF
+
+        return bytes(code)
 
     def gen_not(self, operands: List[ASTNode]) -> bytes:
         """Generate NOT (logical NOT).
@@ -12355,26 +12611,84 @@ class ImprovedCodeGenerator:
             # Handle L? (JL)
             elif op_name in ('L?', '<'):
                 if len(condition.operands) >= 2:
-                    val1 = self.get_operand_value(condition.operands[0])
-                    val2 = self.get_operand_value(condition.operands[1])
+                    op1_type, op1_val = self._get_operand_type_and_value(condition.operands[0])
+                    op2_type, op2_val = self._get_operand_type_and_value(condition.operands[1])
 
-                    if isinstance(val1, int) and isinstance(val2, int):
-                        if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                            code.append(0x42)  # JL opcode
-                            code.append(val1 & 0xFF)
-                            code.append(val2 & 0xFF)
+                    # Build JL instruction based on operand types
+                    if op1_type == 1 and op2_type == 0 and 0 <= op2_val <= 255:
+                        # JL var, small
+                        code.append(0x42)  # JL opcode (var, small)
+                        code.append(op1_val & 0xFF)
+                        code.append(op2_val & 0xFF)
+                    elif op1_type == 0 and op2_type == 1 and 0 <= op1_val <= 255:
+                        # JL small, var
+                        code.append(0x22)  # JL opcode (small, var)
+                        code.append(op1_val & 0xFF)
+                        code.append(op2_val & 0xFF)
+                    elif op1_type == 1 and op2_type == 1:
+                        # JL var, var
+                        code.append(0x62)  # JL opcode (var, var)
+                        code.append(op1_val & 0xFF)
+                        code.append(op2_val & 0xFF)
+                    elif op1_type == 0 and op2_type == 0:
+                        # JL small, small
+                        if 0 <= op1_val <= 255 and 0 <= op2_val <= 255:
+                            code.append(0x02)  # JL opcode (small, small)
+                            code.append(op1_val & 0xFF)
+                            code.append(op2_val & 0xFF)
+                        else:
+                            # Use VAR form for large constants
+                            code.append(0xC2)  # VAR form JL
+                            type_byte = ((0x00 if op1_val > 255 else 0x01) << 6) | \
+                                        ((0x00 if op2_val > 255 else 0x01) << 4) | 0x0F
+                            code.append(type_byte)
+                            if op1_val > 255:
+                                code.append((op1_val >> 8) & 0xFF)
+                            code.append(op1_val & 0xFF)
+                            if op2_val > 255:
+                                code.append((op2_val >> 8) & 0xFF)
+                            code.append(op2_val & 0xFF)
 
             # Handle G? (JG)
             elif op_name in ('G?', '>'):
                 if len(condition.operands) >= 2:
-                    val1 = self.get_operand_value(condition.operands[0])
-                    val2 = self.get_operand_value(condition.operands[1])
+                    op1_type, op1_val = self._get_operand_type_and_value(condition.operands[0])
+                    op2_type, op2_val = self._get_operand_type_and_value(condition.operands[1])
 
-                    if isinstance(val1, int) and isinstance(val2, int):
-                        if 0 <= val1 <= 255 and 0 <= val2 <= 255:
-                            code.append(0x43)  # JG opcode
-                            code.append(val1 & 0xFF)
-                            code.append(val2 & 0xFF)
+                    # Build JG instruction based on operand types
+                    if op1_type == 1 and op2_type == 0 and 0 <= op2_val <= 255:
+                        # JG var, small
+                        code.append(0x43)  # JG opcode (var, small)
+                        code.append(op1_val & 0xFF)
+                        code.append(op2_val & 0xFF)
+                    elif op1_type == 0 and op2_type == 1 and 0 <= op1_val <= 255:
+                        # JG small, var
+                        code.append(0x23)  # JG opcode (small, var)
+                        code.append(op1_val & 0xFF)
+                        code.append(op2_val & 0xFF)
+                    elif op1_type == 1 and op2_type == 1:
+                        # JG var, var
+                        code.append(0x63)  # JG opcode (var, var)
+                        code.append(op1_val & 0xFF)
+                        code.append(op2_val & 0xFF)
+                    elif op1_type == 0 and op2_type == 0:
+                        # JG small, small
+                        if 0 <= op1_val <= 255 and 0 <= op2_val <= 255:
+                            code.append(0x03)  # JG opcode (small, small)
+                            code.append(op1_val & 0xFF)
+                            code.append(op2_val & 0xFF)
+                        else:
+                            # Use VAR form for large constants
+                            code.append(0xC3)  # VAR form JG
+                            type_byte = ((0x00 if op1_val > 255 else 0x01) << 6) | \
+                                        ((0x00 if op2_val > 255 else 0x01) << 4) | 0x0F
+                            code.append(type_byte)
+                            if op1_val > 255:
+                                code.append((op1_val >> 8) & 0xFF)
+                            code.append(op1_val & 0xFF)
+                            if op2_val > 255:
+                                code.append((op2_val >> 8) & 0xFF)
+                            code.append(op2_val & 0xFF)
 
             # Handle 1? (equals 1)
             elif op_name == '1?':
@@ -15471,34 +15785,45 @@ class ImprovedCodeGenerator:
     def gen_band(self, operands: List[ASTNode]) -> bytes:
         """Generate BAND (bitwise AND).
 
-        Performs bitwise AND operation, same as AND but traditionally
-        used for byte-sized operations in ZIL.
+        Performs bitwise AND operation using Z-machine AND opcode (0x09).
+        Unlike logical AND, this performs actual bit-level AND.
+
+        Handles variadic BAND:
+        - 0 operands: returns -1 (0xFFFF, all bits set - identity)
+        - 1 operand: returns that operand
+        - 2 operands: a & b
+        - 3+ operands: a & b & c & ...
 
         Args:
-            operands[0]: first operand
-            operands[1]: second operand
+            operands: Values to AND together
 
         Returns:
             bytes: Z-machine code (AND instruction)
         """
-        # BAND is functionally the same as AND
-        return self.gen_and(operands)
+        # AND is 2OP opcode 0x09
+        # Identity for AND is -1 (all bits set)
+        return self._gen_variadic_arith(0x09, operands, identity=-1)
 
     def gen_bor(self, operands: List[ASTNode]) -> bytes:
         """Generate BOR (bitwise OR).
 
-        Performs bitwise OR operation, same as OR but traditionally
-        used for byte-sized operations in ZIL.
+        Performs bitwise OR operation using Z-machine OR opcode (0x08).
+        Unlike logical OR, this performs actual bit-level OR.
+
+        Handles variadic BOR:
+        - 0 operands: returns 0 (identity)
+        - 1 operand: returns that operand
+        - 2 operands: a | b
+        - 3+ operands: a | b | c | ...
 
         Args:
-            operands[0]: first operand
-            operands[1]: second operand
+            operands: Values to OR together
 
         Returns:
             bytes: Z-machine code (OR instruction)
         """
-        # BOR is functionally the same as OR
-        return self.gen_or(operands)
+        # OR is 2OP opcode 0x08
+        return self._gen_variadic_arith(0x08, operands, identity=0)
 
     def gen_lsh(self, operands: List[ASTNode]) -> bytes:
         """Generate LSH (left shift).
@@ -15831,6 +16156,72 @@ class ImprovedCodeGenerator:
         """
         # DISABLE is functionally the same as DEQUEUE
         return self.gen_dequeue(operands)
+
+    # ===== Helper Methods =====
+
+    def _extract_cond_clause(self, operand) -> tuple:
+        """Extract a COND clause from a macro-expanded operand.
+
+        Returns (condition, actions) tuple or None if operand should be skipped.
+
+        Handles:
+        - FormNode(QUOTE, [clause_list]) - quoted clause from macro
+        - list [condition, action1, ...] - raw list clause
+        - FormNode(<>) or empty - skip
+        - FormNode that's a bare form - ZIL0100 error
+        """
+        # Handle QUOTE FormNode - extract the quoted list
+        if isinstance(operand, FormNode):
+            if isinstance(operand.operator, AtomNode):
+                op_name = operand.operator.value.upper()
+                if op_name == 'QUOTE':
+                    # Extract the quoted content
+                    if operand.operands:
+                        inner = operand.operands[0]
+                        if isinstance(inner, list) and inner:
+                            # List is the clause: [condition, action1, ...]
+                            condition = inner[0]
+                            actions = list(inner[1:])
+                            return (condition, actions)
+                    # Empty quote - skip
+                    return None
+                elif op_name in ('', '<>') or (not operand.operands and op_name == '()'):
+                    # Empty form - skip
+                    return None
+            # Check for empty form <>
+            if not operand.operands and isinstance(operand.operator, AtomNode):
+                if operand.operator.value in ('', '<>', '()'):
+                    return None
+            # Bare form - error
+            raise ValueError(
+                "ZIL0100: COND requires parenthesized clauses (condition actions...), "
+                f"not bare forms like <{operand.operator.value if hasattr(operand.operator, 'value') else operand.operator}>"
+            )
+
+        # Handle raw list - treat as clause
+        if isinstance(operand, list):
+            if not operand:
+                # Empty list - skip
+                return None
+            condition = operand[0]
+            actions = list(operand[1:])
+            return (condition, actions)
+
+        # Handle AtomNode '<>' or similar
+        if isinstance(operand, AtomNode):
+            if operand.value.upper() in ('', '<>', 'FALSE'):
+                return None
+            # Bare atom - error
+            raise ValueError(
+                "ZIL0100: COND requires parenthesized clauses (condition actions...), "
+                f"not bare atoms like {operand.value}"
+            )
+
+        # Unknown type - error
+        raise ValueError(
+            "ZIL0100: COND requires parenthesized clauses (condition actions...), "
+            f"got {type(operand).__name__}"
+        )
 
     # ===== Table Literal Operations =====
 

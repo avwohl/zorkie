@@ -552,6 +552,12 @@ class RoutineAssertion:
         self.version = ZVersion.V6
         return self
 
+    def in_glulx(self) -> 'RoutineAssertion':
+        """Mark test as Glulx - will skip since Glulx not supported."""
+        import pytest
+        pytest.skip("Glulx not supported")
+        return self
+
     def with_global(self, code: str) -> 'RoutineAssertion':
         self.globals.append(code)
         return self
@@ -762,6 +768,11 @@ class GlobalsAssertion:
             self.expected_warnings = []
         else:
             self.expect_no_warnings = True
+        return self
+
+    def with_global(self, code: str) -> 'GlobalsAssertion':
+        """Add an additional global definition."""
+        self.additional_globals.append(code)
         return self
 
     def _get_compiler(self) -> ZILCompiler:

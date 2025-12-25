@@ -1,21 +1,75 @@
 # Work In Progress Notes
 
+## How to Resume
+
+The short-circuit AND/OR implementation is mostly complete but has an issue with void expressions. The failing test is:
+```
+tests/zilf/test_flow_control.py::TestCond::test_and_in_void_context_with_macro_at_end_should_work
+```
+
+The problem: When `<AND <FOO> <BAR>>` where BAR expands to `<PRINTN 42>` (a void operation), the AND correctly evaluates both expressions but the last operand doesn't push a value to the stack. The test expects "42" to be printed (which should happen) but currently outputs nothing.
+
+To debug:
+1. Check if `generate_form` for `<PRINTN 42>` is being called during AND evaluation
+2. The issue may be in the JZ branch logic or offset calculations in `gen_and`
+3. Look at codegen_improved.py lines 11486-11619 for the AND implementation
+
+Other good next steps:
+- SPLICE macro support (`<CHTYPE ... SPLICE>`) - needed for 6 macro tests
+- Property value encoding (GETB reads wrong byte for 2-byte words) - affects MAP-DIRECTIONS tests
+- Object ordering tests - many use FIRST?/NEXT? predicates that may have issues
+
 ## Current Status (2025-12-25)
-- **Tests:** 374 passed, 110 failed, 142 skipped
-- **Started session at:** 360 passed, 124 failed
-- **Fixed this session:** +14 passing, -14 failing
+- **Tests:** 381 passed, 102 failed, 143 skipped
+- **Started session at:** 380 passed, 103 failed
+- **Fixed this session:** +1 passing, -1 failing
 - **Remaining by category:**
-  - tell: 23 failing
-  - objects: 22 failing
+  - objects: 21 failing
+  - tell: 20 failing
   - vocab: 18 failing
-  - meta: 11 failing
+  - meta: 10 failing
   - tables: 10 failing
-  - macros: 8 failing
   - syntax: 7 failing
-  - flow_control: 6 failing
+  - macros: 6 failing
   - variables: 6 failing
+  - flow_control: 4 failing
 
 ## Recent Changes (This Session)
+- Added DO misplaced END clause detection
+  - DO END clause must appear immediately after loop spec
+  - `<DO (CNT 0 25) body (END ...)>` now correctly fails
+  - Validates that END clauses don't appear after body statements
+- Implemented short-circuit logical AND/OR
+  - gen_and now evaluates left-to-right, returning false early if any operand is false
+  - gen_or now evaluates left-to-right, returning first truthy value
+  - BAND/BOR remain as bitwise operations using Z-machine AND/OR opcodes
+  - Note: Some edge cases with void expressions still need work
+
+## Previous Session Changes (2025-12-25)
+- Added COND support for macro-expanded clauses
+  - COND now handles macros that expand to clause lists
+  - Added _extract_cond_clause helper to process macro results
+  - QUOTE FormNodes with clause lists are properly extracted
+- Added IF-IN-ZILCH and IFN-IN-ZILCH built-in macros
+  - IF-IN-ZILCH returns its argument (we're a ZILF-compatible compiler)
+  - IFN-IN-ZILCH returns empty (opposite behavior)
+- Fixed COMPILATION-FLAG to accept bare atom values
+  - Now supports both `<COMPILATION-FLAG FOO T>` and `<COMPILATION-FLAG FOO <T>>`
+- Fixed string translation for pipe and newlines
+  - `|` becomes newline in output
+  - Newlines immediately after `|` are absorbed
+  - Other literal newlines become spaces
+  - Matches ZILF behavior for multi-line strings
+- Added macro argument count validation
+  - Macros now check if they receive enough required arguments
+  - Raises error if called with too few arguments
+- Added macro expansion for local variable initializers
+  - Macros in routine `AUX` variable defaults now expand correctly
+  - `(X <MY-MACRO>)` in routine params now works
+- Added `with_global` method to GlobalsAssertion test helper
+- Added `in_glulx` method to RoutineAssertion (skips Glulx tests)
+
+## Previous Session Changes (2025-12-25)
 - Added DESC property newline stripping
   - Newlines in DESC property values are replaced with spaces
 - Added duplicate property detection
