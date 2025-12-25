@@ -10,12 +10,17 @@
   - Newlines in DESC property values are replaced with spaces
 - Added duplicate property detection
   - Properties cannot be defined twice on same object (except FLAGS)
-  - IN and LOC are treated as duplicates (both set parent location)
+  - IN and LOC are treated as duplicates when setting location
+  - Exception: (IN "string") for NEXIT doesn't conflict with (IN OBJECT)
 - Added local variable validation for tables
   - Tables cannot reference local variables (.X)
   - Added _contains_local_var helper for recursive checks
+  - Applies to both _add_table and gen_table methods
 - Added MDL0430 warning for TABLE with LENGTH prefix overflow
   - Warns when STRING table length > 255 bytes
+- Added COND validation (ZIL0100)
+  - COND requires parenthesized clauses, not bare forms
+  - `<COND <SET X 1>>` now fails with proper error
 - Added ZIL0404 error for too many attributes
   - V3 max 32, V4+ max 48 attributes
   - Check in _build_symbol_tables
