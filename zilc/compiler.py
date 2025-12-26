@@ -45,6 +45,11 @@ class ZILCompiler:
         """Get all warnings generated during compilation."""
         return self.warnings.copy()
 
+    def _check_vocab_word_apostrophe(self, word: str, prop_type: str, obj_name: str):
+        """Warn if a vocab word contains an apostrophe."""
+        if "'" in word:
+            self.warn("MDL0429", f"{prop_type} word '{word}' in {obj_name} contains apostrophe")
+
     def compile_file(self, input_path: str, output_path: Optional[str] = None) -> bool:
         """
         Compile a ZIL source file to Z-machine bytecode.
@@ -1836,6 +1841,7 @@ class ZILCompiler:
         # Extract SYNONYM and ADJECTIVE words from objects/rooms
         obj_num = 1
         for obj in program.objects:
+            obj_name = obj.name if hasattr(obj, 'name') else f"object {obj_num}"
             if 'SYNONYM' in obj.properties:
                 synonyms = obj.properties['SYNONYM']
                 if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
@@ -1844,8 +1850,10 @@ class ZILCompiler:
                             val = syn.value
                             if isinstance(val, (int, float)):
                                 val = str(val)
+                            self._check_vocab_word_apostrophe(val, 'SYNONYM', obj_name)
                             dictionary.add_synonym(val, obj_num)
                         elif isinstance(syn, str):
+                            self._check_vocab_word_apostrophe(syn, 'SYNONYM', obj_name)
                             dictionary.add_synonym(syn, obj_num)
                         elif isinstance(syn, (int, float)):
                             dictionary.add_synonym(str(syn), obj_num)
@@ -1853,6 +1861,7 @@ class ZILCompiler:
                     val = synonyms.value
                     if isinstance(val, (int, float)):
                         val = str(val)
+                    self._check_vocab_word_apostrophe(val, 'SYNONYM', obj_name)
                     dictionary.add_synonym(val, obj_num)
 
             if 'ADJECTIVE' in obj.properties:
@@ -1863,8 +1872,10 @@ class ZILCompiler:
                             val = adj.value
                             if isinstance(val, (int, float)):
                                 val = str(val)
+                            self._check_vocab_word_apostrophe(val, 'ADJECTIVE', obj_name)
                             dictionary.add_adjective(val, obj_num)
                         elif isinstance(adj, str):
+                            self._check_vocab_word_apostrophe(adj, 'ADJECTIVE', obj_name)
                             dictionary.add_adjective(adj, obj_num)
                         elif isinstance(adj, (int, float)):
                             dictionary.add_adjective(str(adj), obj_num)
@@ -1872,19 +1883,24 @@ class ZILCompiler:
                     val = adjectives.value
                     if isinstance(val, (int, float)):
                         val = str(val)
+                    self._check_vocab_word_apostrophe(val, 'ADJECTIVE', obj_name)
                     dictionary.add_adjective(val, obj_num)
             obj_num += 1
 
         for room in program.rooms:
+            room_name = room.name if hasattr(room, 'name') else f"room {obj_num}"
             if 'SYNONYM' in room.properties:
                 synonyms = room.properties['SYNONYM']
                 if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
                     for syn in synonyms:
                         if hasattr(syn, 'value'):
+                            self._check_vocab_word_apostrophe(syn.value, 'SYNONYM', room_name)
                             dictionary.add_synonym(syn.value, obj_num)
                         elif isinstance(syn, str):
+                            self._check_vocab_word_apostrophe(syn, 'SYNONYM', room_name)
                             dictionary.add_synonym(syn, obj_num)
                 elif hasattr(synonyms, 'value'):
+                    self._check_vocab_word_apostrophe(synonyms.value, 'SYNONYM', room_name)
                     dictionary.add_synonym(synonyms.value, obj_num)
             obj_num += 1
 
