@@ -1315,18 +1315,22 @@ class ZILCompiler:
                         raise ValueError(f"Direction exit references nonexistent object '{dest}'")
                     dest_num = obj_name_to_num[dest]
 
-                # Check for conditional form: (TO DEST IF CONDITION)
+                # Check for conditional form: (TO DEST IF CONDITION [IS state])
                 if len(value) >= 4:
                     if_keyword = value[2]
                     if_name = if_keyword.value if isinstance(if_keyword, AtomNode) else str(if_keyword)
                     if if_name.upper() == 'IF':
                         condition = value[3]
                         cond_name = condition.value if isinstance(condition, AtomNode) else str(condition)
-                        # Check if the condition global exists
-                        # We need access to the program's globals - pass through globals_set parameter
+                        # Condition can be:
+                        # 1. A global variable (e.g., WON-FLAG)
+                        # 2. An object name with "IS state" (e.g., KITCHEN-WINDOW IS OPEN)
+                        # Check if it's a valid object or global
+                        is_valid = cond_name in obj_name_to_num  # It's an object
                         if hasattr(self, '_current_globals_set') and self._current_globals_set is not None:
-                            if cond_name not in self._current_globals_set:
-                                raise ValueError(f"ZIL0207: Direction exit references nonexistent global '{cond_name}'")
+                            is_valid = is_valid or cond_name in self._current_globals_set
+                        if not is_valid:
+                            raise ValueError(f"ZIL0207: Direction exit references nonexistent object or global '{cond_name}'")
 
                 return dest_num
 

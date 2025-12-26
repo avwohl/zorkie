@@ -3440,8 +3440,21 @@ class ImprovedCodeGenerator:
             if var_node.name not in self.globals:
                 raise ValueError(f"VALUE: Unknown global ',{var_node.name}'")
         elif isinstance(var_node, FormNode):
-            # VALUE of an expression - evaluate and return
-            return self.eval_expression(var_node)
+            # VALUE of an expression (indirect variable reference)
+            # Generate the inner expression and use result as variable number
+            # For indirect access, we generate the expression to get the var num on stack,
+            # then use LOAD with stack reference
+            inner_code = self.generate_form(var_node)
+            if inner_code is None:
+                inner_code = b''
+            code = bytearray(inner_code)
+            # LOAD with stack (variable 0) as the source variable number
+            # The value on stack IS the variable number, so we load from it
+            # This gives us indirect variable access
+            code.append(0xAE)  # 1OP LOAD with variable type
+            code.append(0x00)  # Variable 0 = stack (contains the var num to load)
+            code.append(0x00)  # Store result to stack
+            return bytes(code)
         else:
             raise ValueError("VALUE: Operand must be a variable name or number")
 
