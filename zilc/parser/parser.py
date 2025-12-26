@@ -771,13 +771,22 @@ class Parser:
 
                     # Check for duplicate property (but FLAGS can be combined)
                     # Also, IN can appear twice: (IN OBJECT) for location, (IN "string") for NEXIT
+                    # Also, IN can be a direction if declared in <DIRECTIONS>, in which case
+                    # (IN TO ROOM) or (IN PER ROUTINE) is a direction exit, not a location
                     is_nexit_string = (prop_name in location_props and len(values) == 1 and
                                        isinstance(values[0], StringNode))
-                    if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string:
+                    # Check if this looks like a direction exit syntax: TO, PER, SORRY, NEXIT, UEXIT, etc.
+                    is_direction_exit = False
+                    if values and isinstance(values[0], AtomNode):
+                        first_val = values[0].value.upper()
+                        if first_val in ('TO', 'PER', 'SORRY', 'NEXIT', 'UEXIT', 'NE-EXIT', 'CEXIT', 'FEXIT',
+                                         'DEXIT', 'DOOR', 'SETG', 'NONE', 'IF'):
+                            is_direction_exit = True
+                    if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string and not is_direction_exit:
                         self.error(f"Duplicate property '{prop_name}' in object definition")
                     # Check for location property conflicts (IN and LOC are the same)
-                    # Only check when the value is not a NEXIT string
-                    if prop_name in location_props and not is_nexit_string:
+                    # Only check when the value is not a NEXIT string and not a direction exit
+                    if prop_name in location_props and not is_nexit_string and not is_direction_exit:
                         for loc_prop in location_props:
                             if loc_prop in properties and loc_prop != prop_name:
                                 self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
@@ -832,13 +841,22 @@ class Parser:
 
                 # Check for duplicate property (but FLAGS can be combined)
                 # Also, IN can appear twice: (IN OBJECT) for location, (IN "string") for NEXIT
+                # Also, IN can be a direction if declared in <DIRECTIONS>, in which case
+                # (IN TO ROOM) or (IN PER ROUTINE) is a direction exit, not a location
                 is_nexit_string = (prop_name in location_props and len(values) == 1 and
                                    isinstance(values[0], StringNode))
-                if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string:
+                # Check if this looks like a direction exit syntax: TO, PER, SORRY, NEXIT, UEXIT, etc.
+                is_direction_exit = False
+                if values and isinstance(values[0], AtomNode):
+                    first_val = values[0].value.upper()
+                    if first_val in ('TO', 'PER', 'SORRY', 'NEXIT', 'UEXIT', 'NE-EXIT', 'CEXIT', 'FEXIT',
+                                     'DEXIT', 'DOOR', 'SETG', 'NONE', 'IF'):
+                        is_direction_exit = True
+                if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string and not is_direction_exit:
                     self.error(f"Duplicate property '{prop_name}' in object definition")
                 # Check for location property conflicts (IN and LOC are the same)
-                # Only check when the value is not a NEXIT string
-                if prop_name in location_props and not is_nexit_string:
+                # Only check when the value is not a NEXIT string and not a direction exit
+                if prop_name in location_props and not is_nexit_string and not is_direction_exit:
                     for loc_prop in location_props:
                         if loc_prop in properties and loc_prop != prop_name:
                             self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
