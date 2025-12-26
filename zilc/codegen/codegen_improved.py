@@ -1648,7 +1648,7 @@ class ImprovedCodeGenerator:
             return self.gen_grtr_or_equal(form.operands)
         elif op_name in ('L=?', 'LEQ?', '<='):
             return self.gen_less_or_equal(form.operands)
-        elif op_name in ('N=?', 'NEQUAL?', '!='):
+        elif op_name in ('N=?', 'N==?', 'NEQUAL?', '!='):
             return self.gen_nequal(form.operands)
         elif op_name == 'ZGET':
             return self.gen_zget(form.operands)
