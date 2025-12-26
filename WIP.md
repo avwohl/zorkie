@@ -13,29 +13,44 @@ Focus areas for next session:
 5. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 
 ## Current Status (2025-12-26)
-- **Tests:** 404 passed, 0 failed, 144 skipped, 80 xfailed
-- **Zork1 compiles** to 98KB but has runtime issues (W?* vocab constant resolution)
-- **All test failures are now either fixed or marked as xfail**
-- The xfailed tests represent ZILF-specific features not yet implemented:
-  - NEW-PARSER?: Extended vocabulary format
-  - PROPDEF: Property pattern matching
-  - BIT-SYNONYM: Attribute aliases
-  - Object ordering: ZILF-specific numbering scheme
-  - Compile-time table manipulation: ZPUT, ZGET, PUTB
-  - Custom TELL tokens: NEW-ADD-WORD token definitions
-  - Internationalization: CHRSET, LANGUAGE
-  - Parser extensions: COMPACT-PREACTIONS?, REMOVE-SYNONYM, SIBREAKS
+- **Tests:** 408 passed, 1 failed, 144 skipped, 79 xfailed, 1 xpassed
+- **Hello world works** in V3, V4, V5, V6
+- **Zork1 compiles** to 98KB and shows initial game text before stack underflow
+- **1 test failure**: test_map_contents_with_next (pre-existing bug, illegal print address)
+- The xfailed tests represent ZILF-specific features not yet implemented
 
 ## Zork1 Compilation Status
-- **Zork1 now compiles** to a 98KB story file
-- **Runtime issue**: Game crashes with "Illegal object 17830"
-- **Root cause**: W?* vocabulary constants not resolved (need dictionary addresses)
-- **Fix needed**: Dictionary must be built BEFORE codegen, or use placeholder mechanism
-  - Currently dictionary is built after codegen completes
-  - All W?* references (W?RUN, W?SAY, W?ALL, etc.) resolve to 0
-  - This causes runtime failures when parser tries to match vocabulary words
+- **Zork1 compiles** to a 98KB story file
+- **Runtime progress**: Game now displays "It is pitch black. You are likely to be eaten by a grue."
+- **Current issue**: Stack underflow error after initial display
+- **Previous issue (FIXED)**: Illegal opcode error due to backward branch offset bugs
 
 ## Recent Changes (2025-12-26)
+- Fixed SHIFT opcode stack underflow with negative arguments
+  - Routine placeholder scanning was incorrectly matching data bytes
+  - E.g., -3 (0xFFFD) followed by store=0x00 looked like placeholder 0xFD00
+  - Added direct tracking for gen_routine_call placeholders
+  - Added `_generate_nested_and_adjust` helper for proper offset tracking in nested calls
+  - Scanning fallback now skips positions preceded by 0xFE/0xFF (likely large constants)
+- Fixed backward branch offset calculation bugs
+  - DEC_CHK backward branches in MAPR, MAPT, MEMBER used incorrect formula
+  - Short-form branches cannot encode negative offsets; always use long form for backward jumps
+  - Fixed 4 locations in gen_mapr, gen_mapt_fallback, gen_mapr_fallback, gen_member
+- Fixed REPEAT/generate_repeat JUMP offset formula
+  - Changed from `loop_start_pos - (current_pos + 3)` to `loop_start_pos - (current_pos + 1)`
+  - The +2 from Z-machine formula was missing, causing off-by-2 error in backward jumps
+- Extended TELL string placeholder range from 766 to 8190 slots
+  - Changed from 0xFD00-0xFFFD to 0xE000-0xFFFD range
+  - Allows Zork1's 2000+ unique strings to compile
+- Separated TELL and string operand placeholder tracking
+  - TELL strings: 0xE000-0xFFFD (8190 slots via `_tell_string_placeholders`)
+  - String operands: 0xFC00-0xFCFF (256 slots via `_string_operand_placeholders`)
+  - Prevents index collision between the two systems
+- Fixed routine placeholder overflow (earlier session)
+  - Changed from 8-bit indices to 16-bit placeholder values
+  - Added deduplication via `_routine_to_placeholder` mapping
+
+## Previous Changes (2025-12-26)
 - Fixed IGRTR? and DLESS? to support variable second operands
   - Z-machine inc_chk/dec_chk can compare against variables, not just constants
   - Added tests for variable comparison values

@@ -2330,8 +2330,10 @@ class ZILCompiler:
         if extension_table:
             self.log(f"  Built extension table: {len(extension_table)} bytes")
 
-        # Get string placeholders for operand resolution
-        string_placeholders = codegen.get_string_placeholders()
+        # Get string placeholders for resolution
+        string_placeholders = codegen.get_string_placeholders()  # For operand format (0xFC)
+        tell_string_placeholders = codegen.get_tell_string_placeholders()  # For TELL format (0x8D)
+        tell_placeholder_positions = codegen.get_tell_placeholder_positions()  # Exact byte offsets
 
         # Assemble story file
         self.log("Assembling story file...")
@@ -2349,6 +2351,8 @@ class ZILCompiler:
             table_routine_fixups=table_routine_fixups,
             extension_table=extension_table,
             string_placeholders=string_placeholders,
+            tell_string_placeholders=tell_string_placeholders,
+            tell_placeholder_positions=tell_placeholder_positions,
             vocab_fixups=vocab_fixups
         )
 
