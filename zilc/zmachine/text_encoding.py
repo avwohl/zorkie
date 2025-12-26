@@ -30,13 +30,18 @@ ALPHABET_A2_V2 = " \x00\x00\x00\x00\x00\x00\n0123456789.,!?_#'\"/\\-:()"
 class ZTextEncoder:
     """Encodes text to Z-machine format."""
 
-    def __init__(self, version: int = 3, abbreviations_table=None):
+    def __init__(self, version: int = 3, abbreviations_table=None, crlf_character: str = '|',
+                 preserve_spaces: bool = False):
         self.version = version
         self.alphabet_a0 = ALPHABET_A0
         self.alphabet_a1 = ALPHABET_A1
         # V1 has different A2 (< instead of newline at position 7)
         self.alphabet_a2 = ALPHABET_A2_V1 if version == 1 else ALPHABET_A2_V2
         self.abbreviations_table = abbreviations_table
+        # Character that gets translated to newline in strings (default |)
+        self.crlf_character = crlf_character
+        # Whether to preserve multiple spaces (default: collapse after periods)
+        self.preserve_spaces = preserve_spaces
 
     def char_to_zchar(self, ch: str, current_alphabet: int = 0) -> Tuple[List[int], int]:
         """
@@ -182,7 +187,8 @@ class ZTextEncoder:
         low = zscii_code & 0x1F
         return ([5, 6, high, low], 0)
 
-    def encode_string(self, text: str, max_words: int = None, use_abbreviations: bool = True) -> List[int]:
+    def encode_string(self, text: str, max_words: int = None, use_abbreviations: bool = True,
+                       literal: bool = False) -> List[int]:
         """
         Encode a string to Z-characters packed into 16-bit words.
 
@@ -190,21 +196,42 @@ class ZTextEncoder:
             text: The string to encode
             max_words: Maximum number of 16-bit words (for dictionary entries)
             use_abbreviations: Whether to use abbreviations table (default True)
+            literal: If True, skip all text transformations (for abbreviation strings)
 
         Returns:
             List of 16-bit words with Z-characters packed in
         """
-        # ZIL string translation:
-        # - | (pipe) becomes newline in output
-        # - Literal newlines immediately after | are absorbed (ignored)
+        # ZIL string translation (skipped if literal=True):
+        # - CRLF character (default |) becomes newline in output
+        # - Literal newlines immediately after CRLF character are absorbed (ignored)
         # - Other literal newlines (CRLF, CR, LF) become spaces
-        import re
-        # Step 1: Absorb newlines immediately after pipe
-        text = re.sub(r'\|(?:\r\n|\r|\n)', '|', text)
-        # Step 2: Replace remaining literal newlines with space
-        text = re.sub(r'\r\n|\r|\n', ' ', text)
-        # Step 3: Replace | with newline
-        text = text.replace('|', '\n')
+        # - Unless PRESERVE-SPACES? is set, collapse 2+ spaces after periods to 1 space
+        if not literal:
+            import re
+            crlf = self.crlf_character
+            # Escape the character for regex use
+            crlf_escaped = re.escape(crlf)
+            # Step 1: Absorb newlines immediately after CRLF character
+            text = re.sub(crlf_escaped + r'(?:\r\n|\r|\n)', crlf, text)
+            # Step 2: Replace remaining literal newlines with space
+            text = re.sub(r'\r\n|\r|\n', ' ', text)
+            # Step 3: Replace CRLF character with newline
+            text = text.replace(crlf, '\n')
+            # Step 4: Collapse multiple spaces after periods (and after newlines from CRLF)
+            # unless PRESERVE-SPACES? is set
+            # The rule is: reduce runs of 2+ spaces after periods/newlines by 1
+            # e.g., 2 spaces → 1, 3 spaces → 2
+            if not self.preserve_spaces:
+                # After period followed by 2+ spaces, reduce by removing one space
+                def reduce_period_spaces(m):
+                    spaces = m.group(1)
+                    return '.' + spaces[:-1]  # Remove one space
+                text = re.sub(r'\.( {2,})', reduce_period_spaces, text)
+                # After newline followed by 2+ spaces, reduce by removing one space
+                def reduce_newline_spaces(m):
+                    spaces = m.group(1)
+                    return '\n' + spaces[:-1]  # Remove one space
+                text = re.sub(r'\n( {2,})', reduce_newline_spaces, text)
 
         # Convert string to Z-characters
         zchars = []
@@ -273,18 +300,20 @@ class ZTextEncoder:
         max_words = 2 if self.version <= 3 else 3
         return self.encode_string(word, max_words)
 
-    def encode_text_zchars(self, text: str, use_abbreviations: bool = False) -> bytes:
+    def encode_text_zchars(self, text: str, use_abbreviations: bool = False,
+                            literal: bool = False) -> bytes:
         """
         Encode text to Z-character bytes (for abbreviation strings).
 
         Args:
             text: Text to encode
             use_abbreviations: Whether to use abbreviations (False for encoding abbreviations themselves)
+            literal: If True, skip all text transformations (for abbreviation strings)
 
         Returns:
             Bytes of encoded text
         """
-        words = self.encode_string(text, use_abbreviations=use_abbreviations)
+        words = self.encode_string(text, use_abbreviations=use_abbreviations, literal=literal)
         return words_to_bytes(words)
 
 

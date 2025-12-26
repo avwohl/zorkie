@@ -9,6 +9,15 @@ import re
 import struct
 
 
+class ByteValue:
+    """Wrapper to indicate a value should be stored as a single byte, not a word.
+
+    Used for direction exits which need to be readable via GETB.
+    """
+    def __init__(self, value: int):
+        self.value = value & 0xFF
+
+
 class ObjectTable:
     """Builds Z-machine object table."""
 
@@ -193,6 +202,7 @@ class ObjectTable:
         """Encode a property value to bytes.
 
         Property values can be:
+        - ByteValue: stored as 1 byte (for direction exits read via GETB)
         - Single integers: stored as 2 bytes (words) for GET compatibility
         - Strings (encoded and stored)
         - Lists of integers
@@ -201,7 +211,10 @@ class ObjectTable:
         - GET <GETPT obj prop> to read the full value
         - GETP to work correctly for 1 or 2 byte values
         """
-        if isinstance(value, int):
+        if isinstance(value, ByteValue):
+            # Store as single byte (for direction exits)
+            return bytes([value.value & 0xFF])
+        elif isinstance(value, int):
             # Always store single integers as 2-byte words (GET compatible)
             # This matches ZIL/ZILF behavior where default property values are words
             return struct.pack('>H', value & 0xFFFF)

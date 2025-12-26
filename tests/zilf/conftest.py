@@ -249,9 +249,13 @@ class ZILCompiler:
             )
         except SyntaxError as e:
             # Parse/syntax errors
+            error_msg = str(e)
+            # Extract error codes like ZIL0404, MDL0417, etc.
+            error_codes = re.findall(r'([A-Z]{2,}[0-9]{3,})', error_msg)
             return CompilationResult(
                 success=False,
-                errors=[str(e)],
+                errors=[error_msg],
+                error_codes=error_codes,
             )
         except Exception as e:
             # Other compilation errors
@@ -573,6 +577,15 @@ class RoutineAssertion:
             self.expect_no_warnings = True
         return self
 
+    def without_unsuppressed_warnings(self) -> 'RoutineAssertion':
+        """Assert that no unsuppressed warnings are emitted.
+
+        This checks that any warnings that should have been suppressed
+        via SUPPRESS-WARNINGS? are not present in the output.
+        """
+        self.expect_no_warnings = True
+        return self
+
     def with_debug_info(self) -> 'RoutineAssertion':
         self.debug_info = True
         return self
@@ -616,6 +629,15 @@ class RoutineAssertion:
         if error_codes:
             for code in error_codes:
                 assert code in result.error_codes, f"Expected error code {code}, got {result.error_codes}"
+
+    def does_not_compile_with_error_count(self, expected_count: int) -> None:
+        """Assert that the routine fails to compile with a specific number of errors."""
+        compiler = self._get_compiler()
+        result = compiler.compile_routine(self.args, self.body)
+        assert not result.success, f"Expected compilation to fail, but it succeeded"
+        actual_count = len(result.errors)
+        assert actual_count == expected_count, \
+            f"Expected {expected_count} errors, got {actual_count}"
 
     def does_not_throw(self) -> None:
         """Assert that compilation doesn't throw an exception (may still fail)."""

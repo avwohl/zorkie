@@ -13,6 +13,7 @@ from .parser import Parser
 from .parser.macro_expander import MacroExpander
 from .codegen.codegen_improved import ImprovedCodeGenerator
 from .zmachine import ZAssembler, ObjectTable, Dictionary
+from .zmachine.object_table import ByteValue
 
 
 class ZILCompiler:
@@ -214,16 +215,20 @@ class ZILCompiler:
 
         # Extract SETG directives to track compile-time values
         # <SETG VARNAME value>
-        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?]+)\s+(\d+|T|<>)\s*>'
+        # Handles: integers, T, <>, and character literals (!\X)
+        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?]+)\s+(\d+|T|<>|!\\.)?\s*>'
         def extract_setg(match):
             var_name = match.group(1)
-            var_value = match.group(2)
+            var_value = match.group(2) or ''
             if var_value.isdigit():
                 self.compile_globals[var_name] = int(var_value)
             elif var_value == 'T':
                 self.compile_globals[var_name] = True
             elif var_value == '<>':
                 self.compile_globals[var_name] = False
+            elif var_value.startswith('!\\') and len(var_value) == 3:
+                # Character literal: !\X -> the character X
+                self.compile_globals[var_name] = var_value[2]
             self.log(f"  Global: {var_name} = {self.compile_globals.get(var_name)}")
             return match.group(0)  # Keep the SETG in source
         source = re.sub(setg_pattern, extract_setg, source, flags=re.IGNORECASE)
@@ -243,6 +248,45 @@ class ZILCompiler:
             return ''  # Remove the directive from source
 
         source = re.sub(flag_pattern, extract_flag, source, flags=re.IGNORECASE)
+
+        # Extract SUPPRESS-WARNINGS? directives
+        # <SUPPRESS-WARNINGS? "ZIL0204"> - suppress specific warning
+        # <SUPPRESS-WARNINGS? ALL> - suppress all warnings
+        # <SUPPRESS-WARNINGS? NONE> - unsuppress all warnings
+        self.suppressed_warnings = set()
+        self.suppress_all_warnings = False
+        suppress_pattern = r'<\s*SUPPRESS-WARNINGS\?\s+(?:"([^"]+)"|(ALL|NONE))\s*>'
+
+        def extract_suppress(match):
+            warning_code = match.group(1)  # Quoted code like "ZIL0204"
+            keyword = match.group(2)  # ALL or NONE
+            if keyword:
+                if keyword.upper() == 'ALL':
+                    self.suppress_all_warnings = True
+                    self.log("  Suppressing all warnings")
+                elif keyword.upper() == 'NONE':
+                    self.suppress_all_warnings = False
+                    self.suppressed_warnings.clear()
+                    self.log("  Unsuppressing all warnings")
+            elif warning_code:
+                self.suppressed_warnings.add(warning_code)
+                self.log(f"  Suppressing warning: {warning_code}")
+            return ''  # Remove the directive from source
+
+        source = re.sub(suppress_pattern, extract_suppress, source, flags=re.IGNORECASE)
+
+        # Extract WARN-AS-ERROR? directive
+        # <WARN-AS-ERROR? T> - treat warnings as errors
+        self.warn_as_error = False
+        warn_error_pattern = r'<\s*WARN-AS-ERROR\?\s+(T|<>)\s*>'
+
+        def extract_warn_error(match):
+            value = match.group(1)
+            self.warn_as_error = value.upper() == 'T'
+            self.log(f"  Warn as error: {self.warn_as_error}")
+            return ''  # Remove the directive from source
+
+        source = re.sub(warn_error_pattern, extract_warn_error, source, flags=re.IGNORECASE)
 
         # Second pass: Evaluate IFFLAG conditionals
         # Process manually to handle nested brackets properly
@@ -1234,7 +1278,10 @@ class ZILCompiler:
 
         # Simple object reference (just the room name)
         if isinstance(value, AtomNode):
-            return obj_name_to_num.get(value.value, 0)
+            dest_name = value.value
+            if dest_name not in obj_name_to_num:
+                raise ValueError(f"Direction exit references nonexistent object '{dest_name}'")
+            return obj_name_to_num[dest_name]
 
         # List format: [keyword, value] or [keyword, value, ...]
         if isinstance(value, (list, tuple)) and len(value) >= 2:
@@ -1244,11 +1291,33 @@ class ZILCompiler:
 
             if keyword_name == 'TO':
                 # (NORTH TO DEST-ROOM) -> get object number
+                # Also handles (NORTH TO DEST-ROOM IF CONDITION)
                 dest = value[1]
+                dest_num = None
                 if isinstance(dest, AtomNode):
-                    return obj_name_to_num.get(dest.value, 0)
+                    dest_name = dest.value
+                    if dest_name not in obj_name_to_num:
+                        raise ValueError(f"Direction exit references nonexistent object '{dest_name}'")
+                    dest_num = obj_name_to_num[dest_name]
                 elif isinstance(dest, str):
-                    return obj_name_to_num.get(dest, 0)
+                    if dest not in obj_name_to_num:
+                        raise ValueError(f"Direction exit references nonexistent object '{dest}'")
+                    dest_num = obj_name_to_num[dest]
+
+                # Check for conditional form: (TO DEST IF CONDITION)
+                if len(value) >= 4:
+                    if_keyword = value[2]
+                    if_name = if_keyword.value if isinstance(if_keyword, AtomNode) else str(if_keyword)
+                    if if_name.upper() == 'IF':
+                        condition = value[3]
+                        cond_name = condition.value if isinstance(condition, AtomNode) else str(condition)
+                        # Check if the condition global exists
+                        # We need access to the program's globals - pass through globals_set parameter
+                        if hasattr(self, '_current_globals_set') and self._current_globals_set:
+                            if cond_name not in self._current_globals_set:
+                                raise ValueError(f"ZIL0207: Direction exit references nonexistent global '{cond_name}'")
+
+                return dest_num
 
             elif keyword_name == 'PER':
                 # (NORTH PER ROUTINE) -> conditional exit
@@ -1274,13 +1343,18 @@ class ZILCompiler:
                 elif keyword_name == 'UEXIT' and len(value) >= 2:
                     dest = value[1]
                     if isinstance(dest, AtomNode):
-                        return obj_name_to_num.get(dest.value, 0)
+                        dest_name = dest.value
+                        if dest_name not in obj_name_to_num:
+                            raise ValueError(f"Direction exit references nonexistent object '{dest_name}'")
+                        return obj_name_to_num[dest_name]
                 # Other exit types need more complex handling
                 return 0
 
         # Try to interpret as object name directly
         if isinstance(value, str):
-            return obj_name_to_num.get(value, 0)
+            if value not in obj_name_to_num:
+                raise ValueError(f"Direction exit references nonexistent object '{value}'")
+            return obj_name_to_num[value]
 
         return None
 
@@ -1657,7 +1731,12 @@ class ZILCompiler:
         # (e.g., when passing strings to routines), so we always create it
         from .zmachine.string_table import StringTable
         from .zmachine.text_encoding import ZTextEncoder
-        text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table)
+        # Get CRLF-CHARACTER from compile_globals (defaults to '|')
+        crlf_char = self.compile_globals.get('CRLF-CHARACTER', '|')
+        # Get PRESERVE-SPACES? from compile_globals (defaults to False)
+        preserve_spaces = self.compile_globals.get('PRESERVE-SPACES?', False)
+        text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table,
+                                    crlf_character=crlf_char, preserve_spaces=preserve_spaces)
         string_table = StringTable(text_encoder)
         if self.enable_string_dedup:
             self.log("String table deduplication enabled")
@@ -1692,10 +1771,11 @@ class ZILCompiler:
             for routine_name in sorted(missing_routines):
                 self.log(f"    - {routine_name}")
 
-        # Report codegen warnings
+        # Report codegen warnings and add to compiler warnings
         codegen_warnings = codegen.get_warnings()
         if codegen_warnings:
             self.log(f"  {len(codegen_warnings)} code generation warnings (see stderr)")
+            self.warnings.extend(codegen_warnings)
 
         # Check for unused flags (ZIL0211 warning)
         unused_flags = codegen.defined_flags - codegen.used_flags
@@ -1905,12 +1985,42 @@ class ZILCompiler:
         # Each entry is (word, property_offset) - to be resolved during assembly
         dict_word_fixups = []
 
+        # Build sets for property value validation
+        global_names = {g.name for g in program.globals}
+        constant_names = {c.name for c in program.constants}
+        object_names = {o.name for o in program.objects + program.rooms}
+
+        # Store for direction exit validation (IF CONDITION check)
+        self._current_globals_set = global_names
+
+        # Helper to validate property values are compile-time constants
+        def validate_property_value(value, obj_name, prop_name):
+            """Validate that a property value is a compile-time constant.
+
+            Global variables are not allowed as property values since they
+            are not known at compile time.
+            """
+            from .parser.ast_nodes import AtomNode
+            if isinstance(value, AtomNode):
+                atom_name = value.value
+                # Global variables are not valid property values
+                # (but objects and constants are fine)
+                if atom_name in global_names and atom_name not in constant_names and atom_name not in object_names:
+                    raise ValueError(f"Property '{prop_name}' in object '{obj_name}' references global variable '{atom_name}' - only constants are allowed")
+            elif isinstance(value, (list, tuple)):
+                # Check all elements in a list
+                for v in value:
+                    validate_property_value(v, obj_name, prop_name)
+
         # Helper to extract property number and value
         def extract_properties(obj_node, obj_idx):
             """Extract properties from object node."""
             nonlocal next_prop_num  # Allow modification of outer scope variable
             props = {}
             for key, value in obj_node.properties.items():
+                # Skip validation for known special properties
+                if key not in ['FLAGS', 'IN', 'LOC', 'SYNONYM', 'ADJECTIVE'] + list(program.directions):
+                    validate_property_value(value, obj_node.name, key)
                 if key == 'SYNONYM' and 'SYNONYM' in prop_map:
                     # Store dictionary word offset placeholder for first synonym
                     prop_num = prop_map['SYNONYM']
@@ -1966,7 +2076,8 @@ class ZILCompiler:
                         # Direction property: extract destination from (DIR TO DEST) or (DIR PER ROUTINE)
                         exit_value = self._extract_direction_exit(value, obj_name_to_num)
                         if exit_value is not None:
-                            props[prop_num] = exit_value
+                            # Wrap in ByteValue so it's stored as single byte (for GETB access)
+                            props[prop_num] = ByteValue(exit_value)
                     # Extract value from AST node
                     elif hasattr(value, 'value'):
                         props[prop_num] = value.value
@@ -2136,7 +2247,10 @@ class ZILCompiler:
         # Re-encode abbreviations if they were optimized
         if abbreviations_table and len(abbreviations_table) > 0:
             from .zmachine.text_encoding import ZTextEncoder
-            text_encoder = ZTextEncoder(self.version)
+            crlf_char = self.compile_globals.get('CRLF-CHARACTER', '|')
+            preserve_spaces = self.compile_globals.get('PRESERVE-SPACES?', False)
+            text_encoder = ZTextEncoder(self.version, crlf_character=crlf_char,
+                                        preserve_spaces=preserve_spaces)
             abbreviations_table.encode_abbreviations(text_encoder)
             self.log(f"  Encoded {len(abbreviations_table)} optimized abbreviations")
 

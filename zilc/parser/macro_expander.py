@@ -773,6 +773,34 @@ class MacroExpander:
         # Evaluate MDL constructs (MAPF/FUNCTION, etc.) at compile time
         expanded = self._evaluate_mdl(expanded, bindings)
 
+        # Unwrap QUOTE forms - when a macro returns '<FORM>, the result is <FORM>
+        # The quote means "return this form unevaluated", not "return a QUOTE form"
+        if isinstance(expanded, FormNode):
+            if isinstance(expanded.operator, AtomNode) and expanded.operator.value.upper() == 'QUOTE':
+                if expanded.operands:
+                    return expanded.operands[0]
+
+            # Handle CHTYPE ... SPLICE - returns a list to be spliced inline
+            if isinstance(expanded.operator, AtomNode) and expanded.operator.value.upper() == 'CHTYPE':
+                if len(expanded.operands) >= 2:
+                    value_node = expanded.operands[0]
+                    type_node = expanded.operands[1]
+                    if isinstance(type_node, AtomNode) and type_node.value.upper() == 'SPLICE':
+                        # Return the contents as a SpliceResultNode for inline expansion
+                        # The value should be a quoted list like '(<A> <B> <C>)
+                        if isinstance(value_node, FormNode):
+                            if isinstance(value_node.operator, AtomNode) and value_node.operator.value.upper() == 'QUOTE':
+                                # Extract the list contents from the quoted form
+                                if value_node.operands:
+                                    quoted_content = value_node.operands[0]
+                                    if isinstance(quoted_content, list):
+                                        # Content is already a list of forms
+                                        return SpliceResultNode(quoted_content, expanded.line, expanded.column)
+                                    elif isinstance(quoted_content, FormNode):
+                                        # Return a SpliceResultNode containing the list items
+                                        items = [quoted_content.operator] + quoted_content.operands if quoted_content.operator else quoted_content.operands
+                                        return SpliceResultNode(items, expanded.line, expanded.column)
+
         return expanded
 
     def _convert_result_to_ast(self, value: Any) -> ASTNode:
@@ -1143,7 +1171,16 @@ class MacroExpander:
 
         # Expand macros in routines
         for routine in program.routines:
-            routine.body = [self._expand_recursive(stmt) for stmt in routine.body]
+            # Expand and flatten SpliceResultNodes
+            new_body = []
+            for stmt in routine.body:
+                expanded = self._expand_recursive(stmt)
+                if isinstance(expanded, SpliceResultNode):
+                    # Inline the splice items
+                    new_body.extend(expanded.items)
+                else:
+                    new_body.append(expanded)
+            routine.body = new_body
             # Expand macros in local variable initializers
             for var_name, default_val in list(routine.local_defaults.items()):
                 routine.local_defaults[var_name] = self._expand_recursive(default_val)
@@ -1212,8 +1249,16 @@ class MacroExpander:
                 return self._expand_recursive(expanded)
 
             # Not a macro, recursively expand operands
+            # Handle SpliceResultNode in operands by inlining their items
             new_operator = self._expand_recursive(node.operator)
-            new_operands = [self._expand_recursive(op) for op in node.operands]
+            new_operands = []
+            for op in node.operands:
+                expanded = self._expand_recursive(op)
+                if isinstance(expanded, SpliceResultNode):
+                    # Inline the splice items as operands
+                    new_operands.extend(expanded.items)
+                else:
+                    new_operands.append(expanded)
             return FormNode(new_operator, new_operands, node.line, node.column)
 
         elif isinstance(node, CondNode):

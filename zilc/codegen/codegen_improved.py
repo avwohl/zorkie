@@ -25,7 +25,14 @@ class ImprovedCodeGenerator:
         self.action_table = action_table
         self.symbol_tables = symbol_tables  # Store for later access (e.g., MAP-DIRECTIONS)
         self.compiler = compiler  # Reference to compiler for warnings
-        self.encoder = ZTextEncoder(version, abbreviations_table=abbreviations_table)
+        # Get CRLF-CHARACTER from compiler's compile_globals (defaults to '|')
+        crlf_char = '|'
+        preserve_spaces = False
+        if compiler and hasattr(compiler, 'compile_globals'):
+            crlf_char = compiler.compile_globals.get('CRLF-CHARACTER', '|')
+            preserve_spaces = compiler.compile_globals.get('PRESERVE-SPACES?', False)
+        self.encoder = ZTextEncoder(version, abbreviations_table=abbreviations_table,
+                                    crlf_character=crlf_char, preserve_spaces=preserve_spaces)
         self.opcodes = OpcodeTable()
 
         # Symbol tables
@@ -241,8 +248,28 @@ class ImprovedCodeGenerator:
         self.v6_opcodes = self.version >= 6
 
     def _warn(self, message: str):
-        """Record a warning message with current context."""
+        """Record a warning message with current context.
+
+        Warnings can be suppressed via SUPPRESS-WARNINGS? directive in source.
+        Warnings can be converted to errors via WARN-AS-ERROR? directive.
+        """
+        # Check if warnings are suppressed
+        if self.compiler:
+            # Check for suppress all
+            if getattr(self.compiler, 'suppress_all_warnings', False):
+                return
+            # Check for specific warning code suppression
+            suppressed = getattr(self.compiler, 'suppressed_warnings', set())
+            for code in suppressed:
+                if code in message:
+                    return
+
         full_msg = f"[codegen] Warning in {self._current_routine}: {message}"
+
+        # Check if warnings should be treated as errors
+        if self.compiler and getattr(self.compiler, 'warn_as_error', False):
+            raise SyntaxError(full_msg)
+
         self._warnings.append(full_msg)
         print(full_msg, file=sys.stderr)
 
@@ -254,6 +281,29 @@ class ImprovedCodeGenerator:
     def get_warnings(self) -> List[str]:
         """Return all warnings generated during code generation."""
         return self._warnings.copy()
+
+    def _check_unprintable_chars(self, text: str) -> None:
+        """Check for unprintable characters in a string and warn if found.
+
+        ZIL0410: string contains unprintable character
+        - Tab (0x09) is legal in V6 only
+        - Newline (0x0A) and CR (0x0D) are always legal
+        - Other control characters (0x00-0x1F except the above) are never legal
+        """
+        for char in text:
+            code = ord(char)
+            if code < 32:  # Control characters
+                # Newline and CR are always allowed
+                if code == 10 or code == 13:
+                    continue
+                # Tab is allowed in V6 only
+                if code == 9:
+                    if self.version < 6:
+                        self._warn(f"ZIL0410: string contains unprintable character (tab) - only valid in V6+")
+                    continue
+                # Other control characters are never allowed
+                char_repr = repr(chr(code))[1:-1]  # Get escaped representation
+                self._warn(f"ZIL0410: string contains unprintable character (0x{code:02X}: {char_repr})")
 
     def _parse_char_literal(self, value: str) -> Optional[int]:
         r"""Parse a ZIL character literal and return its ASCII code.
@@ -1052,14 +1102,54 @@ class ImprovedCodeGenerator:
             if routine.body:
                 last_stmt = routine.body[-1]
                 if isinstance(last_stmt, LocalVarNode):
-                    # Return the local variable
-                    var_num = self.locals.get(last_stmt.name, 1)
-                    # Mark local as used (for ZIL0210 warning tracking)
-                    if hasattr(self, 'used_locals'):
-                        self.used_locals.add(last_stmt.name)
-                    routine_code.append(0xAB)  # RET variable
-                    routine_code.append(var_num)
-                    implicit_ret_generated = True
+                    # Return the local variable, falling back to global if no local exists
+                    var_num = self.locals.get(last_stmt.name)
+                    if var_num is not None:
+                        # Mark local as used (for ZIL0210 warning tracking)
+                        if hasattr(self, 'used_locals'):
+                            self.used_locals.add(last_stmt.name)
+                        routine_code.append(0xAB)  # RET variable
+                        routine_code.append(var_num)
+                        implicit_ret_generated = True
+                    elif last_stmt.name in self.globals:
+                        # Fall back to global
+                        # ZIL0204: no such local variable 'X', using the global instead
+                        self._warn(f"ZIL0204: no such local variable '{last_stmt.name}', using the global instead")
+                        var_num = self.globals[last_stmt.name]
+                        routine_code.append(0xAB)  # RET variable
+                        routine_code.append(var_num)
+                        implicit_ret_generated = True
+                    elif last_stmt.name in self.constants:
+                        # Fall back to constant
+                        # ZIL0204: no such local variable 'X', using the constant instead
+                        self._warn(f"ZIL0204: no such local variable '{last_stmt.name}', using the constant instead")
+                        val = self.constants[last_stmt.name]
+                        if 0 <= val <= 255:
+                            routine_code.append(0x9B)  # RET small constant
+                            routine_code.append(val & 0xFF)
+                        else:
+                            routine_code.append(0x8B)  # RET large constant
+                            routine_code.append((val >> 8) & 0xFF)
+                            routine_code.append(val & 0xFF)
+                        implicit_ret_generated = True
+                    elif last_stmt.name in self.objects:
+                        # Fall back to object
+                        # ZIL0204: no such local variable 'X', using the object instead
+                        self._warn(f"ZIL0204: no such local variable '{last_stmt.name}', using the object instead")
+                        obj_num = self.objects[last_stmt.name]
+                        if 0 <= obj_num <= 255:
+                            routine_code.append(0x9B)  # RET small constant
+                            routine_code.append(obj_num & 0xFF)
+                        else:
+                            routine_code.append(0x8B)  # RET large constant
+                            routine_code.append((obj_num >> 8) & 0xFF)
+                            routine_code.append(obj_num & 0xFF)
+                        implicit_ret_generated = True
+                    else:
+                        # Unknown, default to returning local 1
+                        routine_code.append(0xAB)  # RET variable
+                        routine_code.append(1)
+                        implicit_ret_generated = True
                 elif isinstance(last_stmt, GlobalVarNode):
                     # Return the global variable
                     var_num = self.globals.get(last_stmt.name, 0x10)
@@ -1107,6 +1197,35 @@ class ImprovedCodeGenerator:
                     # Use RET_POPPED to return that value
                     routine_code.append(0xB8)  # RET_POPPED
                     implicit_ret_generated = True
+                elif isinstance(last_stmt, AtomNode):
+                    # Atom as final statement - return its value
+                    # Constants like T (true), FALSE, or user-defined constants
+                    atom_val = last_stmt.value
+                    if atom_val in self.constants:
+                        val = self.constants[atom_val]
+                        if 0 <= val <= 255:
+                            routine_code.append(0x9B)  # RET small constant
+                            routine_code.append(val & 0xFF)
+                        else:
+                            routine_code.append(0x8B)  # RET large constant
+                            routine_code.append((val >> 8) & 0xFF)
+                            routine_code.append(val & 0xFF)
+                        implicit_ret_generated = True
+                    elif atom_val in self.objects:
+                        obj_num = self.objects[atom_val]
+                        if 0 <= obj_num <= 255:
+                            routine_code.append(0x9B)  # RET small constant
+                            routine_code.append(obj_num & 0xFF)
+                        else:
+                            routine_code.append(0x8B)  # RET large constant
+                            routine_code.append((obj_num >> 8) & 0xFF)
+                            routine_code.append(obj_num & 0xFF)
+                        implicit_ret_generated = True
+                    elif atom_val in self.globals:
+                        var_num = self.globals[atom_val]
+                        routine_code.append(0xAB)  # RET variable
+                        routine_code.append(var_num)
+                        implicit_ret_generated = True
 
             if not implicit_ret_generated:
                 # Use RET 0 instead of RET_POPPED for predictable behavior
@@ -2107,8 +2226,28 @@ class ImprovedCodeGenerator:
                     # Found matching block - return from it
                     return self._gen_targeted_block_return(operands[:1], idx)
 
-        # Check if we're inside a block scope
-        if self.block_stack and not activation_name:
+        # Check DO-FUNNY-RETURN? flag for RETURN behavior
+        # - If explicitly True: RETURN always exits routine
+        # - If explicitly False: RETURN exits block (V3 behavior)
+        # - If not set: Use version default (V5+ = routine, V3/V4 = block)
+        use_routine_return = False
+        if self.compiler and hasattr(self.compiler, 'compile_globals'):
+            compile_globals = self.compiler.compile_globals
+            if 'DO-FUNNY-RETURN?' in compile_globals:
+                # Explicit setting overrides version default
+                use_routine_return = compile_globals['DO-FUNNY-RETURN?']
+            else:
+                # No explicit setting - use version default (V5+ = routine return)
+                use_routine_return = self.version >= 5
+        else:
+            # No compiler access - use version default
+            use_routine_return = self.version >= 5
+
+        # If using routine return or we're at routine level, skip block handling
+        if use_routine_return:
+            # RETURN exits routine regardless of block context
+            pass
+        elif self.block_stack and not activation_name:
             # Block-scoped return: jump to block exit
             return self._gen_block_return(operands[:1] if operands else [])
 
@@ -2448,6 +2587,8 @@ class ImprovedCodeGenerator:
             op = operands[i]
 
             if isinstance(op, StringNode):
+                # Check for unprintable characters (ZIL0410)
+                self._check_unprintable_chars(op.value)
                 # Print literal string
                 if self.string_table is not None:
                     self.string_table.add_string(op.value)
@@ -3524,11 +3665,36 @@ class ImprovedCodeGenerator:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (2, 0x10)
         elif isinstance(node, LocalVarNode):
-            var_num = self.locals.get(node.name, 1)
-            # Mark local as used (for ZIL0210 warning tracking)
-            if hasattr(self, 'used_locals'):
-                self.used_locals.add(node.name)
-            return (2, var_num)
+            var_num = self.locals.get(node.name)
+            if var_num is not None:
+                # Mark local as used (for ZIL0210 warning tracking)
+                if hasattr(self, 'used_locals'):
+                    self.used_locals.add(node.name)
+                return (2, var_num)
+            # In ZIL, .X falls back to global if no local exists
+            elif node.name in self.globals:
+                # ZIL0204: no such local variable 'X', using the global instead
+                self._warn(f"ZIL0204: no such local variable '{node.name}', using the global instead")
+                return (2, self.globals[node.name])
+            elif node.name in self.constants:
+                # ZIL0204: no such local variable 'X', using the constant instead
+                self._warn(f"ZIL0204: no such local variable '{node.name}', using the constant instead")
+                const_val = self.constants[node.name]
+                if 0 <= const_val <= 255:
+                    return (1, const_val)
+                else:
+                    return (0, const_val)
+            elif node.name in self.objects:
+                # ZIL0204: no such local variable 'X', using the object instead
+                self._warn(f"ZIL0204: no such local variable '{node.name}', using the object instead")
+                obj_num = self.objects[node.name]
+                if 0 <= obj_num <= 255:
+                    return (1, obj_num)
+                else:
+                    return (0, obj_num)
+            else:
+                self._warn(f"Unknown variable '{node.name}' - using default")
+                return (2, 1)
         elif isinstance(node, TableNode):
             table_id = self._add_table(node)
             return (0, table_id)  # Table addresses are typically large
@@ -3581,15 +3747,29 @@ class ImprovedCodeGenerator:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (1, 0x10)  # Default to variable 0x10
         elif isinstance(node, LocalVarNode):
-            # .VARNAME syntax - local variable reference
+            # .VARNAME syntax - local variable reference, falls back to global
             var_num = self.locals.get(node.name)
-            if var_num is None:
-                self._warn(f"Unknown local variable '{node.name}' - using default")
-                var_num = 1
-            # Mark local as used (for ZIL0210 warning tracking)
-            if hasattr(self, 'used_locals'):
-                self.used_locals.add(node.name)
-            return (1, var_num)  # Variable
+            if var_num is not None:
+                # Mark local as used (for ZIL0210 warning tracking)
+                if hasattr(self, 'used_locals'):
+                    self.used_locals.add(node.name)
+                return (1, var_num)  # Variable
+            # In ZIL, .X falls back to global if no local exists
+            elif node.name in self.globals:
+                # ZIL0204: no such local variable 'X', using the global instead
+                self._warn(f"ZIL0204: no such local variable '{node.name}', using the global instead")
+                return (1, self.globals[node.name])
+            elif node.name in self.constants:
+                # ZIL0204: no such local variable 'X', using the constant instead
+                self._warn(f"ZIL0204: no such local variable '{node.name}', using the constant instead")
+                return (0, self.constants[node.name])
+            elif node.name in self.objects:
+                # ZIL0204: no such local variable 'X', using the object instead
+                self._warn(f"ZIL0204: no such local variable '{node.name}', using the object instead")
+                return (0, self.objects[node.name])
+            else:
+                self._warn(f"Unknown variable '{node.name}' - using default")
+                return (1, 1)  # Variable
         elif isinstance(node, TableNode):
             # Table literal - generate table and return placeholder address
             table_id = self._add_table(node)
@@ -13258,7 +13438,7 @@ class ImprovedCodeGenerator:
         op1_type, op1_val = self._get_operand_type_and_value(operands[0])
         op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # LOADB is 2OP opcode 0x10
+        # LOADB is 2OP opcode 0x10 (LOADW is 0x0F)
         opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
         code.append(opcode)
         code.append(op1_val & 0xFF)
@@ -13453,7 +13633,7 @@ class ImprovedCodeGenerator:
         op1_type, op1_val = op_types[0], op_vals[0]
         op2_type, op2_val = op_types[1], op_vals[1]
 
-        # LOADB is 2OP opcode 0x10
+        # LOADB is 2OP opcode 0x10 (LOADW is 0x0F)
         opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
         code.append(opcode)
         code.append(op1_val & 0xFF)

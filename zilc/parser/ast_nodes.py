@@ -353,6 +353,21 @@ class SpliceUnquoteNode(ASTNode):
         return f"SpliceUnquote({self.expr})"
 
 
+class SpliceResultNode(ASTNode):
+    """Result of a macro expansion that should be spliced inline.
+
+    Represents a list of statements/expressions that should be inlined
+    into the surrounding context rather than treated as a single value.
+    Created by macros returning <CHTYPE '(...) SPLICE>.
+    """
+    def __init__(self, items: List['ASTNode'], line: int = 0, column: int = 0):
+        super().__init__(NodeType.SPLICE_UNQUOTE, line, column)  # Reuse type
+        self.items = items  # List of items to splice inline
+
+    def __repr__(self):
+        return f"SpliceResult({self.items})"
+
+
 class DirectionsNode(ASTNode):
     """Directions declaration: <DIRECTIONS NORTH SOUTH EAST WEST>
 

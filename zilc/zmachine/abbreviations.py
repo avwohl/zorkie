@@ -129,7 +129,8 @@ class AbbreviationsTable:
 
         for abbrev in self.abbreviations:
             # Encode abbreviation as a standalone string
-            encoded = text_encoder.encode_text_zchars(abbrev)
+            # Use literal=True to skip text transformations (abbreviations are literal text)
+            encoded = text_encoder.encode_text_zchars(abbrev, literal=True)
             self.encoded_strings.append(encoded)
 
         return self.encoded_strings

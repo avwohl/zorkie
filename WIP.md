@@ -2,39 +2,96 @@
 
 ## How to Resume
 
-The short-circuit AND/OR implementation is mostly complete but has an issue with void expressions. The failing test is:
-```
-tests/zilf/test_flow_control.py::TestCond::test_and_in_void_context_with_macro_at_end_should_work
-```
+Focus areas for next session:
+1. **Object ordering** - 4 tests failing on FIRST?/NEXT? predicates
+2. **TELL tokens** - 5 tests for custom NEW-ADD-WORD token definitions
+3. **ZREST/compile-time tables** - 10 tests for compile-time table manipulation
+4. **MAKE-PREFIX-MACRO** - 1 test for reader macro support
+5. **Funny globals** - 4 tests for globals beyond 240 limit
 
-The problem: When `<AND <FOO> <BAR>>` where BAR expands to `<PRINTN 42>` (a void operation), the AND correctly evaluates both expressions but the last operand doesn't push a value to the stack. The test expects "42" to be printed (which should happen) but currently outputs nothing.
-
-To debug:
-1. Check if `generate_form` for `<PRINTN 42>` is being called during AND evaluation
-2. The issue may be in the JZ branch logic or offset calculations in `gen_and`
-3. Look at codegen_improved.py lines 11486-11619 for the AND implementation
-
-Other good next steps:
-- SPLICE macro support (`<CHTYPE ... SPLICE>`) - needed for 6 macro tests
-- Property value encoding (GETB reads wrong byte for 2-byte words) - affects MAP-DIRECTIONS tests
-- Object ordering tests - many use FIRST?/NEXT? predicates that may have issues
-
-## Current Status (2025-12-25)
-- **Tests:** 381 passed, 102 failed, 143 skipped
-- **Started session at:** 380 passed, 103 failed
-- **Fixed this session:** +1 passing, -1 failing
+## Current Status (2025-12-26)
+- **Tests:** 395 passed, 88 failed, 143 skipped
+- **Started session at:** 389 passed, 94 failed
+- **Fixed this session:** +6 passing, -6 failing
 - **Remaining by category:**
-  - objects: 21 failing
-  - tell: 20 failing
+  - objects: 18 failing (was 21)
+  - tell: 18 failing
   - vocab: 18 failing
-  - meta: 10 failing
   - tables: 10 failing
+  - meta: 8 failing
   - syntax: 7 failing
-  - macros: 6 failing
-  - variables: 6 failing
-  - flow_control: 4 failing
+  - variables: 7 failing
+  - macros: 2 failing
+  - flow_control: 0 failing
 
-## Recent Changes (This Session)
+## Recent Changes (2025-12-26)
+- Fixed abbreviation encoding to preserve literal text
+  - Abbreviation strings now encoded with `literal=True` to skip transformations
+  - Added `literal` parameter to `encode_string` and `encode_text_zchars`
+  - Space collapsing was incorrectly affecting abbreviation strings
+- Investigated space collapsing feature
+  - Space collapsing logic works correctly (reduces 2+ spaces after periods by 1)
+  - PRESERVE-SPACES? global correctly controls behavior
+  - **Limitation**: dfrotz strips trailing spaces from output lines
+  - Tests expecting trailing spaces before newlines cannot pass with dfrotz
+  - The encoding is correct but dfrotz's output buffering removes trailing spaces
+- Added direction exit object validation
+  - Rejects `(NORTH TO BAR)` when BAR object doesn't exist
+  - Applies to TO, UEXIT, and direct object references
+- Added property value validation for non-constants
+  - Global variables cannot be used as property values
+  - Only constants, objects, and literals allowed
+  - Catches `<OBJECT FOO (BAZ GLOBAL-VAR)>` errors
+- Added does_not_compile_with_error_count helper for tests
+- Added ZIL0410 warning for unprintable characters in strings
+  - Tab (0x09) only legal in V6, warns in V5 and earlier
+  - Backspace, Ctrl-Z, and other control chars always warn
+  - Newline (0x0A) and CR (0x0D) always allowed
+- Added CRLF-CHARACTER support
+  - `<SETG CRLF-CHARACTER !\^>` now sets custom newline character
+  - Text encoder respects CRLF-CHARACTER (default: |)
+  - Passed to ZTextEncoder via compile_globals
+- Added warning control directives
+  - `<SUPPRESS-WARNINGS? "ZIL0204">` suppresses specific warning
+  - `<SUPPRESS-WARNINGS? ALL>` suppresses all warnings
+  - `<SUPPRESS-WARNINGS? NONE>` unsuppresses all warnings
+  - `<WARN-AS-ERROR? T>` converts warnings to errors
+- Added ZIL0204 warning for LocalVarNode fallback
+  - Warns when .X uses global instead of local
+  - Codegen warnings now captured in CompilationResult
+- Fixed error code extraction in test harness
+  - SyntaxError exceptions now also extract error codes
+
+## Previous Changes (2025-12-26)
+- Fixed MAP-DIRECTIONS tests
+  - Added ByteValue wrapper for direction exits (stored as single bytes)
+  - GETB can now correctly read destination object from property table
+  - Both MAP-DIRECTIONS tests now pass
+- Fixed `.X` global fallback
+  - LocalVarNode now falls back to checking globals if no local exists
+  - `.X` syntax works for both local and global variables
+  - Also fixed implicit return when routine ends with `.X` referencing a global
+- Fixed LOADB opcode (2OP:0x10, not 0x11 which is GET_PROP)
+
+## Previous Changes (2025-12-26)
+- Fixed SPLICE macro support
+  - `<CHTYPE '(...) SPLICE>` now correctly expands inline
+  - Handles both list and FormNode quoted content
+  - Fixes 4 macro tests for void/value context and arguments
+- Fixed DO-FUNNY-RETURN? flag handling
+  - When `<SETG DO-FUNNY-RETURN? T>` is set, RETURN exits routine not block
+  - V5+ defaults to routine return unless explicitly set to false
+  - V3/V4 defaults to block return (original ZILF behavior)
+- Fixed AtomNode implicit return in routines
+  - When a routine ends with an atom like `T`, it now correctly returns that value
+  - Previously atoms fell through to default return 0
+  - Added handling for constants, objects, and globals as final statements
+- Fixed macro QUOTE unwrapping
+  - Macros returning `'<FORM>` now correctly expand to `<FORM>`
+  - Previously the QUOTE wrapper was kept, breaking macro expansion
+  - This fixed the AND-with-macro test
+
+## Previous Session Changes (2025-12-25)
 - Added DO misplaced END clause detection
   - DO END clause must appear immediately after loop spec
   - `<DO (CNT 0 25) body (END ...)>` now correctly fails
@@ -43,7 +100,6 @@ Other good next steps:
   - gen_and now evaluates left-to-right, returning false early if any operand is false
   - gen_or now evaluates left-to-right, returning first truthy value
   - BAND/BOR remain as bitwise operations using Z-machine AND/OR opcodes
-  - Note: Some edge cases with void expressions still need work
 
 ## Previous Session Changes (2025-12-25)
 - Added COND support for macro-expanded clauses
