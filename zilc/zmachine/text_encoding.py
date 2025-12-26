@@ -463,4 +463,6 @@ def decode_string(words: List[int], version: int = 3) -> str:
                 result.append(alphabet[zc])
             i += 1
 
-    return ''.join(result).rstrip('\x05 ')  # Remove padding
+    # Remove only padding character (ASCII 5), not spaces
+    # Spaces at end of strings are meaningful
+    return ''.join(result).rstrip('\x05')

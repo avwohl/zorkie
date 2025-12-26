@@ -213,11 +213,10 @@ class ZILCompiler:
         # Track compile-time global values for %<COND> evaluation
         self.compile_globals = {}
 
-        # Extract SETG directives to track compile-time values
-        # <SETG VARNAME value>
+        # Extract SET and SETG directives to track compile-time values
+        # <SET VARNAME value> or <SETG VARNAME value>
         # Handles: integers, T, <>, and character literals (!\X)
-        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?]+)\s+(\d+|T|<>|!\\.)?\s*>'
-        def extract_setg(match):
+        def extract_set_or_setg(match):
             var_name = match.group(1)
             var_value = match.group(2) or ''
             if var_value.isdigit():
@@ -230,8 +229,15 @@ class ZILCompiler:
                 # Character literal: !\X -> the character X
                 self.compile_globals[var_name] = var_value[2]
             self.log(f"  Global: {var_name} = {self.compile_globals.get(var_name)}")
-            return match.group(0)  # Keep the SETG in source
-        source = re.sub(setg_pattern, extract_setg, source, flags=re.IGNORECASE)
+            return match.group(0)  # Keep the SET/SETG in source
+
+        # Handle SETG
+        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?]+)\s+(\d+|T|<>|!\\.)?\s*>'
+        source = re.sub(setg_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
+
+        # Handle SET (compile-time settings like REDEFINE)
+        set_pattern = r'<\s*SET\s+([A-Z0-9\-?]+)\s+(\d+|T|<>|!\\.)?\s*>'
+        source = re.sub(set_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
         # First pass: Extract COMPILATION-FLAG directives
         # <COMPILATION-FLAG FLAGNAME <T>> or <COMPILATION-FLAG FLAGNAME T>
@@ -1313,7 +1319,7 @@ class ZILCompiler:
                         cond_name = condition.value if isinstance(condition, AtomNode) else str(condition)
                         # Check if the condition global exists
                         # We need access to the program's globals - pass through globals_set parameter
-                        if hasattr(self, '_current_globals_set') and self._current_globals_set:
+                        if hasattr(self, '_current_globals_set') and self._current_globals_set is not None:
                             if cond_name not in self._current_globals_set:
                                 raise ValueError(f"ZIL0207: Direction exit references nonexistent global '{cond_name}'")
 
@@ -1535,6 +1541,17 @@ class ZILCompiler:
         # Extract flags used in SYNTAX FIND clauses
         syntax_flags = self._extract_syntax_find_flags(source) if source else set()
 
+        # Pre-assign object numbers for code generation
+        # This allows object references like ,FOO to be resolved during codegen
+        objects = {}
+        obj_num = 1  # Objects start at 1 (0 is reserved for "nothing")
+        for obj in program.objects:
+            objects[obj.name] = obj_num
+            obj_num += 1
+        for room in program.rooms:
+            objects[room.name] = obj_num
+            obj_num += 1
+
         return {
             'flags': flags,
             'properties': properties,
@@ -1543,6 +1560,7 @@ class ZILCompiler:
             'low_direction': low_direction if program.directions else None,
             'max_properties': max_properties,
             'syntax_flags': syntax_flags,  # Flags used in SYNTAX FIND clauses
+            'objects': objects,  # Pre-assigned object numbers
         }
 
     def _build_action_tables(self, program) -> dict:
@@ -1926,17 +1944,17 @@ class ZILCompiler:
                 # Try to get flag number from constants first
                 if flag in codegen.constants:
                     bit_num = codegen.constants[flag]
-                    attr_mask |= (1 << (31 - bit_num) if self.version <= 3 else (47 - bit_num))
+                    attr_mask |= (1 << (31 - bit_num)) if self.version <= 3 else (1 << (47 - bit_num))
                 elif flag in flag_bit_map:
                     # Already auto-assigned
                     bit_num = flag_bit_map[flag]
-                    attr_mask |= (1 << (31 - bit_num) if self.version <= 3 else (47 - bit_num))
+                    attr_mask |= (1 << (31 - bit_num)) if self.version <= 3 else (1 << (47 - bit_num))
                 else:
                     # Auto-assign new bit number
                     if next_flag_bit < max_attributes:
                         flag_bit_map[flag] = next_flag_bit
                         self.log(f"  Auto-assigned FLAG {flag} -> bit {next_flag_bit}")
-                        attr_mask |= (1 << (31 - next_flag_bit) if self.version <= 3 else (47 - next_flag_bit))
+                        attr_mask |= (1 << (31 - next_flag_bit)) if self.version <= 3 else (1 << (47 - next_flag_bit))
                         next_flag_bit += 1
                     else:
                         self.log(f"  Warning: Too many flags, ignoring {flag}")
@@ -2115,8 +2133,11 @@ class ZILCompiler:
 
         self.log(f"  {len(all_objects)} objects/rooms total")
 
+        # Build set of routine names for validation
+        routine_names = {r.name for r in program.routines}
+
         # Helper to get object number from IN property value
-        def get_parent_num(in_value):
+        def get_parent_num(in_value, obj_name):
             """Extract parent object number from IN property value."""
             from .parser.ast_nodes import AtomNode, FormNode
             if in_value is None:
@@ -2138,6 +2159,13 @@ class ZILCompiler:
             else:
                 return 0
 
+            # Check if parent_name is a routine (not allowed as container)
+            if parent_name in routine_names:
+                raise ValueError(
+                    f"Object '{obj_name}' has IN property referencing routine "
+                    f"'{parent_name}' - only objects/rooms can contain other objects"
+                )
+
             # Look up parent by name
             return obj_name_to_num.get(parent_name, 0)
 
@@ -2147,7 +2175,7 @@ class ZILCompiler:
             obj_num = obj_name_to_num[name]
             # Check for IN or LOC property
             in_value = node.properties.get('IN') or node.properties.get('LOC')
-            parent_num = get_parent_num(in_value)
+            parent_num = get_parent_num(in_value, name)
             parent_of[obj_num] = parent_num
 
         # Build child lists (parent -> list of children in order)

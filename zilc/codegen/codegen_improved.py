@@ -69,6 +69,10 @@ class ImprovedCodeGenerator:
             # Add parser constants (PS?OBJECT, PS?VERB, etc.)
             for const_name, const_val in symbol_tables.get('parser_constants', {}).items():
                 self.constants[const_name] = const_val
+            # Add pre-assigned object numbers for code generation
+            # This allows ,FOO object references to be resolved during codegen
+            for obj_name, obj_num in symbol_tables.get('objects', {}).items():
+                self.objects[obj_name] = obj_num
 
         # Version capabilities
         self._init_version_features()
@@ -138,34 +142,40 @@ class ImprovedCodeGenerator:
         # These are allocated in a specific range for parser use
         # V3: Status line reads global 0 for location, 1 for score, 2 for moves
         # V4+: No mandatory layout, but keep consistent ordering
-        if self.version <= 3:
-            # V3 layout: HERE, SCORE, MOVES must be at globals 0, 1, 2
-            self.parser_globals = {
-                'HERE': 0x10,   # Current location (global 0 for status line)
-                'SCORE': 0x11,  # Score (global 1 for status line)
-                'MOVES': 0x12,  # Move counter (global 2 for status line)
-                'PRSA': 0x13,   # Parser action (verb number)
-                'PRSO': 0x14,   # Parser direct object
-                'PRSI': 0x15,   # Parser indirect object
-                'WINNER': 0x16, # Current actor (usually player)
-            }
-            self.next_global = 0x17  # Start user globals after parser globals
+        #
+        # Parser globals are only reserved if action_table is provided.
+        # For minimal test code without parser features, user globals start at 0x10.
+        # If V3 code needs status line, it must define HERE/SCORE/MOVES at 0x10-0x12.
+        if action_table:
+            if self.version <= 3:
+                # V3 layout: HERE, SCORE, MOVES must be at globals 0, 1, 2
+                self.parser_globals = {
+                    'HERE': 0x10,   # Current location (global 0 for status line)
+                    'SCORE': 0x11,  # Score (global 1 for status line)
+                    'MOVES': 0x12,  # Move counter (global 2 for status line)
+                    'PRSA': 0x13,   # Parser action (verb number)
+                    'PRSO': 0x14,   # Parser direct object
+                    'PRSI': 0x15,   # Parser indirect object
+                    'WINNER': 0x16, # Current actor (usually player)
+                }
+            else:
+                # V4+ layout: no status line constraint
+                self.parser_globals = {
+                    'PRSA': 0x10,   # Parser action (verb number)
+                    'PRSO': 0x11,   # Parser direct object
+                    'PRSI': 0x12,   # Parser indirect object
+                    'HERE': 0x13,   # Current location
+                    'WINNER': 0x14, # Current actor (usually player)
+                    'MOVES': 0x15,  # Move counter
+                    'SCORE': 0x16,  # Score
+                }
+            self.next_global = 0x17
+            for name, num in self.parser_globals.items():
+                self.globals[name] = num
         else:
-            # V4+ layout: no status line constraint
-            self.parser_globals = {
-                'PRSA': 0x10,   # Parser action (verb number)
-                'PRSO': 0x11,   # Parser direct object
-                'PRSI': 0x12,   # Parser indirect object
-                'HERE': 0x13,   # Current location
-                'WINNER': 0x14, # Current actor (usually player)
-                'MOVES': 0x15,  # Move counter
-                'SCORE': 0x16,  # Score
-            }
-            self.next_global = 0x17  # Start user globals after parser globals
-
-        # Reserve these globals
-        for name, num in self.parser_globals.items():
-            self.globals[name] = num
+            # No parser - user globals start at 0x10
+            self.parser_globals = {}
+            self.next_global = 0x10
 
         # Standard verb action numbers (V? constants)
         # These map to PRSA values for common verbs
@@ -366,14 +376,49 @@ class ImprovedCodeGenerator:
             self.objects[room.name] = self.next_object
             self.next_object += 1
 
+        # Check if REDEFINE is allowed
+        allow_redefine = False
+        if self.compiler and hasattr(self.compiler, 'compile_globals'):
+            allow_redefine = self.compiler.compile_globals.get('REDEFINE', False)
+
+        # V3 status line globals - these must be at fixed positions for status line
+        # If any of HERE, SCORE, MOVES are defined, ensure all three are allocated
+        v3_status_globals = {'HERE': 0x10, 'SCORE': 0x11, 'MOVES': 0x12} if self.version <= 3 else {}
+
+        # Check if any V3 status globals are defined in the program
+        if v3_status_globals:
+            program_global_names = {g.name for g in program.globals}
+            if program_global_names & set(v3_status_globals.keys()):
+                # At least one status global is defined - reserve all three
+                for name, slot in v3_status_globals.items():
+                    if name not in self.globals:
+                        self.globals[name] = slot
+                        # Only initialize to 0 if not explicitly defined by user
+                        if name not in program_global_names:
+                            self.global_values[name] = 0
+                # Advance next_global past the reserved status globals
+                self.next_global = max(self.next_global, 0x13)
+
         # Process globals (register names and capture initial values)
         for global_node in program.globals:
             # Check if this is a parser global (like HERE, SCORE, MOVES)
             # If so, don't allocate a new slot - use the reserved one
-            if global_node.name not in self.parser_globals:
-                self.globals[global_node.name] = self.next_global
-                self.next_global += 1
-            # else: already in self.globals from parser_globals initialization
+            if global_node.name in self.parser_globals:
+                # Already reserved by parser globals
+                pass
+            elif global_node.name in v3_status_globals:
+                # V3 status line global - already reserved above
+                pass
+            else:
+                # Check for redefinition
+                if global_node.name in self.globals and not allow_redefine:
+                    raise ValueError(
+                        f"Global '{global_node.name}' is already defined. "
+                        f"Use <SET REDEFINE T> to allow redefinition."
+                    )
+                if global_node.name not in self.globals:
+                    self.globals[global_node.name] = self.next_global
+                    self.next_global += 1
 
             # Capture initial value if provided
             if global_node.initial_value is not None:
@@ -407,7 +452,16 @@ class ImprovedCodeGenerator:
 
         # Pre-populate routine names so we can detect user-defined routines
         # during code generation (before their offsets are known)
-        self._routine_names = {routine.name for routine in program.routines}
+        # Also check for duplicate routine definitions
+        self._routine_names = set()
+        for routine in program.routines:
+            if routine.name in self._routine_names and not allow_redefine:
+                raise ValueError(
+                    f"Routine '{routine.name}' is already defined. "
+                    f"Use <SET REDEFINE T> to allow redefinition."
+                )
+            self._routine_names.add(routine.name)
+
         # Store routine parameter info for call validation
         # Maps routine name -> (num_required, num_optional)
         self._routine_param_info = {}
@@ -882,13 +936,28 @@ class ImprovedCodeGenerator:
         """Evaluate and store a constant."""
         # Handle TableNode values (ITABLE, TABLE, LTABLE)
         if isinstance(const_node.value, TableNode):
+            # Check for redefinition with different table
+            if hasattr(self, 'table_addresses') and const_node.name in self.table_addresses:
+                raise ValueError(
+                    f"Constant '{const_node.name}' is already defined as a table"
+                )
             # Compile the table and store reference
             self._compile_global_table_node(const_node.name, const_node.value)
             return
 
         value = self.eval_expression(const_node.value)
         if value is not None:
-            self.constants[const_node.name] = value
+            # Check for redefinition with different value
+            if const_node.name in self.constants:
+                existing_value = self.constants[const_node.name]
+                if existing_value != value:
+                    raise ValueError(
+                        f"Constant '{const_node.name}' is already defined with value "
+                        f"{existing_value}, cannot redefine with value {value}"
+                    )
+                # Same value is OK (no-op)
+            else:
+                self.constants[const_node.name] = value
 
     def eval_expression(self, node: ASTNode) -> Optional[int]:
         """Evaluate a constant expression at compile time."""
@@ -12647,7 +12716,10 @@ class ImprovedCodeGenerator:
                     attr = self.get_operand_value(condition.operands[1])
 
                     if obj is not None and isinstance(attr, int):
-                        code.append(0x4A)  # TEST_ATTR opcode
+                        # TEST_ATTR is 2OP opcode 0x0A
+                        # Long form: bit 7=0, bit 6=op1 type, bit 5=op2 type, bits 4-0=opcode
+                        # Both operands are small constants (type 0), so opcode = 0x0A
+                        code.append(0x0A)  # TEST_ATTR with small constant operands
                         code.append(obj & 0xFF)
                         code.append(attr & 0xFF)
                         # Branch byte will be added below
@@ -13254,6 +13326,9 @@ class ImprovedCodeGenerator:
             return self.objects.get(node.value)
         elif isinstance(node, NumberNode):
             return node.value
+        elif isinstance(node, GlobalVarNode):
+            # Handle ,OBJECT references - look up in objects table
+            return self.objects.get(node.name)
         return None
 
     def build_globals_data(self) -> bytes:

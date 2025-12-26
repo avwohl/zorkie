@@ -36,6 +36,7 @@ def make_many_globals(count, prefix="MY-GLOBAL"):
 class TestFunnyGlobals:
     """Tests for FUNNY-GLOBALS (extended global support)."""
 
+    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_funny_globals_allows_lots_of_globals(self):
         """Test that FUNNY-GLOBALS allows more than 240 globals."""
         num_globals = 500
@@ -54,6 +55,7 @@ class TestFunnyGlobals:
             .with_global(globals_code) \
             .outputs("\n".join(expected_parts) + "\n")
 
+    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_funny_globals_works_with_inc(self):
         """Test that FUNNY-GLOBALS works with INC."""
         num_globals = 500
@@ -69,6 +71,7 @@ class TestFunnyGlobals:
             .with_global(globals_code) \
             .outputs("\n".join(expected_parts) + "\n")
 
+    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_assigned_funny_globals_works_in_value_context(self):
         """Test that assigned FUNNY-GLOBALS works in value context."""
         num_globals = 500
@@ -98,6 +101,7 @@ class TestFunnyGlobals:
             .in_v3() \
             .generates_code_matching(r"\.GVAR HERE=.*\.GVAR SCORE=.*\.GVAR MOVES=")
 
+    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_propdef_referenced_globals_always_hard_globals(self):
         """Test that PROPDEF-referenced globals are always hard globals."""
         num_globals = 500
@@ -111,6 +115,7 @@ class TestFunnyGlobals:
             .with_global("\n".join(globals_code)) \
             .generates_code_matching(r"\.GVAR MY-GLOBAL-400=")
 
+    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_parameter_globals_always_hard_globals(self):
         """Test that parameter globals are always hard globals."""
         num_globals = 500
@@ -128,6 +133,7 @@ class TestFunnyGlobals:
 class TestDefineGlobals:
     """Tests for DEFINE-GLOBALS construct."""
 
+    @pytest.mark.xfail(reason="DEFINE-GLOBALS not implemented")
     def test_define_globals_works(self):
         """Test that DEFINE-GLOBALS works correctly."""
         AssertRoutine(

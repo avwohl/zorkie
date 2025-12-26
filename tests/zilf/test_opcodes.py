@@ -1475,8 +1475,8 @@ class TestSetQuirks:
           variable whose index is in FOO.
         """
         # void context
-        # Note: FOO=23 because our compiler reserves globals 16-22 for parser globals
-        # (V3: HERE, SCORE, MOVES, PRSA, PRSO, PRSI, WINNER), so user globals start at 23
+        # Note: Without parser globals, user globals start at slot 16.
+        # For indirect SETG tests, FOO must match MYGLOBAL's slot (16).
         AssertRoutine('"AUX" (FOO 23)', "<SET .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("123\n1")
@@ -1485,9 +1485,10 @@ class TestSetQuirks:
             .with_global("<GLOBAL MYGLOBAL 1>") \
             .outputs("23\n123")
 
-        AssertRoutine('"AUX" (FOO 23)', "<SETG .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
+        # SETG .FOO does indirect store: sets global at index in FOO. MYGLOBAL is at slot 16.
+        AssertRoutine('"AUX" (FOO 16)', "<SETG .FOO 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \
-            .outputs("23\n123")
+            .outputs("16\n123")
 
         AssertRoutine('"AUX" (FOO 23)', "<SET ,MYGLOBAL 123> <PRINTN .FOO> <CRLF> <PRINTN ,MYGLOBAL>") \
             .with_global("<GLOBAL MYGLOBAL 1>") \

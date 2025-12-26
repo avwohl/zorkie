@@ -781,8 +781,15 @@ class Parser:
                         for loc_prop in location_props:
                             if loc_prop in properties and loc_prop != prop_name:
                                 self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
-                    # Store property
-                    if len(values) == 1:
+                    # Store property (combine FLAGS if already present)
+                    if prop_name == 'FLAGS' and prop_name in properties:
+                        # Combine FLAGS values
+                        existing = properties[prop_name]
+                        if not isinstance(existing, list):
+                            existing = [existing]
+                        existing.extend(values)
+                        properties[prop_name] = existing
+                    elif len(values) == 1:
                         properties[prop_name] = values[0]
                     else:
                         properties[prop_name] = values
@@ -835,8 +842,15 @@ class Parser:
                     for loc_prop in location_props:
                         if loc_prop in properties and loc_prop != prop_name:
                             self.error(f"Duplicate location property: '{prop_name}' conflicts with '{loc_prop}'")
-                # Store property
-                if len(values) == 1:
+                # Store property (combine FLAGS if already present)
+                if prop_name == 'FLAGS' and prop_name in properties:
+                    # Combine FLAGS values
+                    existing = properties[prop_name]
+                    if not isinstance(existing, list):
+                        existing = [existing]
+                    existing.extend(values)
+                    properties[prop_name] = existing
+                elif len(values) == 1:
                     properties[prop_name] = values[0]
                 else:
                     properties[prop_name] = values
