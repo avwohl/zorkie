@@ -13,7 +13,8 @@ Focus areas for next session:
 5. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 
 ## Current Status (2025-12-26)
-- **Tests:** 402 passed, 0 failed, 144 skipped, 80 xfailed
+- **Tests:** 404 passed, 0 failed, 144 skipped, 80 xfailed
+- **Zork1 compiles** to 98KB but has runtime issues (W?* vocab constant resolution)
 - **All test failures are now either fixed or marked as xfail**
 - The xfailed tests represent ZILF-specific features not yet implemented:
   - NEW-PARSER?: Extended vocabulary format
@@ -25,7 +26,37 @@ Focus areas for next session:
   - Internationalization: CHRSET, LANGUAGE
   - Parser extensions: COMPACT-PREACTIONS?, REMOVE-SYNONYM, SIBREAKS
 
+## Zork1 Compilation Status
+- **Zork1 now compiles** to a 98KB story file
+- **Runtime issue**: Game crashes with "Illegal object 17830"
+- **Root cause**: W?* vocabulary constants not resolved (need dictionary addresses)
+- **Fix needed**: Dictionary must be built BEFORE codegen, or use placeholder mechanism
+  - Currently dictionary is built after codegen completes
+  - All W?* references (W?RUN, W?SAY, W?ALL, etc.) resolve to 0
+  - This causes runtime failures when parser tries to match vocabulary words
+
 ## Recent Changes (2025-12-26)
+- Fixed IGRTR? and DLESS? to support variable second operands
+  - Z-machine inc_chk/dec_chk can compare against variables, not just constants
+  - Added tests for variable comparison values
+- Fixed macro OPTIONAL parameter handling
+  - Parser now tracks "OPTIONAL"/"OPT" keyword in macro param definitions
+  - Uses 5-tuple format: (name, is_quoted, is_tuple, is_aux, is_optional)
+  - macro_expander handles new format, counts only required params
+- Fixed VALUE with FormNode operand (indirect variable access)
+  - `<VALUE <GETB table index>>` now generates proper LOAD with indirect reference
+  - Previously caused "can't extend bytearray with NoneType" crash
+- Fixed direction exit condition validation
+  - IF conditions can reference objects (not just globals)
+  - `(WEST TO KITCHEN IF KITCHEN-WINDOW IS OPEN)` now works
+- Fixed GO routine termination
+  - GO routine now uses QUIT (0xBA) instead of RET
+  - Z-machine behavior is undefined for returning from GO routine
+- Fixed IN direction vs location property conflict
+  - IN can be both a direction (DIRECTIONS declaration) and a location property
+  - Parser now recognizes direction exit syntax (TO, PER, SORRY, etc.) to disambiguate
+
+## Previous Changes (2025-12-26)
 - Added MDL0429 warning infrastructure for vocab words with apostrophes
   - Warning is implemented but requires lexer support for `'` in atoms
   - Currently lexer treats all `'` as QUOTE tokens
