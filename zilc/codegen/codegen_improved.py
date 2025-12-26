@@ -125,6 +125,13 @@ class ImprovedCodeGenerator:
         self._string_placeholders: Dict[int, str] = {}
         self._next_string_placeholder_index = 0
 
+        # Vocabulary word placeholders - map placeholder_index to word (W?WORD -> "word")
+        # Placeholders are encoded as 0xFB + index (high byte) + index (low byte)
+        self._vocab_placeholders: Dict[int, str] = {}
+        self._next_vocab_placeholder_index = 0
+        # Track vocab placeholder positions for resolution (routine_name, offset, placeholder_idx)
+        self._vocab_placeholder_positions: List[Tuple[str, int, int]] = []
+
         # Track missing routines (referenced but not defined)
         self._missing_routines: set = set()
 
@@ -931,6 +938,15 @@ class ImprovedCodeGenerator:
         The assembler should replace these with actual packed addresses.
         """
         return self._string_placeholders.copy()
+
+    def get_vocab_placeholders(self) -> Dict[int, str]:
+        """Get vocabulary word placeholders for the assembler to resolve.
+
+        Returns a mapping of placeholder index to word text (lowercase).
+        Placeholder values are encoded as 0xFB00 | index in the bytecode.
+        The assembler should replace these with dictionary word addresses.
+        """
+        return self._vocab_placeholders.copy()
 
     def eval_constant(self, const_node: ConstantNode):
         """Evaluate and store a constant."""
@@ -3769,6 +3785,20 @@ class ImprovedCodeGenerator:
                     return (1, const_val)
                 else:
                     return (0, const_val)
+            elif node.name.startswith('W?'):
+                # W?* vocabulary word constant - emit placeholder for later resolution
+                word = node.name[2:].lower()  # Extract word name (W?RUN -> "run")
+                placeholder_idx = self._next_vocab_placeholder_index
+                self._vocab_placeholders[placeholder_idx] = word
+                self._next_vocab_placeholder_index += 1
+                # Track position for resolution (will be filled in during code generation)
+                # Return large constant placeholder (0xFB00 | index)
+                return (0, 0xFB00 | placeholder_idx)
+            elif node.name.startswith('ACT?'):
+                # ACT?* action constant - these should be in action_table
+                # For now, emit 0 as placeholder
+                self._warn(f"Unknown action constant '{node.name}' - using default")
+                return (1, 0)
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (2, 0x10)
@@ -3851,6 +3881,18 @@ class ImprovedCodeGenerator:
                 # Return large constant placeholder (0xFD00 | index)
                 # This will be resolved by get_routine_fixups()
                 return (0, 0xFD00 | placeholder_idx)
+            elif node.name.startswith('W?'):
+                # W?* vocabulary word constant - emit placeholder for later resolution
+                word = node.name[2:].lower()  # Extract word name (W?RUN -> "run")
+                placeholder_idx = self._next_vocab_placeholder_index
+                self._vocab_placeholders[placeholder_idx] = word
+                self._next_vocab_placeholder_index += 1
+                # Return large constant placeholder (0xFB00 | index)
+                return (0, 0xFB00 | placeholder_idx)
+            elif node.name.startswith('ACT?'):
+                # ACT?* action constant - should be in constants
+                self._warn(f"Unknown action constant '{node.name}' - using default")
+                return (0, 0)
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (1, 0x10)  # Default to variable 0x10

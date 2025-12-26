@@ -1925,6 +1925,29 @@ class ZILCompiler:
         dict_word_offsets = dictionary.get_word_offsets()
         self.log(f"  Dictionary contains {len(dictionary.words)} words")
 
+        # Get vocab placeholders and prepare fixups
+        vocab_placeholders = codegen.get_vocab_placeholders()
+        vocab_fixups = []  # List of (placeholder_idx, word_offset)
+        missing_vocab_words = []
+        for placeholder_idx, word in vocab_placeholders.items():
+            if word in dict_word_offsets:
+                vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
+            else:
+                # Word not in dictionary - try to add it
+                dictionary.add_word(word, 'parser')
+                # Re-get offsets to include the new word
+                dict_word_offsets = dictionary.get_word_offsets()
+                if word in dict_word_offsets:
+                    vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
+                else:
+                    missing_vocab_words.append(word)
+                    vocab_fixups.append((placeholder_idx, 0))  # Default to 0
+
+        if vocab_placeholders:
+            self.log(f"  {len(vocab_placeholders)} vocabulary word references (W?*)")
+        if missing_vocab_words:
+            self.log(f"  WARNING: {len(missing_vocab_words)} missing vocab words: {missing_vocab_words[:5]}...")
+
         # Build object table with proper properties
         self.log("Building object table...")
         obj_table = ObjectTable(self.version, text_encoder=codegen.encoder)
@@ -2325,7 +2348,8 @@ class ZILCompiler:
             routine_fixups=routine_fixups,
             table_routine_fixups=table_routine_fixups,
             extension_table=extension_table,
-            string_placeholders=string_placeholders
+            string_placeholders=string_placeholders,
+            vocab_fixups=vocab_fixups
         )
 
         return story

@@ -285,6 +285,50 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_vocab_placeholders(self, routines: bytes, vocab_fixups: list,
+                                       dict_addr: int) -> bytes:
+        """
+        Resolve vocabulary word placeholders (W?*) in routine bytecode.
+
+        Scans bytecode for 0xFB00 | index values and replaces them with actual
+        dictionary word addresses.
+
+        Args:
+            routines: Routine bytecode with vocab placeholders
+            vocab_fixups: List of (placeholder_idx, word_offset) tuples
+            dict_addr: Base address of dictionary in story file
+
+        Returns:
+            Patched routine bytecode
+        """
+        if not vocab_fixups:
+            return routines
+
+        result = bytearray(routines)
+
+        # Build a map from placeholder_idx to word address
+        fixup_map = {}
+        for placeholder_idx, word_offset in vocab_fixups:
+            # Word offset is relative to dictionary data start
+            # Final address is dict_addr + word_offset
+            word_addr = dict_addr + word_offset
+            fixup_map[placeholder_idx] = word_addr
+
+        # Scan for 0xFB00 | index patterns (16-bit values)
+        i = 0
+        while i < len(result) - 1:
+            # Check for 0xFB high byte
+            if result[i] == 0xFB:
+                placeholder_idx = result[i + 1]
+                if placeholder_idx in fixup_map:
+                    word_addr = fixup_map[placeholder_idx]
+                    # Patch the 16-bit address
+                    result[i] = (word_addr >> 8) & 0xFF
+                    result[i + 1] = word_addr & 0xFF
+            i += 1
+
+        return bytes(result)
+
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
                                      prop_defaults_size: int) -> bytes:
         """
@@ -391,7 +435,8 @@ class ZAssembler:
                         routine_fixups: list = None,
                         table_routine_fixups: list = None,
                         extension_table: bytes = b'',
-                        string_placeholders: dict = None) -> bytes:
+                        string_placeholders: dict = None,
+                        vocab_fixups: list = None) -> bytes:
         """
         Build complete story file.
 
@@ -408,6 +453,7 @@ class ZAssembler:
             table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
             extension_table: Header extension table bytes (V5+)
             string_placeholders: Dict mapping placeholder index to string text for operand resolution
+            vocab_fixups: List of (placeholder_idx, word_offset) for W?* vocabulary word resolution
 
         Returns:
             Complete story file as bytes
@@ -699,6 +745,10 @@ class ZAssembler:
         # Resolve routine call fixups (patch call addresses)
         if routine_fixups:
             routines = self._resolve_routine_fixups(routines, routine_fixups)
+
+        # Resolve vocabulary word placeholders (W?* -> dictionary addresses)
+        if vocab_fixups:
+            routines = self._resolve_vocab_placeholders(routines, vocab_fixups, dict_addr)
 
         # Add routines
         story.extend(routines)
