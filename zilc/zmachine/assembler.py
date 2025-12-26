@@ -108,13 +108,17 @@ class ZAssembler:
         return bytes(result)
 
     def _resolve_string_markers(self, routines: bytes, string_table,
-                                   string_placeholders: dict = None) -> bytes:
+                                   string_placeholders: dict = None,
+                                   placeholder_positions: list = None) -> bytes:
         """
         Resolve string table markers in routine bytecode.
 
+        Uses position-based resolution when placeholder_positions is provided,
+        avoiding false matches when 0x8D appears as operand data (e.g., global var 141).
+
         Handles two formats:
-        1. Old format: (0x8D 0xFF 0xFE <length> <text>) - variable size
-        2. New format: (0x8D 0xFD <index>) - fixed 3-byte size
+        1. Old format: (0x8D 0xFF 0xFE <length> <text>) - variable size, uses scanning
+        2. New format: (0x8D <hi> <lo>) where value 0xE000-0xFFFD - uses position-based resolution
 
         Both are replaced with PRINT_PADDR instructions:
         (0x8D <packed_addr_hi> <packed_addr_lo>)
@@ -123,80 +127,88 @@ class ZAssembler:
             routines: Original routine bytecode with markers
             string_table: StringTable instance with resolved addresses
             string_placeholders: Dict mapping placeholder index to string text
+            placeholder_positions: List of (byte_offset, placeholder_idx) for position-based resolution
 
         Returns:
             Modified routine bytecode with markers resolved
         """
+        # Use position-based resolution if positions are provided
+        if placeholder_positions:
+            result = bytearray(routines)
+            for byte_offset, placeholder_idx in placeholder_positions:
+                if byte_offset + 2 >= len(result):
+                    continue  # Invalid offset, skip
+                # Verify this looks like a placeholder (0x8D followed by placeholder value)
+                if result[byte_offset] != 0x8D:
+                    continue  # Not a PRINT_PADDR opcode, skip
+                # Get the string text for this placeholder
+                if string_placeholders and placeholder_idx in string_placeholders:
+                    text = string_placeholders[placeholder_idx]
+                    # Get packed address from string table
+                    packed_addr = string_table.get_packed_address(text, self.version)
+                    if packed_addr is not None:
+                        # Patch in place: keep 0x8D, update the address bytes
+                        result[byte_offset + 1] = (packed_addr >> 8) & 0xFF
+                        result[byte_offset + 2] = packed_addr & 0xFF
+            return bytes(result)
+
+        # Fallback: scan-based resolution (for old format or when positions not available)
         result = bytearray()
         i = 0
 
         while i < len(routines):
-            # Check for new 3-byte string placeholder: 0x8D 0xFD <idx>
-            if (i + 2 < len(routines) and
-                routines[i] == 0x8D and
-                routines[i+1] == 0xFD):
+            # Check for PRINT_PADDR opcode (0x8D) which might contain placeholders
+            if routines[i] == 0x8D and i + 2 < len(routines):
+                high_byte = routines[i+1]
+                low_byte = routines[i+2]
+                placeholder_val = (high_byte << 8) | low_byte
 
-                placeholder_idx = routines[i+2]
-                text = None
-                if string_placeholders and placeholder_idx in string_placeholders:
-                    text = string_placeholders[placeholder_idx]
+                # Check for old string table marker: 0x8D 0xFF 0xFE <len> <text>
+                if (high_byte == 0xFF and low_byte == 0xFE and
+                    i + 4 < len(routines)):
 
-                if text is not None:
-                    # Get packed address from string table
-                    packed_addr = string_table.get_packed_address(text, self.version)
+                    # Read string length (2 bytes, little-endian)
+                    text_len = routines[i+3] | (routines[i+4] << 8)
 
-                    if packed_addr is not None:
-                        # Emit PRINT_PADDR with actual packed address
-                        result.append(0x8D)  # SHORT PRINT_PADDR
-                        result.append((packed_addr >> 8) & 0xFF)  # High byte
-                        result.append(packed_addr & 0xFF)  # Low byte
+                    # Read string text
+                    if i + 5 + text_len <= len(routines):
+                        text_bytes = routines[i+5:i+5+text_len]
+                        text = text_bytes.decode('utf-8')
 
-                        # Skip past the 3-byte marker
-                        i += 3
-                        continue
+                        # Get packed address from string table
+                        packed_addr = string_table.get_packed_address(text, self.version)
 
-                # Fallthrough: keep the bytes as-is
-                result.append(routines[i])
-                i += 1
+                        if packed_addr is not None:
+                            # Emit PRINT_PADDR with actual packed address
+                            result.append(0x8D)  # SHORT PRINT_PADDR
+                            result.append((packed_addr >> 8) & 0xFF)  # High byte
+                            result.append(packed_addr & 0xFF)  # Low byte
 
-            # Check for old string table marker: 0x8D 0xFF 0xFE
-            elif (i + 4 < len(routines) and
-                routines[i] == 0x8D and
-                routines[i+1] == 0xFF and
-                routines[i+2] == 0xFE):
-
-                # Read string length (2 bytes, little-endian)
-                text_len = routines[i+3] | (routines[i+4] << 8)
-
-                # Read string text
-                if i + 5 + text_len <= len(routines):
-                    text_bytes = routines[i+5:i+5+text_len]
-                    text = text_bytes.decode('utf-8')
-
-                    # Get packed address from string table
-                    packed_addr = string_table.get_packed_address(text, self.version)
-
-                    if packed_addr is not None:
-                        # Emit PRINT_PADDR with actual packed address
-                        result.append(0x8D)  # SHORT PRINT_PADDR
-                        result.append((packed_addr >> 8) & 0xFF)  # High byte
-                        result.append(packed_addr & 0xFF)  # Low byte
-
-                        # Skip past the marker and text
-                        i += 5 + text_len
-                        continue
+                            # Skip past the marker and text
+                            i += 5 + text_len
+                            continue
+                        else:
+                            # String not in table (shouldn't happen), keep marker
+                            result.append(routines[i])
+                            i += 1
+                            continue
                     else:
-                        # String not in table (shouldn't happen), keep marker
+                        # Incomplete marker, keep byte
                         result.append(routines[i])
                         i += 1
+                        continue
+
+                # Regular PRINT_PADDR instruction (not a placeholder), copy as-is
+                # NOTE: We no longer scan for new format (0xE000-0xFFFD) to avoid false matches
+                # New format should use position-based resolution via placeholder_positions
                 else:
-                    # Incomplete marker, keep byte
                     result.append(routines[i])
                     i += 1
-            else:
-                # Normal bytecode, copy as-is
-                result.append(routines[i])
-                i += 1
+                    continue
+
+            # Normal bytecode, copy as-is
+            result.append(routines[i])
+            i += 1
 
         return bytes(result)
 
@@ -436,6 +448,8 @@ class ZAssembler:
                         table_routine_fixups: list = None,
                         extension_table: bytes = b'',
                         string_placeholders: dict = None,
+                        tell_string_placeholders: dict = None,
+                        tell_placeholder_positions: list = None,
                         vocab_fixups: list = None) -> bytes:
         """
         Build complete story file.
@@ -452,7 +466,9 @@ class ZAssembler:
             routine_fixups: List of (code_offset, routine_offset) for call address patching
             table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
             extension_table: Header extension table bytes (V5+)
-            string_placeholders: Dict mapping placeholder index to string text for operand resolution
+            string_placeholders: Dict mapping placeholder index to string text for operand resolution (0xFC format)
+            tell_string_placeholders: Dict mapping placeholder index to string text for TELL resolution (0x8D format)
+            tell_placeholder_positions: List of (byte_offset, placeholder_idx) for position-based TELL resolution
             vocab_fixups: List of (placeholder_idx, word_offset) for W?* vocabulary word resolution
 
         Returns:
@@ -733,8 +749,11 @@ class ZAssembler:
                 string_table.set_strings_offset(strings_offset)
 
             # Now resolve string table markers with correct addresses
-            # Pass string_placeholders to handle the new 3-byte format
-            routines = self._resolve_string_markers(routines, string_table, string_placeholders)
+            # Pass tell_string_placeholders and positions to handle the 0x8D format (TELL strings)
+            # Using position-based resolution to avoid false matches when 0x8D appears as operand data
+            routines = self._resolve_string_markers(
+                routines, string_table, tell_string_placeholders, tell_placeholder_positions
+            )
 
             # Resolve string operand placeholders (0xFC00 | index -> packed address)
             if string_placeholders:
@@ -768,7 +787,8 @@ class ZAssembler:
             # Add all encoded strings
             story.extend(string_table.get_encoded_data())
 
-        # Calculate Initial PC - must point to first instruction, not routine header
+        # Calculate Initial PC - points to first instruction to execute, not routine header
+        # Per Z-machine spec: "Byte address of first instruction to execute" (V1-5)
         # Routine header format:
         #   V1-4: 1 byte (local count) + N words (local defaults)
         #   V5+: 1 byte (local count) only

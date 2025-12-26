@@ -109,10 +109,14 @@ class ImprovedCodeGenerator:
         # If > 0, an extension table needs to be created
         self._max_extension_word = 0
 
-        # Routine call placeholders - map placeholder_index to routine_name
-        # Placeholders are encoded as 0xFD + index (high byte) + index (low byte)
+        # Routine call placeholders - map placeholder_value to routine_name
+        # Placeholders are 16-bit values in range 0xFD00-0xFFFE
+        # This gives us 766 slots for unique routines
         self._routine_placeholders: Dict[int, str] = {}
-        self._next_placeholder_index = 0
+        self._next_placeholder_value = 0xFD00  # Start of placeholder range
+        self._max_placeholder_value = 0xFFFE   # End of placeholder range (0xFFFF reserved)
+        # Reverse mapping: routine_name -> placeholder_value (reuse same value for same routine)
+        self._routine_to_placeholder: Dict[str, int] = {}
         # Track actual placeholder positions in code (offset, placeholder_idx)
         self._placeholder_positions: List[Tuple[int, int]] = []
         # Pending placeholders for current routine (relative offset, placeholder_idx)
@@ -120,10 +124,34 @@ class ImprovedCodeGenerator:
         # Track relative offset within current routine for placeholder tracking
         self._routine_code_offset: int = 0
 
-        # String operand placeholders - map placeholder_index to string text
-        # Placeholders are encoded as 0xFC + index (high byte) + index (low byte)
-        self._string_placeholders: Dict[int, str] = {}
-        self._next_string_placeholder_index = 0
+        # TELL string placeholders - for strings in TELL statements
+        # Encoded as 0x8D <hi> <lo> where value = 0xE000 + index (8190 slots)
+        # Range 0xE000-0xFFFD chosen to avoid collision with valid packed addresses
+        # (packed addresses in typical games are < 0xE000)
+        self._tell_string_placeholders: Dict[int, str] = {}
+        self._next_tell_string_index = 0
+        self._tell_string_base = 0xE000  # Base value for placeholder range
+        self._max_tell_string_index = 8189  # 0xE000-0xFFFD = 8190 slots
+        self._tell_string_to_placeholder: Dict[str, int] = {}
+        # Track TELL placeholder positions for offset-based resolution
+        # Final positions: (absolute_offset_in_code, placeholder_idx)
+        self._tell_placeholder_positions: List[Tuple[int, int]] = []
+        # Pending positions for current routine: (offset_in_routine_code, placeholder_idx)
+        self._pending_tell_positions: List[Tuple[int, int]] = []
+        # Current statement's TELL offsets: (offset_in_stmt_code, placeholder_idx)
+        # Populated by gen_tell(), consumed by generate_routine()
+        self._current_stmt_tell_offsets: List[Tuple[int, int]] = []
+
+        # String operand placeholders - for strings passed as function arguments
+        # Encoded as 0xFC00 | index (256 slots)
+        self._string_operand_placeholders: Dict[int, str] = {}
+        self._next_string_operand_index = 0
+        self._max_string_operand_index = 255
+        self._string_operand_to_placeholder: Dict[str, int] = {}
+
+        # Legacy alias for backward compatibility with assembler
+        self._string_placeholders: Dict[int, str] = {}  # Points to _tell_string_placeholders
+        self._string_to_placeholder: Dict[str, int] = {}  # Points to _tell_string_to_placeholder
 
         # Vocabulary word placeholders - map placeholder_index to word (W?WORD -> "word")
         # Placeholders are encoded as 0xFB + index (high byte) + index (low byte)
@@ -366,6 +394,31 @@ class ImprovedCodeGenerator:
             return ord(value[1])
 
         return None
+
+    def _get_routine_placeholder(self, routine_name: str) -> int:
+        """Get or create a placeholder value for a routine.
+
+        Reuses the same placeholder value for the same routine to keep
+        the count under the 766 limit (0xFD00-0xFFFE range).
+
+        Returns a 16-bit placeholder value that will be replaced with
+        the actual packed routine address during fixup resolution.
+        """
+        if routine_name in self._routine_to_placeholder:
+            return self._routine_to_placeholder[routine_name]
+
+        if self._next_placeholder_value > self._max_placeholder_value:
+            raise ValueError(f"Too many unique routines (>766): cannot create placeholder for '{routine_name}'")
+
+        placeholder_val = self._next_placeholder_value
+        self._routine_placeholders[placeholder_val] = routine_name
+        self._routine_to_placeholder[routine_name] = placeholder_val
+        self._next_placeholder_value += 1
+        return placeholder_val
+
+    def _is_routine_placeholder(self, value: int) -> bool:
+        """Check if a 16-bit value is a routine placeholder."""
+        return 0xFD00 <= value <= self._max_placeholder_value and value in self._routine_placeholders
 
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
@@ -836,12 +889,10 @@ class ImprovedCodeGenerator:
             for action_num in range(1, max_action + 1):
                 routine_name = action_to_routine.get(action_num)
                 if routine_name and routine_name in self.routines:
-                    # Add placeholder that will be resolved
-                    placeholder_idx = self._next_placeholder_index
-                    self._routine_placeholders[placeholder_idx] = routine_name
-                    self._next_placeholder_index += 1
-                    table_data.append(0xFD)
-                    table_data.append(placeholder_idx & 0xFF)
+                    # Get placeholder value (16-bit, reused for same routine)
+                    placeholder_val = self._get_routine_placeholder(routine_name)
+                    table_data.append((placeholder_val >> 8) & 0xFF)  # High byte
+                    table_data.append(placeholder_val & 0xFF)          # Low byte
                 else:
                     # No routine for this action
                     table_data.extend([0x00, 0x00])
@@ -904,13 +955,16 @@ class ImprovedCodeGenerator:
         fixups = []
         table_data = self.get_table_data()
 
-        # Scan table data for placeholder markers
+        # Scan table data for placeholder markers (16-bit values in 0xFD00-0xFFFE range)
         i = 0
         while i < len(table_data) - 1:
-            if table_data[i] == 0xFD:
-                placeholder_idx = table_data[i + 1]
-                if placeholder_idx in self._routine_placeholders:
-                    routine_name = self._routine_placeholders[placeholder_idx]
+            high_byte = table_data[i]
+            low_byte = table_data[i + 1]
+            # Check if this could be a routine placeholder (0xFD-0xFF high byte)
+            if high_byte >= 0xFD:
+                placeholder_val = (high_byte << 8) | low_byte
+                if placeholder_val in self._routine_placeholders:
+                    routine_name = self._routine_placeholders[placeholder_val]
                     if routine_name in self.routines:
                         routine_offset = self.routines[routine_name]
                         fixups.append((i, routine_offset))
@@ -937,7 +991,26 @@ class ImprovedCodeGenerator:
         Placeholder values are encoded as 0xFC00 | index in the bytecode.
         The assembler should replace these with actual packed addresses.
         """
-        return self._string_placeholders.copy()
+        return self._string_operand_placeholders.copy()
+
+    def get_tell_string_placeholders(self) -> Dict[int, str]:
+        """Get TELL string placeholders for the assembler to resolve.
+
+        Returns a mapping of placeholder index to string text.
+        Placeholder values are encoded as 0x8D <hi> <lo> where value = 0xFD00 + index.
+        The assembler should replace these with PRINT_PADDR instructions.
+        """
+        return self._tell_string_placeholders.copy()
+
+    def get_tell_placeholder_positions(self) -> List[Tuple[int, int]]:
+        """Get TELL string placeholder byte positions for offset-based resolution.
+
+        Returns a list of (byte_offset, placeholder_idx) tuples indicating
+        exactly where each TELL placeholder is located in the bytecode.
+        This allows the assembler to resolve only at known positions,
+        avoiding false matches when 0x8D appears as operand data.
+        """
+        return self._tell_placeholder_positions.copy()
 
     def get_vocab_placeholders(self) -> Dict[int, str]:
         """Get vocabulary word placeholders for the assembler to resolve.
@@ -1067,6 +1140,7 @@ class ImprovedCodeGenerator:
         # Track current routine code buffer for placeholder position tracking
         self._current_routine_code = routine_code
         self._pending_placeholders.clear()
+        self._pending_tell_positions.clear()
 
         # Build local variable table
         self.locals = {}
@@ -1135,8 +1209,8 @@ class ImprovedCodeGenerator:
                         routine_code.append(local_num & 0xFF)
                         routine_code.append(init_val & 0xFF)
                     else:
-                        # Large constant: VAR form
-                        routine_code.append(0xED)  # VAR form STOREW
+                        # Large constant: 2OP variable form for STORE
+                        routine_code.append(0xCD)  # 2OP VAR form STORE (0xC0 + 0x0D)
                         routine_code.append(0x4F)  # small, large, omit, omit
                         routine_code.append(local_num & 0xFF)
                         routine_code.append((init_val >> 8) & 0xFF)
@@ -1159,24 +1233,32 @@ class ImprovedCodeGenerator:
 
         # Generate code for routine body
         for stmt in routine.body:
-            # Track placeholder indices created in this statement
-            placeholder_start_idx = self._next_placeholder_index
             stmt_code = self.generate_statement(stmt)
             # Track placeholder positions in this statement's code
-            # Only match placeholders with index >= start_idx (created in this statement)
+            # Placeholders are 16-bit values in range 0xFD00-0xFFFE
             stmt_offset = len(routine_code)
             for i in range(len(stmt_code) - 1):
-                if stmt_code[i] == 0xFD:
-                    # Skip if this 0xFD follows 0x8D - that's a string placeholder for PRINT_PADDR
-                    # String placeholder format: 0x8D 0xFD <idx>
-                    # Routine placeholder format: 0xFD <idx> (as 16-bit operand high byte)
+                high_byte = stmt_code[i]
+                low_byte = stmt_code[i + 1]
+                # Check if this could be a routine placeholder (0xFD-0xFF high byte)
+                if high_byte >= 0xFD:
+                    # Skip if this follows 0x8D - that's PRINT_PADDR with string placeholder
                     if i > 0 and stmt_code[i - 1] == 0x8D:
-                        continue  # This is a string placeholder, not a routine placeholder
-                    placeholder_idx = stmt_code[i + 1]
-                    # Only match placeholders created in THIS statement
-                    if (placeholder_idx >= placeholder_start_idx and
-                            placeholder_idx in self._routine_placeholders):
-                        self._pending_placeholders.append((stmt_offset + i, placeholder_idx))
+                        continue  # This is part of a PRINT_PADDR instruction
+                    placeholder_val = (high_byte << 8) | low_byte
+                    # Check if this is a known routine placeholder
+                    if placeholder_val in self._routine_placeholders:
+                        self._pending_placeholders.append((stmt_offset + i, placeholder_val))
+            # Scan for TELL placeholder positions in statement code
+            # TELL placeholders: 0x8D followed by value in range 0xE000-0xFFFD
+            # Only match if the placeholder index is in our dictionary
+            for i in range(len(stmt_code) - 2):
+                if stmt_code[i] == 0x8D:
+                    placeholder_val = (stmt_code[i + 1] << 8) | stmt_code[i + 2]
+                    if 0xE000 <= placeholder_val <= 0xFFFD:
+                        placeholder_idx = placeholder_val - 0xE000
+                        if placeholder_idx in self._tell_string_placeholders:
+                            self._pending_tell_positions.append((stmt_offset + i, placeholder_idx))
             routine_code.extend(stmt_code)
 
         # Add implicit return if the routine doesn't end with a terminating instruction
@@ -1354,14 +1436,24 @@ class ImprovedCodeGenerator:
                 # Adjust pending placeholder positions by the number of bytes inserted
                 # All positions after insert_pos (which was right after the original header)
                 # need to be shifted forward
+                header_end = 1 + 2 * num_locals
                 adjusted = []
                 for rel_offset, placeholder_idx in self._pending_placeholders:
                     # Placeholders after the insertion point need adjustment
-                    if rel_offset >= (1 + 2 * num_locals):
+                    if rel_offset >= header_end:
                         adjusted.append((rel_offset + bytes_inserted, placeholder_idx))
                     else:
                         adjusted.append((rel_offset, placeholder_idx))
                 self._pending_placeholders = adjusted
+
+                # Also adjust pending TELL placeholder positions
+                adjusted_tell = []
+                for rel_offset, placeholder_idx in self._pending_tell_positions:
+                    if rel_offset >= header_end:
+                        adjusted_tell.append((rel_offset + bytes_inserted, placeholder_idx))
+                    else:
+                        adjusted_tell.append((rel_offset, placeholder_idx))
+                self._pending_tell_positions = adjusted_tell
 
         # Pop routine loop context and patch AGAIN placeholders
         if hasattr(self, 'loop_stack') and self.loop_stack:
@@ -1393,6 +1485,11 @@ class ImprovedCodeGenerator:
         for rel_offset, placeholder_idx in self._pending_placeholders:
             self._placeholder_positions.append((base_offset + rel_offset, placeholder_idx))
         self._pending_placeholders.clear()
+
+        # Adjust pending TELL placeholder positions to absolute offsets
+        for rel_offset, placeholder_idx in self._pending_tell_positions:
+            self._tell_placeholder_positions.append((base_offset + rel_offset, placeholder_idx))
+        self._pending_tell_positions.clear()
 
         # Check for unused routine-level locals (ZIL0210)
         if hasattr(self, 'routine_level_locals') and self.compiler is not None:
@@ -1462,10 +1559,16 @@ class ImprovedCodeGenerator:
         if op_name == 'RTRUE':
             if form.operands:
                 raise ValueError("RTRUE takes no operands")
+            # In GO routine, RTRUE should become QUIT (returning from GO is undefined)
+            if self._current_routine == "GO":
+                return self.gen_quit()
             return self.gen_rtrue()
         elif op_name == 'RFALSE':
             if form.operands:
                 raise ValueError("RFALSE takes no operands")
+            # In GO routine, RFALSE should become QUIT (returning from GO is undefined)
+            if self._current_routine == "GO":
+                return self.gen_quit()
             return self.gen_rfalse()
         elif op_name == '<>':
             # <> evaluates to FALSE (0) but does NOT return from routine
@@ -1477,8 +1580,14 @@ class ImprovedCodeGenerator:
         elif op_name == 'RFATAL':
             if form.operands:
                 raise ValueError("RFATAL takes no operands")
+            # In GO routine, RFATAL should become QUIT (returning from GO is undefined)
+            if self._current_routine == "GO":
+                return self.gen_quit()
             return self.gen_rfatal()
         elif op_name == 'RETURN':
+            # In GO routine, RETURN should become QUIT (returning from GO is undefined)
+            if self._current_routine == "GO":
+                return self.gen_quit()
             return self.gen_return(form.operands)
         elif op_name == 'QUIT':
             if form.operands:
@@ -2678,6 +2787,9 @@ class ImprovedCodeGenerator:
         - C ,char - print character (PRINT_CHAR)
         - P ,address - print from packed address (PRINT_PADDR)
         """
+        # NOTE: Don't clear _current_stmt_tell_offsets here!
+        # It's cleared in generate_routine before each statement.
+        # Multiple gen_tell calls within one statement (e.g., COND branches) accumulate.
         code = bytearray()
         i = 0
 
@@ -2692,12 +2804,23 @@ class ImprovedCodeGenerator:
                     self.string_table.add_string(op.value)
                     # Use fixed 3-byte placeholder format (same size as final output)
                     # This ensures JUMP/branch offsets are correct
-                    placeholder_idx = self._next_string_placeholder_index
-                    self._string_placeholders[placeholder_idx] = op.value
-                    self._next_string_placeholder_index += 1
+                    # Reuse placeholder index for the same string (deduplication)
+                    if op.value in self._tell_string_to_placeholder:
+                        placeholder_idx = self._tell_string_to_placeholder[op.value]
+                    else:
+                        placeholder_idx = self._next_tell_string_index
+                        if placeholder_idx > self._max_tell_string_index:
+                            raise ValueError(f"Too many unique TELL strings (>{self._max_tell_string_index}): cannot create placeholder")
+                        self._tell_string_placeholders[placeholder_idx] = op.value
+                        self._tell_string_to_placeholder[op.value] = placeholder_idx
+                        self._next_tell_string_index += 1
+                    # Encode as 16-bit placeholder value: base + index
+                    placeholder_val = self._tell_string_base + placeholder_idx
+                    # Track the offset for position-based resolution
+                    self._current_stmt_tell_offsets.append((len(code), placeholder_idx))
                     code.append(0x8D)  # PRINT_PADDR short form
-                    code.append(0xFD)  # Marker for string placeholder
-                    code.append(placeholder_idx & 0xFF)
+                    code.append((placeholder_val >> 8) & 0xFF)  # High byte (0xE0-0xFF)
+                    code.append(placeholder_val & 0xFF)  # Low byte
                 else:
                     code.append(0xB2)  # PRINT opcode
                     encoded_words = self.encoder.encode_string(op.value)
@@ -3007,10 +3130,16 @@ class ImprovedCodeGenerator:
             code.append((type_byte << 6) | 0x3F)
             code.append(op_val & 0xFF)
         else:
-            # V3: use PRINT_PADDR
-            code.append(0xED)  # VAR form, opcode 0x0D
-            code.append((type_byte << 6) | 0x3F)
-            code.append(op_val & 0xFF)
+            # V3: use PRINT_PADDR (1OP:0D)
+            # 1OP opcodes use short form, not VAR form
+            if op_type == 0:
+                # Small constant
+                code.append(0x9D)  # 1OP short form: 0x90 + 0x0D
+                code.append(op_val & 0xFF)
+            else:
+                # Variable
+                code.append(0xAD)  # 1OP variable form: 0xA0 + 0x0D
+                code.append(op_val & 0xFF)
 
         return bytes(code)
 
@@ -3874,13 +4003,10 @@ class ImprovedCodeGenerator:
                 return (0, self.constants[node.name])  # Constant
             elif hasattr(self, '_routine_names') and node.name in self._routine_names:
                 # Routine address reference (e.g., ,OTHER-ROUTINE)
-                # Create a placeholder for the routine address
-                placeholder_idx = self._next_placeholder_index
-                self._routine_placeholders[placeholder_idx] = node.name
-                self._next_placeholder_index += 1
-                # Return large constant placeholder (0xFD00 | index)
-                # This will be resolved by get_routine_fixups()
-                return (0, 0xFD00 | placeholder_idx)
+                # Get or create placeholder value for this routine
+                placeholder_val = self._get_routine_placeholder(node.name)
+                # Return the 16-bit placeholder value (will be resolved by get_routine_fixups)
+                return (0, placeholder_val)
             elif node.name.startswith('W?'):
                 # W?* vocabulary word constant - emit placeholder for later resolution
                 word = node.name[2:].lower()  # Extract word name (W?RUN -> "run")
@@ -3946,13 +4072,10 @@ class ImprovedCodeGenerator:
                 return (1, self.locals[node.value])
             # Check if it's a routine name (for routine address references like I-CANDLES)
             elif hasattr(self, '_routine_names') and node.value in self._routine_names:
-                # Create a placeholder for the routine address
-                placeholder_idx = self._next_placeholder_index
-                self._routine_placeholders[placeholder_idx] = node.value
-                self._next_placeholder_index += 1
-                # Return large constant placeholder (0xFD00 | index)
-                # This will be resolved by get_routine_fixups()
-                return (0, 0xFD00 | placeholder_idx)
+                # Get or create placeholder value for this routine
+                placeholder_val = self._get_routine_placeholder(node.value)
+                # Return the 16-bit placeholder value (will be resolved by get_routine_fixups)
+                return (0, placeholder_val)
             # Unknown atom - warn and default to 0
             self._warn(f"Unknown identifier '{node.value}' - using 0")
             return (0, 0)
@@ -3976,10 +4099,16 @@ class ImprovedCodeGenerator:
             # that will be resolved to the packed address later
             if self.string_table is not None:
                 self.string_table.add_string(node.value)
-            # Create a placeholder: 0xFC + index
-            placeholder_idx = self._next_string_placeholder_index
-            self._string_placeholders[placeholder_idx] = node.value
-            self._next_string_placeholder_index += 1
+            # Reuse placeholder index for the same string (deduplication)
+            if node.value in self._string_operand_to_placeholder:
+                placeholder_idx = self._string_operand_to_placeholder[node.value]
+            else:
+                placeholder_idx = self._next_string_operand_index
+                if placeholder_idx > self._max_string_operand_index:
+                    raise ValueError(f"Too many unique string operands (>{self._max_string_operand_index}): cannot create placeholder")
+                self._string_operand_placeholders[placeholder_idx] = node.value
+                self._string_operand_to_placeholder[node.value] = placeholder_idx
+                self._next_string_operand_index += 1
             # Return large constant with placeholder marker
             # Format: 0xFC00 | index (will be resolved by assembler)
             return (0, 0xFC00 | placeholder_idx)
@@ -4926,9 +5055,9 @@ class ImprovedCodeGenerator:
 
         code.append(0xF1)  # SET_TEXT_STYLE (VAR opcode 0x11)
         if op_type == 1:  # Variable
-            code.append(0x8F)  # Type byte: 1 variable, rest omitted
+            code.append(0xBF)  # Type byte: 10 11 11 11 = variable, omit, omit, omit
         else:  # Constant
-            code.append(0x2F)  # Type byte: 1 small constant, rest omitted
+            code.append(0x7F)  # Type byte: 01 11 11 11 = small, omit, omit, omit
         code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -5107,8 +5236,10 @@ class ImprovedCodeGenerator:
         code.append(0x00)  # Store to stack
 
         # Step 2: NOT stack → stack
-        # NOT is 1OP opcode 0x0F, 0x9F for variable operand
-        code.append(0x9F)  # NOT with variable operand
+        # NOT is 1OP opcode 0x0F (V1-4 only)
+        # 1OP encoding: 0x80+op=large, 0x90+op=small, 0xA0+op=variable
+        # For variable operand: 0xA0 + 0x0F = 0xAF
+        code.append(0xAF)  # NOT with variable operand (1OP:15, var type)
         code.append(0x00)  # Stack (var 0)
         code.append(0x00)  # Store to stack
 
@@ -5312,17 +5443,28 @@ class ImprovedCodeGenerator:
                 code.append(offset & 0xFF)
                 code.append(0x00)  # Store to stack
 
-                # CALL_VN routine sp - call with element, discard result
-                code.append(0xF9)  # CALL_VN (VAR)
+                # Call routine with element, discard result
                 types = []
                 types.append(0x01 if routine_type == 0 else 0x02)
                 types.append(0x02)  # stack (element)
                 types.append(0x03)  # omit
                 types.append(0x03)  # omit
                 type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
-                code.append(type_byte)
-                code.append(routine_val & 0xFF)
-                code.append(0x00)  # Stack (element)
+
+                if self.version >= 5:
+                    # V5+: Use CALL_VN (call without storing result)
+                    code.append(0xF9)  # CALL_VN (VAR)
+                    code.append(type_byte)
+                    code.append(routine_val & 0xFF)
+                    code.append(0x00)  # Stack (element)
+                else:
+                    # V3/V4: Use CALL_VS and pop result
+                    code.append(0xE0)  # CALL_VS (VAR)
+                    code.append(type_byte)
+                    code.append(routine_val & 0xFF)
+                    code.append(0x00)  # Stack (element)
+                    code.append(0x00)  # Store result to stack
+                    code.append(0xB9)  # POP (discard result)
 
             return bytes(code)
 
@@ -5364,30 +5506,41 @@ class ImprovedCodeGenerator:
         if table_type == 0:
             # Constant table
             if table_val <= 255:
-                code.append(0x5F)  # small const, var, omit, omit
+                code.append(0x6F)  # Type: 01 10 11 11 = small, var, omit, omit
                 code.append(table_val & 0xFF)
             else:
-                code.append(0x1F)  # large const, var, omit, omit
+                code.append(0x2F)  # Type: 00 10 11 11 = large, var, omit, omit
                 code.append((table_val >> 8) & 0xFF)
                 code.append(table_val & 0xFF)
         else:
             # Variable table (stored in L03)
-            code.append(0xAF)  # var, var, omit, omit
+            code.append(0xAF)  # Type: 10 10 11 11 = var, var, omit, omit
             code.append(0x03)  # L03
         code.append(0x02)  # L02 (offset)
         code.append(0x00)  # Store to stack
 
-        # CALL_VN routine sp - call with element
-        code.append(0xF9)  # CALL_VN
+        # Call routine with element, discard result
         types = []
         types.append(0x01 if routine_type == 0 else 0x02)
         types.append(0x02)  # stack
         types.append(0x03)  # omit
         types.append(0x03)  # omit
         type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
-        code.append(type_byte)
-        code.append(routine_val & 0xFF)
-        code.append(0x00)  # Stack (element)
+
+        if self.version >= 5:
+            # V5+: Use CALL_VN (call without storing result)
+            code.append(0xF9)  # CALL_VN
+            code.append(type_byte)
+            code.append(routine_val & 0xFF)
+            code.append(0x00)  # Stack (element)
+        else:
+            # V3/V4: Use CALL_VS and pop result
+            code.append(0xE0)  # CALL_VS
+            code.append(type_byte)
+            code.append(routine_val & 0xFF)
+            code.append(0x00)  # Stack (element)
+            code.append(0x00)  # Store result to stack
+            code.append(0xB9)  # POP (discard result)
 
         # ADD L02 2 -> L02 (increment offset by word size)
         code.append(0x54)  # ADD (2OP:20) small, small
@@ -5399,15 +5552,17 @@ class ImprovedCodeGenerator:
         code.append(0x04)  # DEC_CHK (2OP:4)
         code.append(0x01)  # L01
         code.append(0x00)  # Compare to 0
-        # Calculate backward jump
-        current_pos = len(code) + 2
+        # Calculate backward jump - must use long form since backward (short form only encodes 2-63)
+        current_pos = len(code) + 2  # 2 bytes for long form branch
         jump_offset = loop_start - current_pos
-        if jump_offset >= -64:
-            code.append(0x00 | ((jump_offset + 2) & 0x3F))  # Branch on false
+        # Z-machine offset = target - PC_after_branch + 2, and we need 14-bit signed
+        actual_offset = jump_offset + 2
+        if actual_offset < 0:
+            offset_unsigned = (1 << 14) + actual_offset
         else:
-            jump_offset_unsigned = (1 << 14) + jump_offset
-            code.append(0x00 | ((jump_offset_unsigned >> 8) & 0x3F))
-            code.append(jump_offset_unsigned & 0xFF)
+            offset_unsigned = actual_offset
+        code.append(0x00 | ((offset_unsigned >> 8) & 0x3F))  # Branch on false, long form
+        code.append(offset_unsigned & 0xFF)
 
         return bytes(code)
 
@@ -5516,14 +5671,14 @@ class ImprovedCodeGenerator:
         code.append(0xCF)  # LOADW (VAR form)
         if table_type == 0:
             if table_val <= 255:
-                code.append(0x5F)
+                code.append(0x6F)  # Type: 01 10 11 11 = small, var, omit, omit
                 code.append(table_val & 0xFF)
             else:
-                code.append(0x1F)
+                code.append(0x2F)  # Type: 00 10 11 11 = large, var, omit, omit
                 code.append((table_val >> 8) & 0xFF)
                 code.append(table_val & 0xFF)
         else:
-            code.append(0xAF)  # var, var
+            code.append(0xAF)  # Type: 10 10 11 11 = var, var, omit, omit
             code.append(0x03)  # L03
         code.append(0x02)  # L02
         code.append(0x00)  # -> stack
@@ -5552,14 +5707,14 @@ class ImprovedCodeGenerator:
         code.append(0xCF)  # LOADW (VAR)
         if table_type == 0:
             if table_val <= 255:
-                code.append(0x5F)
+                code.append(0x6F)  # Type: 01 10 11 11 = small, var, omit, omit
                 code.append(table_val & 0xFF)
             else:
-                code.append(0x1F)
+                code.append(0x2F)  # Type: 00 10 11 11 = large, var, omit, omit
                 code.append((table_val >> 8) & 0xFF)
                 code.append(table_val & 0xFF)
         else:
-            code.append(0xAF)
+            code.append(0xAF)  # Type: 10 10 11 11 = var, var, omit, omit
             code.append(0x03)
         code.append(0x02)  # L02
         code.append(0x00)  # -> stack
@@ -5575,14 +5730,16 @@ class ImprovedCodeGenerator:
         code.append(0x04)  # DEC_CHK
         code.append(0x01)  # L01
         code.append(0x00)  # 0
-        current_pos = len(code) + 2
+        # Calculate backward jump - must use long form since backward (short form only encodes 2-63)
+        current_pos = len(code) + 2  # 2 bytes for long form branch
         jump_offset = loop_start - current_pos
-        if jump_offset >= -64:
-            code.append(0x00 | ((jump_offset + 2) & 0x3F))
+        actual_offset = jump_offset + 2
+        if actual_offset < 0:
+            offset_unsigned = (1 << 14) + actual_offset
         else:
-            jump_offset_unsigned = (1 << 14) + jump_offset
-            code.append(0x00 | ((jump_offset_unsigned >> 8) & 0x3F))
-            code.append(jump_offset_unsigned & 0xFF)
+            offset_unsigned = actual_offset
+        code.append(0x00 | ((offset_unsigned >> 8) & 0x3F))  # Branch on false, long form
+        code.append(offset_unsigned & 0xFF)
 
         # No match - return false
         code.append(0xB1)  # RFALSE
@@ -5709,14 +5866,14 @@ class ImprovedCodeGenerator:
         code.append(0xCF)  # LOADW (VAR form)
         if table_type == 0:
             if table_val <= 255:
-                code.append(0x5F)  # small const, var
+                code.append(0x6F)  # Type: 01 10 11 11 = small, var, omit, omit
                 code.append(table_val & 0xFF)
             else:
-                code.append(0x1F)  # large const, var
+                code.append(0x2F)  # Type: 00 10 11 11 = large, var, omit, omit
                 code.append((table_val >> 8) & 0xFF)
                 code.append(table_val & 0xFF)
         else:
-            code.append(0xAF)  # var, var
+            code.append(0xAF)  # Type: 10 10 11 11 = var, var, omit, omit
             code.append(0x04)  # L04
         code.append(0x02)  # L02
         code.append(0x00)  # -> stack
@@ -5754,14 +5911,16 @@ class ImprovedCodeGenerator:
         code.append(0x04)  # DEC_CHK
         code.append(0x01)  # L01
         code.append(0x00)  # 0
-        current_pos = len(code) + 2
+        # Calculate backward jump - must use long form since backward (short form only encodes 2-63)
+        current_pos = len(code) + 2  # 2 bytes for long form branch
         jump_offset = loop_start - current_pos
-        if jump_offset >= -64:
-            code.append(0x00 | ((jump_offset + 2) & 0x3F))
+        actual_offset = jump_offset + 2
+        if actual_offset < 0:
+            offset_unsigned = (1 << 14) + actual_offset
         else:
-            jump_offset_unsigned = (1 << 14) + jump_offset
-            code.append(0x00 | ((jump_offset_unsigned >> 8) & 0x3F))
-            code.append(jump_offset_unsigned & 0xFF)
+            offset_unsigned = actual_offset
+        code.append(0x00 | ((offset_unsigned >> 8) & 0x3F))  # Branch on false, long form
+        code.append(offset_unsigned & 0xFF)
 
         # Return L03 (last non-false result)
         code.append(0xAB)  # RET (1OP)
@@ -8161,14 +8320,14 @@ class ImprovedCodeGenerator:
 
         if op_type == 0:  # Constant
             if op_val <= 255:
-                code.append(0x5F)  # Type: small, omit, omit, omit (01 11 11 11)
+                code.append(0x7F)  # Type: 01 11 11 11 = small, omit, omit, omit
                 code.append(op_val & 0xFF)
             else:
-                code.append(0x1F)  # Type: large, omit, omit, omit (00 01 11 11)
+                code.append(0x3F)  # Type: 00 11 11 11 = large, omit, omit, omit
                 code.append((op_val >> 8) & 0xFF)
                 code.append(op_val & 0xFF)
         else:  # Variable
-            code.append(0x9F)  # Type: variable, omit, omit, omit (10 01 11 11)
+            code.append(0xBF)  # Type: 10 11 11 11 = variable, omit, omit, omit
             code.append(op_val & 0xFF)
 
         return bytes(code)
@@ -11242,14 +11401,16 @@ class ImprovedCodeGenerator:
         code.append(0x04)  # DEC_CHK
         code.append(0x01)  # L01
         code.append(0x00)  # 0
-        current_pos = len(code) + 2
+        # Calculate backward jump - must use long form since backward (short form only encodes 2-63)
+        current_pos = len(code) + 2  # 2 bytes for long form branch
         jump_offset = loop_start - current_pos
-        if jump_offset >= -64:
-            code.append(0x00 | ((jump_offset + 2) & 0x3F))
+        actual_offset = jump_offset + 2
+        if actual_offset < 0:
+            offset_unsigned = (1 << 14) + actual_offset
         else:
-            jump_offset_unsigned = (1 << 14) + jump_offset
-            code.append(0x00 | ((jump_offset_unsigned >> 8) & 0x3F))
-            code.append(jump_offset_unsigned & 0xFF)
+            offset_unsigned = actual_offset
+        code.append(0x00 | ((offset_unsigned >> 8) & 0x3F))  # Branch on false, long form
+        code.append(offset_unsigned & 0xFF)
 
         # Not found - push 0 to stack
         code.append(0x54)  # ADD 0+0 -> sp
@@ -12667,29 +12828,53 @@ class ImprovedCodeGenerator:
                             # Push 0 to stack: ADD 0 0 -> stack
                             actions_code.extend([0x14, 0x00, 0x00, 0x00])
 
-            # Determine if we need a jump to end (not for last clause or T clause)
-            needs_jump_to_end = (i < len(cond.clauses) - 1)
-
             clause_data.append({
                 'is_t_clause': is_t_clause,
                 'test_code': test_code,
                 'test_size': test_size,
                 'actions_code': actions_code,
-                'needs_jump_to_end': needs_jump_to_end
             })
 
-        # Second pass: calculate sizes and fix offsets
-        # Calculate clause sizes
+        # Check if we need a default FALSE at the end (no T/ELSE clause)
+        has_t_clause = clause_data and clause_data[-1]['is_t_clause']
+        default_false_size = 0 if has_t_clause else 4  # ADD 0 0 -> stack is 4 bytes
+
+        # Determine needs_jump_to_end for each clause
+        # All clauses except T/ELSE need to jump to end to skip other clauses AND the default FALSE
+        for i, clause in enumerate(clause_data):
+            # T clause never needs jump (it's always last and always executes)
+            # Last clause needs jump only if there's a default FALSE to skip over
+            if clause['is_t_clause']:
+                clause['needs_jump_to_end'] = False
+            elif i < len(clause_data) - 1:
+                # Not the last clause - needs to jump over remaining clauses
+                clause['needs_jump_to_end'] = True
+            else:
+                # Last clause (and not T) - needs to jump over default FALSE
+                clause['needs_jump_to_end'] = (default_false_size > 0)
+
+        # Second pass: calculate sizes
+        # Calculate clause sizes (initial estimate with 1-byte branches)
         for clause in clause_data:
             clause['actions_size'] = len(clause['actions_code'])
             clause['jump_size'] = 3 if clause['needs_jump_to_end'] else 0  # JUMP is 3 bytes
             clause['total_size'] = clause['test_size'] + clause['actions_size'] + clause['jump_size']
 
-        # Calculate cumulative sizes for offset calculations
-        total_cond_size = sum(c['total_size'] for c in clause_data)
+        # Third pass: determine which branches need 2-byte form
+        # We need to do this BEFORE the final code generation so all sizes are stable
+        for clause in clause_data:
+            if not clause['is_t_clause'] and clause['test_size'] > 0:
+                bytes_to_skip = clause['actions_size'] + clause['jump_size']
+                next_clause_offset = bytes_to_skip + 2
+                if next_clause_offset >= 64:
+                    # This branch needs 2-byte form - mark it for expansion
+                    clause['needs_2byte_branch'] = True
+                    clause['test_size'] += 1
+                    clause['total_size'] += 1
+                else:
+                    clause['needs_2byte_branch'] = False
 
-        # Third pass: generate with proper offsets
-        current_pos = 0
+        # Fourth pass: generate with proper offsets (all sizes are now stable)
         for i, clause in enumerate(clause_data):
             # Fix the condition test branch offset
             if not clause['is_t_clause'] and clause['test_size'] > 0:
@@ -12704,7 +12889,7 @@ class ImprovedCodeGenerator:
                 original_branch = clause['test_code'][-1]
                 branch_sense = original_branch & 0x80  # Preserve bit 7
 
-                if next_clause_offset < 64:
+                if not clause.get('needs_2byte_branch', False):
                     # 1-byte branch form
                     # Bit 7=sense (preserved), bit 6=1 (1-byte), bits 5-0=offset
                     clause['test_code'][-1] = branch_sense | 0x40 | (next_clause_offset & 0x3F)
@@ -12713,10 +12898,8 @@ class ImprovedCodeGenerator:
                     # Bit 7=sense (preserved), bit 6=0 (2-byte)
                     # 14-bit signed offset spans 6 bits of first byte + 8 bits of second
                     clause['test_code'][-1] = branch_sense | ((next_clause_offset >> 8) & 0x3F)
-                    # Need to add second byte
+                    # Add second byte
                     clause['test_code'].append(next_clause_offset & 0xFF)
-                    clause['test_size'] += 1
-                    clause['total_size'] += 1
 
             # Add the test code
             code.extend(clause['test_code'])
@@ -12730,6 +12913,8 @@ class ImprovedCodeGenerator:
                 # Z-machine JUMP: target = PC + offset - 2, where PC is after the 3-byte JUMP
                 # To skip remaining_size bytes: offset = remaining_size + 2
                 remaining_size = sum(clause_data[j]['total_size'] for j in range(i + 1, len(clause_data)))
+                # Include the default FALSE push if present
+                remaining_size += default_false_size
                 jump_offset = remaining_size + 2
 
                 # JUMP instruction: 0x8C followed by 16-bit signed offset
@@ -12737,7 +12922,13 @@ class ImprovedCodeGenerator:
                 code.append((jump_offset >> 8) & 0xFF)
                 code.append(jump_offset & 0xFF)
 
-            current_pos += clause['total_size']
+        # If the last clause is not a T/ELSE clause (guaranteed match),
+        # we need to push a default FALSE value for the case when no clause matches.
+        # This ensures COND always leaves a value on the stack.
+        if clause_data and not clause_data[-1]['is_t_clause']:
+            # Push FALSE (0) to stack: ADD 0 0 -> stack
+            # ADD is 2OP:20 (0x14), long form with two small constants
+            code.extend([0x14, 0x00, 0x00, 0x00])
 
         return bytes(code)
 
@@ -13272,13 +13463,11 @@ class ImprovedCodeGenerator:
 
         # Generate jump back to loop start
         # JUMP instruction: opcode + 2 offset bytes
-        # Offset is relative to PC after reading the branch bytes
-        # PC after JUMP = current_pos + 3 (for JUMP opcode + 2 offset bytes)
-        # Target = loop_start_pos
-        # Offset = target - PC_after = loop_start_pos - (current_pos + 3)
-        #        = loop_start_pos - len(code) - 3
+        # Z-machine JUMP formula: Target = PC_after + Offset - 2
+        # So: Offset = Target - PC_after + 2 = loop_start_pos - (current_pos + 3) + 2
+        #            = loop_start_pos - current_pos - 1
         current_pos = len(code)
-        jump_offset = loop_start_pos - (current_pos + 3)
+        jump_offset = loop_start_pos - (current_pos + 1)
 
         # JUMP uses signed 16-bit offset (not branch format)
         # Encode as signed 16-bit value
@@ -13382,11 +13571,8 @@ class ImprovedCodeGenerator:
             elif node.name in self.constants:
                 return self.constants[node.name]
             elif hasattr(self, '_routine_names') and node.name in self._routine_names:
-                # Routine address - return placeholder
-                placeholder_idx = self._next_placeholder_index
-                self._routine_placeholders[placeholder_idx] = node.name
-                self._next_placeholder_index += 1
-                return 0xFD00 | placeholder_idx
+                # Routine address - return placeholder value
+                return self._get_routine_placeholder(node.name)
             return 0x10  # Default
         elif isinstance(node, TableNode):
             # Table literal - store table and return placeholder index
@@ -13547,18 +13733,10 @@ class ImprovedCodeGenerator:
         code.append(type_byte)
 
         # Use placeholder encoding for routine address
-        # Format: marker byte (0xFD) + 2-byte placeholder index
-        # The placeholder index maps to the routine name for later resolution
-        placeholder_idx = self._next_placeholder_index
-        self._routine_placeholders[placeholder_idx] = routine_name
-        self._next_placeholder_index += 1
-
-        # Encode placeholder: 0xFD followed by index as 16-bit big-endian
-        # Note: We only need 2 bytes for the address, so use high byte of index
-        # Actually, since this needs to be a valid packed address slot (2 bytes),
-        # we'll use a range that's unlikely to be a real address: 0xFD00-0xFDFF
-        code.append(0xFD)  # Marker high byte
-        code.append(placeholder_idx & 0xFF)  # Index as low byte
+        # Placeholder is a 16-bit value in range 0xFD00-0xFFFE
+        placeholder_val = self._get_routine_placeholder(routine_name)
+        code.append((placeholder_val >> 8) & 0xFF)  # High byte (0xFD, 0xFE, or 0xFF)
+        code.append(placeholder_val & 0xFF)          # Low byte
 
         # Add remaining operand values
         for i, op in enumerate(operands[:3]):
@@ -14587,7 +14765,7 @@ class ImprovedCodeGenerator:
                 else:
                     # V3/V4: Use CALL with stack value
                     code.append(0xE0)  # CALL_VS
-                    code.append(0x2F)  # Type: variable, omit, omit, omit
+                    code.append(0xBF)  # Type: 10 11 11 11 = variable, omit, omit, omit
                     code.append(0x00)  # Stack
                     code.append(0x00)  # Store result to stack (discard)
 
@@ -14619,18 +14797,34 @@ class ImprovedCodeGenerator:
         code.append(0xE0)  # VAR form, opcode 0x00
 
         # Build type byte for all operands (routine + up to 3 args)
+        # Type encoding: 00=large const (2 bytes), 01=small const (1 byte), 10=variable (1 byte), 11=omit
         num_args = min(len(args), 3)
         types = []
+        operand_bytes = []
 
-        # Routine type (01=small const, 10=variable)
-        types.append(0x01 if routine_type == 0 else 0x02)
+        # Routine type and bytes
+        if routine_type == 1:  # Variable
+            types.append(0x02)
+            operand_bytes.append([routine_val & 0xFF])
+        elif routine_val > 255 or routine_val < 0:  # Large constant (need 2 bytes)
+            types.append(0x00)
+            operand_bytes.append([(routine_val >> 8) & 0xFF, routine_val & 0xFF])
+        else:  # Small constant (1 byte)
+            types.append(0x01)
+            operand_bytes.append([routine_val & 0xFF])
 
-        # Argument types
-        arg_values = []
+        # Argument types and bytes
         for i in range(num_args):
             arg_type, arg_val = self._get_operand_type_and_value(args[i])
-            types.append(0x01 if arg_type == 0 else 0x02)
-            arg_values.append(arg_val)
+            if arg_type == 1:  # Variable
+                types.append(0x02)
+                operand_bytes.append([arg_val & 0xFF])
+            elif arg_val > 255 or arg_val < 0:  # Large constant
+                types.append(0x00)
+                operand_bytes.append([(arg_val >> 8) & 0xFF, arg_val & 0xFF])
+            else:  # Small constant
+                types.append(0x01)
+                operand_bytes.append([arg_val & 0xFF])
 
         # Pad with "omitted" (11)
         while len(types) < 4:
@@ -14639,12 +14833,9 @@ class ImprovedCodeGenerator:
         type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
         code.append(type_byte)
 
-        # Add routine address
-        code.append(routine_val & 0xFF)
-
-        # Add arguments
-        for arg_val in arg_values:
-            code.append(arg_val & 0xFF)
+        # Add all operand bytes
+        for op_bytes in operand_bytes:
+            code.extend(op_bytes)
 
         code.append(0x00)  # Store result to stack
 
@@ -16307,13 +16498,11 @@ class ImprovedCodeGenerator:
                 # Create 8-byte interrupt structure as a table
                 int_data = bytearray(8)
 
-                # Offset 0-1: Routine address placeholder (0xFD + index)
+                # Offset 0-1: Routine address placeholder (16-bit value in 0xFD00-0xFFFE range)
                 # The routine name should match the interrupt name (e.g., I-FIGHT)
-                placeholder_idx = self._next_placeholder_index
-                self._routine_placeholders[placeholder_idx] = int_name
-                self._next_placeholder_index += 1
-                int_data[0] = 0xFD
-                int_data[1] = placeholder_idx & 0xFF
+                placeholder_val = self._get_routine_placeholder(int_name)
+                int_data[0] = (placeholder_val >> 8) & 0xFF   # High byte
+                int_data[1] = placeholder_val & 0xFF          # Low byte
 
                 # Offset 2-3: Tick count (signed 16-bit)
                 int_data[2] = (tick_count >> 8) & 0xFF
@@ -16352,7 +16541,7 @@ class ImprovedCodeGenerator:
             # Return code that pushes the global value to stack
             # PUSH (variable) - VAR opcode 0x08
             code.append(0xE8)  # VAR form, opcode 0x08 (PUSH)
-            code.append(0x8F)  # Type byte: variable, rest omitted
+            code.append(0xBF)  # Type byte: 10 11 11 11 = variable, omit, omit, omit
             code.append(global_num)  # Global variable number
 
         return bytes(code)
@@ -16384,17 +16573,17 @@ class ImprovedCodeGenerator:
                     global_num = self.globals[global_name]
                     # PUSH (variable) - VAR opcode 0x08
                     code.append(0xE8)  # VAR form, opcode 0x08 (PUSH)
-                    code.append(0x8F)  # Type byte: variable, rest omitted
+                    code.append(0xBF)  # Type byte: 10 11 11 11 = variable, omit, omit, omit
                     code.append(global_num)  # Global variable number
                 else:
                     # Global wasn't allocated (shouldn't happen) - push 0
                     code.append(0xE8)  # PUSH
-                    code.append(0x5F)  # Small constant type
+                    code.append(0x7F)  # Type byte: 01 11 11 11 = small, omit, omit, omit
                     code.append(0x00)
             else:
                 # Interrupt not found - return 0
                 code.append(0xE8)  # PUSH
-                code.append(0x5F)  # Small constant type
+                code.append(0x7F)  # Type byte: 01 11 11 11 = small, omit, omit, omit
                 code.append(0x00)
 
         return bytes(code)
@@ -16710,7 +16899,7 @@ class ImprovedCodeGenerator:
         # PUSH (variable) - VAR opcode 0x08
         code = bytearray()
         code.append(0xE8)  # VAR form, opcode 0x08 (PUSH)
-        code.append(0x8F)  # Type byte: variable, rest omitted
+        code.append(0xBF)  # Type byte: 10 11 11 11 = variable, omit, omit, omit
         code.append(global_num)  # Global variable number
 
         return bytes(code)
