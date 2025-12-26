@@ -10662,9 +10662,10 @@ class ImprovedCodeGenerator:
 
         try:
             # Generate body code
+            # Use _generate_nested_and_adjust to properly track placeholder offsets
             for i in range(body_start_idx, len(operands)):
                 stmt = operands[i]
-                stmt_code = self.generate_statement(stmt)
+                stmt_code = self._generate_nested_and_adjust(stmt, code)
                 if stmt_code:
                     code.extend(stmt_code)
 
@@ -10715,9 +10716,10 @@ class ImprovedCodeGenerator:
                 raise ValueError(f"MAP-CONTENTS body too large for short branch: {short_offset2}")
 
             # Generate END clause if present
+            # Use _generate_nested_and_adjust to properly track placeholder offsets
             if end_clause:
                 for stmt in end_clause:
-                    stmt_code = self.generate_statement(stmt)
+                    stmt_code = self._generate_nested_and_adjust(stmt, code)
                     if stmt_code:
                         code.extend(stmt_code)
 
@@ -10983,9 +10985,10 @@ class ImprovedCodeGenerator:
         body_start = len(code)
 
         # Generate body statements
+        # Use _generate_nested_and_adjust to properly track placeholder offsets
         for i in range(body_start_idx, len(operands)):
             stmt = operands[i]
-            stmt_code = self.generate_statement(stmt)
+            stmt_code = self._generate_nested_and_adjust(stmt, code)
             if stmt_code:
                 code.extend(stmt_code)
 
@@ -11036,9 +11039,10 @@ class ImprovedCodeGenerator:
             self.loop_stack.pop()
 
         # Execute END clause if present
+        # Use _generate_nested_and_adjust to properly track placeholder offsets
         if end_clause:
             for stmt in end_clause:
-                stmt_code = self.generate_statement(stmt)
+                stmt_code = self._generate_nested_and_adjust(stmt, code)
                 if stmt_code:
                     code.extend(stmt_code)
 

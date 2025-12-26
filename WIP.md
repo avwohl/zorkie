@@ -13,11 +13,10 @@ Focus areas for next session:
 5. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 
 ## Current Status (2025-12-26)
-- **Tests:** 408 passed, 1 failed, 144 skipped, 79 xfailed, 1 xpassed
+- **Tests:** 409 passed, 0 failed, 144 skipped, 79 xfailed, 1 xpassed
 - **Hello world works** in V3, V4, V5, V6
 - **Zork1 compiles** to 98KB and shows initial game text before stack underflow
-- **1 test failure**: test_map_contents_with_next (pre-existing bug, illegal print address)
-- The xfailed tests represent ZILF-specific features not yet implemented
+- All tests passing (excluding skips/xfails for unimplemented ZILF features)
 
 ## Zork1 Compilation Status
 - **Zork1 compiles** to a 98KB story file
@@ -26,6 +25,10 @@ Focus areas for next session:
 - **Previous issue (FIXED)**: Illegal opcode error due to backward branch offset bugs
 
 ## Recent Changes (2025-12-26)
+- Fixed MAP-CONTENTS/MAP-DIRECTIONS routine call placeholder corruption
+  - Body statements in loops weren't using `_generate_nested_and_adjust`
+  - Placeholder offsets were recorded relative to nested call, not outer loop code
+  - Fixed by using `_generate_nested_and_adjust` for body and END clause statements
 - Fixed SHIFT opcode stack underflow with negative arguments
   - Routine placeholder scanning was incorrectly matching data bytes
   - E.g., -3 (0xFFFD) followed by store=0x00 looked like placeholder 0xFD00
