@@ -1247,7 +1247,10 @@ class ImprovedCodeGenerator:
                         'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
                         'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
                     }
-                    if op_name == '<>':
+                    if routine.name == "GO":
+                        # GO routine should QUIT instead of RET
+                        routine_code.append(0xBA)  # QUIT
+                    elif op_name == '<>':
                         # Empty form <> evaluates to FALSE (0)
                         # Return 0 (false) instead of RET_POPPED since <> doesn't push
                         routine_code.append(0x9B)  # RET small constant
@@ -1262,9 +1265,13 @@ class ImprovedCodeGenerator:
                         routine_code.append(0xB8)  # RET_POPPED
                     implicit_ret_generated = True
                 elif isinstance(last_stmt, CondNode):
-                    # COND pushes its result to the stack
-                    # Use RET_POPPED to return that value
-                    routine_code.append(0xB8)  # RET_POPPED
+                    if routine.name == "GO":
+                        # GO routine should QUIT instead of RET
+                        routine_code.append(0xBA)  # QUIT
+                    else:
+                        # COND pushes its result to the stack
+                        # Use RET_POPPED to return that value
+                        routine_code.append(0xB8)  # RET_POPPED
                     implicit_ret_generated = True
                 elif isinstance(last_stmt, AtomNode):
                     # Atom as final statement - return its value
@@ -1297,12 +1304,18 @@ class ImprovedCodeGenerator:
                         implicit_ret_generated = True
 
             if not implicit_ret_generated:
-                # Use RET 0 instead of RET_POPPED for predictable behavior
-                # RET_POPPED from an empty stack has undefined behavior in some interpreters
-                # RET is 1OP opcode 0x0B
-                # 0x9B = 10 01 1011 = 1OP short with small constant, opcode 0x0B
-                routine_code.append(0x9B)  # RET small constant
-                routine_code.append(0x00)  # Return value 0
+                # For GO routine, use QUIT instead of RET to properly terminate
+                # Returning from GO has undefined behavior in many interpreters
+                if routine.name == "GO":
+                    # QUIT is 0OP opcode 0x0A, short form = 0xBA
+                    routine_code.append(0xBA)  # QUIT
+                else:
+                    # Use RET 0 instead of RET_POPPED for predictable behavior
+                    # RET_POPPED from an empty stack has undefined behavior in some interpreters
+                    # RET is 1OP opcode 0x0B
+                    # 0x9B = 10 01 1011 = 1OP short with small constant, opcode 0x0B
+                    routine_code.append(0x9B)  # RET small constant
+                    routine_code.append(0x00)  # Return value 0
 
         # Patch routine header if PROG/BIND added more locals
         if hasattr(self, 'max_local_slot') and self.max_local_slot > num_locals:
