@@ -1077,6 +1077,7 @@ class Parser:
 
             aux_mode = False
             tuple_mode = False
+            optional_mode = False
 
             while self.current_token.type != TokenType.RPAREN:
                 if self.current_token.type == TokenType.EOF:
@@ -1088,10 +1089,12 @@ class Parser:
                     if keyword == "AUX":
                         aux_mode = True
                         tuple_mode = False
+                        optional_mode = False  # AUX overrides OPTIONAL
                         self.advance()
                         continue
                     elif keyword in ("OPTIONAL", "OPT"):
-                        # Optional parameters - just a marker, treat params normally
+                        # Optional parameters - mark subsequent params as optional
+                        optional_mode = True
                         self.advance()
                         continue
                     elif keyword in ("TUPLE", "ARGS"):
@@ -1102,7 +1105,8 @@ class Parser:
                         if self.current_token.type != TokenType.ATOM:
                             self.error(f"Expected variable name after \"{keyword}\"")
                         param_name = self.current_token.value
-                        params.append((param_name, False, True, False))
+                        # TUPLE params: (name, is_quoted, is_tuple, is_aux, is_optional)
+                        params.append((param_name, False, True, False, False))
                         self.advance()
                         continue
 
@@ -1116,7 +1120,8 @@ class Parser:
                 # Parse parameter (can be simple atom or with default value)
                 if self.current_token.type == TokenType.ATOM:
                     param_name = self.current_token.value
-                    params.append((param_name, is_quoted, False, aux_mode))
+                    # Params: (name, is_quoted, is_tuple, is_aux, is_optional)
+                    params.append((param_name, is_quoted, False, aux_mode, optional_mode))
                     self.advance()
                 elif self.current_token.type == TokenType.LPAREN:
                     # Variable with default value: (VAR default) or ('VAR default)
@@ -1137,7 +1142,8 @@ class Parser:
                     default_val = self.parse_expression()
 
                     # Params with defaults are treated as AUX-like (optional)
-                    params.append((param_name, param_is_quoted, False, True))
+                    # (name, is_quoted, is_tuple, is_aux, is_optional)
+                    params.append((param_name, param_is_quoted, False, True, True))
                     self.expect(TokenType.RPAREN)
                 else:
                     self.error(f"Unexpected token in parameter list: {self.current_token.type}")

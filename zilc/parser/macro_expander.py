@@ -753,10 +753,16 @@ class MacroExpander:
         num_args = len(form.operands)
         num_required = 0
         has_tuple = False
-        for param_name, is_quoted, is_tuple, is_aux in macro.params:
+        for param in macro.params:
+            # Handle both old 4-tuple and new 5-tuple formats
+            if len(param) == 5:
+                param_name, is_quoted, is_tuple, is_aux, is_optional = param
+            else:
+                param_name, is_quoted, is_tuple, is_aux = param
+                is_optional = False
             if is_tuple:
                 has_tuple = True
-            elif not is_aux:
+            elif not is_aux and not is_optional:
                 num_required += 1
 
         if num_args < num_required:
@@ -827,7 +833,14 @@ class MacroExpander:
         bindings = {}
         arg_index = 0
 
-        for param_name, is_quoted, is_tuple, is_aux in macro.params:
+        for param in macro.params:
+            # Handle both old 4-tuple and new 5-tuple formats
+            if len(param) == 5:
+                param_name, is_quoted, is_tuple, is_aux, is_optional = param
+            else:
+                param_name, is_quoted, is_tuple, is_aux = param
+                is_optional = False
+
             if is_tuple:
                 # Collect all remaining arguments
                 bindings[param_name] = args[arg_index:]
@@ -835,8 +848,16 @@ class MacroExpander:
             elif is_aux:
                 # AUX variables get default values (empty list for now)
                 bindings[param_name] = FormNode(AtomNode("()"), [])
+            elif is_optional:
+                # Optional parameter
+                if arg_index < len(args):
+                    bindings[param_name] = args[arg_index]
+                    arg_index += 1
+                else:
+                    # Missing optional argument - bind to None (unassigned)
+                    bindings[param_name] = None
             else:
-                # Regular parameter
+                # Regular required parameter
                 if arg_index < len(args):
                     if is_quoted:
                         # Quoted parameter: evaluate at definition time

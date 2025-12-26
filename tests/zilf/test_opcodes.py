@@ -344,13 +344,20 @@ class TestIncDec:
         AssertRoutine("FOO", "<PRINTN <IGRTR? FOO 100>> <CRLF> <PRINTN .FOO>") \
             .when_called_with("99").outputs("0\n100")
 
+    def test_igrtr_p_with_variable(self):
+        """Test IGRTR? with variable second operand."""
+        # Variable comparison operand is valid - Z-machine inc_chk allows it
+        AssertRoutine("FOO BAR", "<PRINTN <IGRTR? FOO BAR>> <CRLF> <PRINTN .FOO>") \
+            .when_called_with("50 51").outputs("0\n51")
+        AssertRoutine("FOO BAR", "<PRINTN <IGRTR? FOO BAR>> <CRLF> <PRINTN .FOO>") \
+            .when_called_with("51 50").outputs("1\n52")
+
     def test_igrtr_p_error(self):
         """Test IGRTR? error cases."""
         AssertExpr("<IGRTR?>").does_not_compile()
         AssertRoutine("FOO", "<IGRTR? FOO>").does_not_compile()
         AssertExpr("<IGRTR? 11 22>").does_not_compile()
         AssertRoutine("FOO", "<IGRTR? BAR 100>").does_not_compile()
-        AssertRoutine("FOO BAR", "<IGRTR? FOO BAR>").does_not_compile()
 
     def test_dless_p(self):
         """Test DLESS? opcode."""
@@ -359,13 +366,20 @@ class TestIncDec:
         AssertRoutine("FOO", "<PRINTN <DLESS? FOO 100>> <CRLF> <PRINTN .FOO>") \
             .when_called_with("101").outputs("0\n100")
 
+    def test_dless_p_with_variable(self):
+        """Test DLESS? with variable second operand."""
+        # Variable comparison operand is valid - Z-machine dec_chk allows it
+        AssertRoutine("FOO BAR", "<PRINTN <DLESS? FOO BAR>> <CRLF> <PRINTN .FOO>") \
+            .when_called_with("51 50").outputs("0\n50")
+        AssertRoutine("FOO BAR", "<PRINTN <DLESS? FOO BAR>> <CRLF> <PRINTN .FOO>") \
+            .when_called_with("50 51").outputs("1\n49")
+
     def test_dless_p_error(self):
         """Test DLESS? error cases."""
         AssertExpr("<DLESS?>").does_not_compile()
         AssertRoutine("FOO", "<DLESS? FOO>").does_not_compile()
         AssertExpr("<DLESS? 11 22>").does_not_compile()
         AssertRoutine("FOO", "<DLESS? BAR 100>").does_not_compile()
-        AssertRoutine("FOO BAR", "<DLESS? FOO BAR>").does_not_compile()
 
 
 class TestApply:

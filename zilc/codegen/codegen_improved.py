@@ -3429,6 +3429,19 @@ class ImprovedCodeGenerator:
         elif isinstance(var_node, NumberNode):
             # Direct variable number (e.g., VALUE 0 for stack)
             pass
+        elif isinstance(var_node, LocalVarNode):
+            # .X syntax for local variable
+            if var_node.name not in self.locals:
+                # Fall back to global (LocalVarNode can reference globals)
+                if var_node.name not in self.globals:
+                    raise ValueError(f"VALUE: Unknown variable '.{var_node.name}'")
+        elif isinstance(var_node, GlobalVarNode):
+            # ,X syntax for global variable
+            if var_node.name not in self.globals:
+                raise ValueError(f"VALUE: Unknown global ',{var_node.name}'")
+        elif isinstance(var_node, FormNode):
+            # VALUE of an expression - evaluate and return
+            return self.eval_expression(var_node)
         else:
             raise ValueError("VALUE: Operand must be a variable name or number")
 
@@ -5905,7 +5918,7 @@ class ImprovedCodeGenerator:
 
         Args:
             operands[0]: variable to decrement (must be a variable name, not a number)
-            operands[1]: value to compare against (must be a constant, not a variable)
+            operands[1]: value to compare against (can be constant or variable)
 
         Returns:
             bytes: Z-machine code that pushes 0 or 1 to stack
@@ -5920,18 +5933,21 @@ class ImprovedCodeGenerator:
         if isinstance(var, NumberNode):
             raise ValueError("DLESS? first operand must be a variable, not a number")
 
-        # Validate: second operand must be a constant, not a variable
-        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
-            raise ValueError("DLESS? second operand must be a constant, not a variable")
-        # Also check for AtomNode that resolves to a variable
-        if isinstance(cmp_op, AtomNode):
-            if cmp_op.value in self.locals or cmp_op.value in self.globals:
-                raise ValueError("DLESS? second operand must be a constant, not a variable")
-
         var_num = self.get_variable_number(var)
         if var_num == 0:  # Stack is invalid for DEC
             if isinstance(var, AtomNode) and var.value not in self.locals and var.value not in self.globals:
                 raise ValueError(f"DLESS? unknown variable '{var.value}'")
+
+        # Determine if second operand is a variable
+        cmp_is_var = False
+        cmp_var_num = 0
+        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
+            cmp_is_var = True
+            cmp_var_num = self.get_variable_number(cmp_op)
+        elif isinstance(cmp_op, AtomNode):
+            if cmp_op.value in self.locals or cmp_op.value in self.globals:
+                cmp_is_var = True
+                cmp_var_num = self.get_variable_number(cmp_op)
 
         cmp_type, cmp_val = self._get_operand_type_and_value(cmp_op)
 
@@ -5951,10 +5967,16 @@ class ImprovedCodeGenerator:
         #   ?end:
 
         # JL is 2OP opcode 0x02
-        # Short 2OP with var,small: 0 1 0 00010 = 0x42
-        code.append(0x42)  # JL short form with var, small const
-        code.append(var_num)
-        code.append(cmp_val & 0xFF)
+        if cmp_is_var:
+            # Long 2OP with var,var: 0 1 1 0 0010 = 0x62
+            code.append(0x62)
+            code.append(var_num)
+            code.append(cmp_var_num)
+        else:
+            # Long 2OP with var,small: 0 1 0 0 0010 = 0x42
+            code.append(0x42)
+            code.append(var_num)
+            code.append(cmp_val & 0xFF)
         # Branch byte: branch if true (bit 7 = 1), short form (bit 6 = 1)
         # Need to skip: ADD 0 0 -> stack (4 bytes) + JUMP ?end (3 bytes) = 7 bytes
         # Offset = 7 + 2 = 9
@@ -15725,7 +15747,7 @@ class ImprovedCodeGenerator:
 
         Args:
             operands[0]: variable to increment (must be a variable name, not a number)
-            operands[1]: value to compare against (must be a constant, not a variable)
+            operands[1]: value to compare against (can be constant or variable)
 
         Returns:
             bytes: Z-machine code that pushes 0 or 1 to stack
@@ -15740,18 +15762,21 @@ class ImprovedCodeGenerator:
         if isinstance(var, NumberNode):
             raise ValueError("IGRTR? first operand must be a variable, not a number")
 
-        # Validate: second operand must be a constant, not a variable
-        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
-            raise ValueError("IGRTR? second operand must be a constant, not a variable")
-        # Also check for AtomNode that resolves to a variable
-        if isinstance(cmp_op, AtomNode):
-            if cmp_op.value in self.locals or cmp_op.value in self.globals:
-                raise ValueError("IGRTR? second operand must be a constant, not a variable")
-
         var_num = self.get_variable_number(var)
         if var_num == 0:  # Stack is invalid for INC
             if isinstance(var, AtomNode) and var.value not in self.locals and var.value not in self.globals:
                 raise ValueError(f"IGRTR? unknown variable '{var.value}'")
+
+        # Determine if second operand is a variable
+        cmp_is_var = False
+        cmp_var_num = 0
+        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
+            cmp_is_var = True
+            cmp_var_num = self.get_variable_number(cmp_op)
+        elif isinstance(cmp_op, AtomNode):
+            if cmp_op.value in self.locals or cmp_op.value in self.globals:
+                cmp_is_var = True
+                cmp_var_num = self.get_variable_number(cmp_op)
 
         cmp_type, cmp_val = self._get_operand_type_and_value(cmp_op)
 
@@ -15771,10 +15796,16 @@ class ImprovedCodeGenerator:
         #   ?end:
 
         # JG is 2OP opcode 0x03
-        # Short 2OP with var,small: 0 1 0 00011 = 0x43
-        code.append(0x43)  # JG short form with var, small const
-        code.append(var_num)
-        code.append(cmp_val & 0xFF)
+        if cmp_is_var:
+            # Long 2OP with var,var: 0 1 1 0 0011 = 0x63
+            code.append(0x63)
+            code.append(var_num)
+            code.append(cmp_var_num)
+        else:
+            # Long 2OP with var,small: 0 1 0 0 0011 = 0x43
+            code.append(0x43)
+            code.append(var_num)
+            code.append(cmp_val & 0xFF)
         # Branch byte: branch if true (bit 7 = 1), short form (bit 6 = 1)
         # Need to skip: ADD 0 0 -> stack (4 bytes) + JUMP ?end (3 bytes) = 7 bytes
         # Offset = 7 + 2 = 9
