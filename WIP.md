@@ -18,12 +18,16 @@ Focus areas for next session:
 - All tests passing (excluding skips/xfails for unimplemented ZILF features)
 
 ## Zork1 Compilation Status
-- **Zork1 compiles** to a 98KB story file
-- **Runtime progress**: Game now displays "It is pitch black. You are likely to be eaten by a grue."
-- **Current issue**: Stack underflow error after initial display
-- **Previous issue (FIXED)**: Illegal opcode error due to backward branch offset bugs
+- **Zork1 compiles** to a 103KB story file
+- **Runtime status**: Hangs on startup (no output)
+- **Root cause**: Missing PREPOSITIONS table generation (requires NEW-PARSER? implementation)
+- **Remaining warnings**: ON-LAKE, IN-LAKE (missing room definitions), PREPOSITIONS (missing global)
+- **Previous issues (FIXED)**: Illegal opcode, backward branch offsets, ACT? constants
 
 ## Recent Changes (2025-12-27)
+- **ACT? constant generation** - Added automatic ACT?ACTION constants from SYNTAX definitions
+  - E.g., V-WALK action creates ACT?WALK constant
+  - Eliminates unknown constant warnings for ACT?WALK, ACT?FIND, etc.
 - **Full V1-V8 Z-machine support**
   - Fixed memory layout: dictionary now in static memory (bocfel requirement)
   - Added 4-byte padding before routines for V6-7 (bocfel rejects packed addr 0)
