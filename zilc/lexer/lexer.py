@@ -400,9 +400,10 @@ class Lexer:
         Note: ^ is used in some MDL constructs
         Note: ! is used in MDL atoms like ON!-INITIAL, OFF!-INITIAL
         Note: | is used in TELL-TOKENS and as a delimiter in some contexts
+        Note: ' is used in vocabulary words like CAT'S (warns MDL0429)
         """
         return (ch.isalnum() or
-                ch in '-_?+*/=$#;.%:&^!|')
+                ch in "-_?+*/=$#;.%:&^!|'")
 
     def tokenize(self) -> List[Token]:
         """Tokenize the entire source code."""

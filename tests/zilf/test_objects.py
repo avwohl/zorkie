@@ -477,7 +477,6 @@ class TestUnusedWarnings:
             .without_warnings() \
             .compiles()
 
-    @pytest.mark.xfail(reason="Lexer doesn't support apostrophes in atoms yet")
     def test_vocab_properties_with_apostrophes_should_warn(self):
         """Test that vocab properties with apostrophes warn."""
         AssertGlobals("<OBJECT CATS-PAJAMAS (SYNONYM PAJAMAS) (ADJECTIVE CAT'S)>") \

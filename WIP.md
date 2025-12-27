@@ -6,14 +6,13 @@ All ZILF integration tests are now either passing, skipped, or marked xfail for
 unimplemented ZILF-specific features.
 
 Focus areas for next session:
-1. **Lexer apostrophe support** - Add `'` support inside atoms for words like `CAT'S`
-2. **Object ordering** - ZILF-specific numbering (rooms first, reverse-order contents)
-3. **PROPDEF** - Property pattern matching (6 tests)
-4. **BIT-SYNONYM** - Attribute aliases (2 tests)
-5. **NEW-PARSER?** - Extended vocabulary format (8 tests)
+1. **Object ordering** - ZILF-specific numbering (rooms first, reverse-order contents)
+2. **PROPDEF** - Property pattern matching (6 tests)
+3. **BIT-SYNONYM** - Attribute aliases (2 tests)
+4. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 
 ## Current Status (2025-12-26)
-- **Tests:** 409 passed, 0 failed, 144 skipped, 79 xfailed, 1 xpassed
+- **Tests:** 410 passed, 0 failed, 144 skipped, 78 xfailed, 1 xpassed
 - **Hello world works** in V3, V4, V5, V6
 - **Zork1 compiles** to 98KB and shows initial game text before stack underflow
 - All tests passing (excluding skips/xfails for unimplemented ZILF features)
@@ -25,6 +24,9 @@ Focus areas for next session:
 - **Previous issue (FIXED)**: Illegal opcode error due to backward branch offset bugs
 
 ## Recent Changes (2025-12-26)
+- Added lexer apostrophe support for vocabulary words like `CAT'S`
+  - Added `'` to valid atom characters in `is_atom_char()`
+  - MDL0429 warning already implemented for apostrophes in vocab words
 - Fixed MAP-CONTENTS/MAP-DIRECTIONS routine call placeholder corruption
   - Body statements in loops weren't using `_generate_nested_and_adjust`
   - Placeholder offsets were recorded relative to nested call, not outer loop code
