@@ -285,6 +285,7 @@ class ImprovedCodeGenerator:
 
     def _init_version_features(self):
         """Initialize version-specific feature flags."""
+        self.has_abbreviations = self.version >= 2  # V1 has no abbreviations
         self.has_colors = self.version >= 5
         self.has_sound = self.version >= 3
         self.has_mouse = self.version >= 5

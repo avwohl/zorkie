@@ -286,9 +286,44 @@ class ZMachine:
         self.input_queue.extend(inputs)
         return self
 
+    def _get_interpreter(self) -> tuple:
+        """
+        Get the interpreter path and flags based on Z-machine version.
+
+        Returns:
+            Tuple of (interpreter_path, flags_list, interpreter_name)
+        """
+        import os
+
+        # Check for environment variable override
+        override = os.environ.get("ZORKIE_INTERPRETER")
+        if override:
+            # User override - assume dfrotz-compatible flags
+            return (override, ["-q", "-m", "-p"], "custom")
+
+        # V7-V8: Use fizmo-console (dfrotz has issues with these versions)
+        if self.version >= 7:
+            fizmo_path = "/usr/games/fizmo-console"
+            if os.path.exists(fizmo_path):
+                # fizmo-console flags use long form
+                return (fizmo_path, ["--disable-hyphenation"], "fizmo")
+            # Fallback to dfrotz if fizmo not available
+
+        # V1-V6: Use dfrotz
+        dfrotz_paths = [
+            os.path.expanduser("~/esrc/frotz-src/dfrotz"),
+            "/usr/games/dfrotz",
+            "/usr/local/bin/dfrotz",
+        ]
+        for path in dfrotz_paths:
+            if os.path.exists(path):
+                return (path, ["-q", "-m", "-p"], "dfrotz")
+
+        return (None, [], None)
+
     def execute(self, routine: str = "GO", args: List[int] = None) -> ExecutionResult:
         """
-        Execute the story file using dfrotz.
+        Execute the story file using an appropriate Z-machine interpreter.
 
         Args:
             routine: Routine to call (default: GO)
@@ -301,12 +336,12 @@ class ZMachine:
         import tempfile
         import os
 
-        # Path to dfrotz interpreter
-        dfrotz_path = os.path.expanduser("~/esrc/frotz-src/dfrotz")
-        if not os.path.exists(dfrotz_path):
+        # Get interpreter based on version
+        interpreter_path, flags, interpreter_name = self._get_interpreter()
+        if not interpreter_path:
             return ExecutionResult(
                 success=False,
-                error=f"dfrotz not found at {dfrotz_path}",
+                error=f"No Z-machine interpreter found for version {self.version}",
             )
 
         try:
@@ -319,9 +354,9 @@ class ZMachine:
                 # Prepare input
                 input_text = "\n".join(self.input_queue) + "\n" if self.input_queue else ""
 
-                # Run dfrotz: -q quiet, -m no MORE prompts, -p plain ASCII
+                # Run interpreter with appropriate flags
                 result = subprocess.run(
-                    [dfrotz_path, "-q", "-m", "-p", story_path],
+                    [interpreter_path] + flags + [story_path],
                     input=input_text,
                     capture_output=True,
                     text=True,
@@ -994,6 +1029,35 @@ class RawAssertion:
         self.version = ZVersion.V6
         return self
 
+    def in_v7(self) -> 'RawAssertion':
+        self.version = ZVersion.V7
+        return self
+
+    def in_v8(self) -> 'RawAssertion':
+        self.version = ZVersion.V8
+        return self
+
+    def _detect_version_from_source(self) -> None:
+        """Detect Z-machine version from VERSION directive in source."""
+        import re
+        match = re.search(r'<VERSION\s+(\w+)\s*>', self.source)
+        if match:
+            version_str = match.group(1).upper()
+            version_map = {
+                'ZIP': ZVersion.V3,
+                'EZIP': ZVersion.V4,
+                'XZIP': ZVersion.V5,
+                'YZIP': ZVersion.V6,
+                '3': ZVersion.V3,
+                '4': ZVersion.V4,
+                '5': ZVersion.V5,
+                '6': ZVersion.V6,
+                '7': ZVersion.V7,
+                '8': ZVersion.V8,
+            }
+            if version_str in version_map:
+                self.version = version_map[version_str]
+
     def with_warnings(self, *codes: str) -> 'RawAssertion':
         self.expected_warnings = list(codes) if codes else None
         return self
@@ -1003,6 +1067,7 @@ class RawAssertion:
         return self
 
     def _get_compiler(self) -> ZILCompiler:
+        self._detect_version_from_source()
         return ZILCompiler(self.version)
 
     def compiles(self) -> None:

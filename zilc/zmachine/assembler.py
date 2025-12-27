@@ -49,8 +49,13 @@ class ZAssembler:
         # Bytes 0x10-0x11: Flags 2
         header[0x10:0x12] = struct.pack('>H', 0x0000)
 
-        # Bytes 0x12-0x17: Serial number (YYMMDD)
-        header[0x12:0x18] = b'250115'  # Today's date
+        # Bytes 0x12-0x17: Serial number (YYMMDD) - V2+ only
+        if self.version >= 2:
+            from datetime import date
+            today = date.today()
+            serial = f"{today.year % 100:02d}{today.month:02d}{today.day:02d}"
+            header[0x12:0x18] = serial.encode('ascii')
+        # V1: leave as zeros (no serial number field)
 
         # Bytes 0x18-0x19: Abbreviations table (0 = none)
         header[0x18:0x1A] = struct.pack('>H', 0x0000)
