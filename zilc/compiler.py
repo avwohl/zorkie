@@ -1696,6 +1696,13 @@ class ZILCompiler:
                         if const_name not in verb_constants:
                             verb_constants[const_name] = action_num
 
+                # Create ACT?ACTION constant from action routine name
+                # E.g., V-WALK -> ACT?WALK, V-FIND -> ACT?FIND
+                if action_routine.startswith('V-'):
+                    act_const_name = f'ACT?{action_routine[2:].upper()}'
+                    if act_const_name not in verb_constants:
+                        verb_constants[act_const_name] = action_num
+
                 action_num += 1
 
             if preaction_routine and preaction_routine not in preactions:
