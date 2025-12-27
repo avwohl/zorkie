@@ -1676,6 +1676,8 @@ class ZILCompiler:
 
         action_num = 1  # Start from 1 (0 is often reserved)
 
+        unique_verbs = set()  # Track unique verb words for limit checking
+
         for syntax_def in program.syntax:
             if not syntax_def.routine:
                 continue
@@ -1684,6 +1686,12 @@ class ZILCompiler:
             parts = syntax_def.routine.split()
             action_routine = parts[0] if parts else None
             preaction_routine = parts[1] if len(parts) > 1 else None
+
+            # Track unique verb words (first word in pattern) for limit checking
+            if syntax_def.pattern:
+                verb_word = syntax_def.pattern[0]
+                if isinstance(verb_word, str):
+                    unique_verbs.add(verb_word.upper())
 
             if action_routine and action_routine not in actions:
                 actions[action_routine] = action_num
@@ -1738,6 +1746,20 @@ class ZILCompiler:
         for prep_word, prep_number in prepositions.items():
             const_name = f'PR?{prep_word}'
             verb_constants[const_name] = prep_number
+
+        # Check verb/action limits for old parser (limit 255)
+        # NEW-PARSER? removes this limit
+        new_parser = self.compile_globals.get('NEW-PARSER?', False)
+        if not new_parser:
+            # Count unique verbs (unique verb words in SYNTAX definitions)
+            verb_count = len(unique_verbs)
+            if verb_count > 255:
+                raise SyntaxError(f"MDL0426: Too many verbs ({verb_count}) - old parser only allows 255 verbs. Use NEW-PARSER? for more.")
+
+            # Count unique actions
+            action_count = len(actions)
+            if action_count > 255:
+                raise SyntaxError(f"MDL0426: Too many actions ({action_count}) - old parser only allows 255 actions. Use NEW-PARSER? for more.")
 
         # Store for later use during code generation
         self._action_table = {

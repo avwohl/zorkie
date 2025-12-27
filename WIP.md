@@ -11,7 +11,7 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-27)
-- **Tests:** 578 passed, 0 failed, 1 skipped, 72 xfailed
+- **Tests:** 585 passed, 0 failed, 1 skipped, 70 xfailed
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - **Zork1 compiles** to 103KB but has runtime issues (missing parser features)
@@ -30,6 +30,11 @@ Focus areas for next session:
 - **Previous issues (FIXED)**: Illegal opcode, backward branch offsets, ACT? constants, PREPOSITIONS
 
 ## Recent Changes (2025-12-27)
+- **Verb/action limit checking (MDL0426)** - Old parser now validates syntax definitions
+  - Raises error if more than 255 unique verbs in SYNTAX definitions
+  - Raises error if more than 255 unique actions in SYNTAX definitions
+  - NEW-PARSER? flag bypasses these limits (no limit in new parser mode)
+  - 2 tests now pass (was xfailed)
 - **PREPOSITIONS table generation** - Added automatic table from SYNTAX definitions
   - Extracts prepositions from SYNTAX patterns (words between OBJECT slots)
   - Generates PR?PREP constants for each unique preposition

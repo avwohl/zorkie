@@ -116,7 +116,6 @@ class TestLateSyntaxTables:
 class TestVerbLimits:
     """Tests for verb and action limits."""
 
-    @pytest.mark.xfail(reason="Verb limit checking not implemented")
     def test_old_parser_only_allows_255_verbs(self):
         """Test old parser only allows 255 verbs."""
         globals_code = [f"<SYNTAX VERB-{i} = V-FOO>" for i in range(256)]
@@ -124,7 +123,6 @@ class TestVerbLimits:
             .with_global("<ROUTINE V-FOO () <>>") \
             .does_not_compile("MDL0426")
 
-    @pytest.mark.xfail(reason="Action limit checking not implemented")
     def test_old_parser_only_allows_255_actions(self):
         """Test old parser only allows 255 actions."""
         globals_code = [
