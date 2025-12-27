@@ -6874,17 +6874,20 @@ class ImprovedCodeGenerator:
         if len(operands) != 2:
             raise ValueError("COLOR requires exactly 2 operands")
 
-        # V5+: SET_COLOUR opcode
+        # V5+: SET_COLOUR opcode (EXT:27)
         code = bytearray()
         if len(operands) >= 2:
             op1_type, op1_val = self._get_operand_type_and_value(operands[0])
             op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-            code.append(0xFB)  # SET_COLOUR (VAR:27 = 0xE0 + 0x1B)
+            # Extended opcode format: 0xBE followed by opcode number
+            code.append(0xBE)  # EXT marker
+            code.append(0x1B)  # SET_COLOUR (EXT:27)
 
-            # Build type byte
+            # Build type byte (same format as VAR opcodes)
+            # 00=large constant, 01=small constant, 10=variable, 11=omitted
             types = []
-            types.append(0x01 if op1_type == 0 else 0x02)
+            types.append(0x01 if op1_type == 0 else 0x02)  # small const or variable
             types.append(0x01 if op2_type == 0 else 0x02)
             types.append(0x03)  # Omitted
             types.append(0x03)  # Omitted

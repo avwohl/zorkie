@@ -1415,6 +1415,7 @@ class TestRead:
         # V3 status line reads global 0 to get current location object
         # Output includes V3 status line (location name, score, moves)
         # Object CAT has no short name, so location shows empty
+        # Note: Status line formatting varies by interpreter
         AssertRoutine("", "<READ ,TEXTBUF ,LEXBUF> <PRINTC <GETB ,TEXTBUF 2>> <PRINTB <GET ,LEXBUF 1>>") \
             .in_v3() \
             .with_global("<GLOBAL TEXTBUF <ITABLE 50 (BYTE LENGTH) 0>>") \
@@ -1422,7 +1423,7 @@ class TestRead:
             .with_global("<OBJECT CAT (SYNONYM CAT)>") \
             .with_global("<GLOBAL HERE CAT>") \
             .with_input("cat") \
-            .outputs("                                                  Score: 0        Moves: 0\n\nacat")
+            .outputs("Score: 0        Moves: 0\n\nacat")
 
     def test_read_v4_compiles(self):
         """Test READ compilation in V4."""
@@ -1435,14 +1436,14 @@ class TestRead:
         """Test READ opcode in V5."""
         # V5 to V6, 1 to 4 operands
         # V5 READ returns the terminating character (13 for Enter)
-        # dfrotz echoes the typed input, so expected output includes "cat\n" prefix
+        # Note: Input echo behavior varies by interpreter (bocfel doesn't echo)
         AssertRoutine("", "<PRINTN <READ ,TEXTBUF ,LEXBUF>> <PRINTC <GETB ,TEXTBUF 2>> <PRINTB <GET ,LEXBUF 1>>") \
             .in_v5() \
             .with_global("<GLOBAL TEXTBUF <ITABLE 50 (BYTE LENGTH) 0>>") \
             .with_global("<GLOBAL LEXBUF <ITABLE 1 (LEXV) 0 0 0>>") \
             .with_global("<OBJECT CAT (SYNONYM CAT)>") \
             .with_input("cat") \
-            .outputs("cat\n13ccat")
+            .outputs("13ccat")
 
         AssertExpr("<READ 0>").in_v5().compiles()
         AssertExpr("<READ 0 0 0>").in_v5().compiles()
