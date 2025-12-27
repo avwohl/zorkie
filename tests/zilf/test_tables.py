@@ -104,7 +104,6 @@ class TestTablePatterns:
 class TestPureTable:
     """Tests for pure (read-only) tables."""
 
-    @pytest.mark.xfail(reason="PURE table memory layout not implemented")
     def test_pure_itable_in_pure_memory(self):
         """Test that PURE ITABLE is in pure memory."""
         AssertGlobals("<GLOBAL TBL <ITABLE 10 (PURE)>>") \
