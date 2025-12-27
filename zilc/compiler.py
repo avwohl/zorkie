@@ -1485,11 +1485,47 @@ class ZILCompiler:
             next_prop += 1
 
         # Collect custom properties from PROPDEF declarations
+        # Also extract any constants defined in PROPDEF output patterns
+        propdef_constants = {}
         for propdef in program.propdefs:
             prop_name = f'P?{propdef.name}'
             if prop_name not in properties:
                 properties[prop_name] = next_prop
                 next_prop += 1
+
+            # Extract constants from PROPDEF output patterns
+            # Pattern structure:
+            #   ('CONSTANT', name, ('NUMBER', n)) - constant with fixed value n
+            #   ('CONSTANT', name, ('FORM', type, args)) - constant for offset of this element
+            #   ('FORM', type, args) - output element that takes space
+            for input_pattern, output_pattern in propdef.patterns:
+                current_offset = 0
+                for elem in output_pattern:
+                    elem_type = elem[0]
+
+                    if elem_type == 'CONSTANT':
+                        const_name = elem[1]
+                        const_val = elem[2] if len(elem) > 2 else None
+                        if const_val:
+                            if const_val[0] == 'NUMBER':
+                                propdef_constants[const_name] = const_val[1]
+                            elif const_val[0] == 'FORM':
+                                # This constant defines the offset of an embedded FORM
+                                # Record current offset as the constant value
+                                propdef_constants[const_name] = current_offset
+                                # The embedded FORM also contributes to size
+                                form_type = const_val[1]
+                                if form_type in ('WORD', 'ROOM', 'OBJECT', 'VOC'):
+                                    current_offset += 2
+                                elif form_type == 'BYTE':
+                                    current_offset += 1
+                    elif elem_type == 'FORM':
+                        # Track size of standalone output elements
+                        form_type = elem[1]
+                        if form_type in ('WORD', 'ROOM', 'OBJECT', 'VOC'):
+                            current_offset += 2
+                        elif form_type == 'BYTE':
+                            current_offset += 1
 
         # Handle DIRECTIONS - assign property numbers from MaxProperties down
         # V3: max 31, V4+: max 63
@@ -1591,6 +1627,7 @@ class ZILCompiler:
             'flags': flags,
             'properties': properties,
             'parser_constants': parser_constants,
+            'propdef_constants': propdef_constants,  # Constants from PROPDEF output patterns
             'directions': program.directions,  # List of direction names
             'low_direction': low_direction if program.directions else None,
             'max_properties': max_properties,
@@ -1951,28 +1988,8 @@ class ZILCompiler:
         dict_word_offsets = dictionary.get_word_offsets()
         self.log(f"  Dictionary contains {len(dictionary.words)} words")
 
-        # Get vocab placeholders and prepare fixups
+        # Get initial vocab placeholders from codegen (will be updated during object table build)
         vocab_placeholders = codegen.get_vocab_placeholders()
-        vocab_fixups = []  # List of (placeholder_idx, word_offset)
-        missing_vocab_words = []
-        for placeholder_idx, word in vocab_placeholders.items():
-            if word in dict_word_offsets:
-                vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
-            else:
-                # Word not in dictionary - try to add it
-                dictionary.add_word(word, 'parser')
-                # Re-get offsets to include the new word
-                dict_word_offsets = dictionary.get_word_offsets()
-                if word in dict_word_offsets:
-                    vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
-                else:
-                    missing_vocab_words.append(word)
-                    vocab_fixups.append((placeholder_idx, 0))  # Default to 0
-
-        if vocab_placeholders:
-            self.log(f"  {len(vocab_placeholders)} vocabulary word references (W?*)")
-        if missing_vocab_words:
-            self.log(f"  WARNING: {len(missing_vocab_words)} missing vocab words: {missing_vocab_words[:5]}...")
 
         # Build object table with proper properties
         self.log("Building object table...")
@@ -2129,17 +2146,19 @@ class ZILCompiler:
         def match_propdef_pattern(prop_values, input_pattern):
             """Try to match property values against a PROPDEF input pattern.
 
-            Returns dict of captured variables if matched, None otherwise.
+            Returns (captures_list, is_many) where captures_list is a list of
+            capture dicts (one per MANY iteration, or single-element list if no MANY).
+            Returns (None, False) if no match.
             """
             from .parser.ast_nodes import AtomNode, NumberNode
 
-            captures = {}
+            captures_list = []
+            current_captures = {}
             val_idx = 0
             pat_idx = 0
             in_opt = False
             in_many = False
             many_start_pat_idx = None
-            many_start_val_idx = None
 
             while pat_idx < len(input_pattern):
                 elem_type, elem_val, elem_extra = input_pattern[pat_idx]
@@ -2150,7 +2169,6 @@ class ZILCompiler:
                     elif elem_val == 'MANY':
                         in_many = True
                         many_start_pat_idx = pat_idx + 1
-                        many_start_val_idx = val_idx
                     pat_idx += 1
                     continue
 
@@ -2159,7 +2177,7 @@ class ZILCompiler:
                         # Optional/MANY elements can be missing
                         pat_idx += 1
                         continue
-                    return None  # No more values but pattern expects more
+                    return None, False  # No more values but pattern expects more
 
                 val = prop_values[val_idx]
 
@@ -2170,18 +2188,18 @@ class ZILCompiler:
                             if in_opt:
                                 pat_idx += 1
                                 continue
-                            return None
+                            return None, False
                     elif isinstance(val, NumberNode):
                         if val.value != elem_val:
                             if in_opt:
                                 pat_idx += 1
                                 continue
-                            return None
+                            return None, False
                     else:
                         if in_opt:
                             pat_idx += 1
                             continue
-                        return None
+                        return None, False
                     val_idx += 1
 
                 elif elem_type == 'CAPTURE':
@@ -2189,37 +2207,63 @@ class ZILCompiler:
                     var_type = elem_extra
                     # Capture the value
                     if isinstance(val, NumberNode):
-                        captures[var_name] = val.value
+                        current_captures[var_name] = val.value
                     elif isinstance(val, AtomNode):
-                        captures[var_name] = val.value
+                        current_captures[var_name] = val.value
                     else:
-                        captures[var_name] = val
+                        current_captures[var_name] = val
                     val_idx += 1
 
                 pat_idx += 1
 
                 # Handle MANY repetition
-                if in_many and pat_idx >= len(input_pattern) and val_idx < len(prop_values):
-                    # More values to process, loop back to MANY start
-                    pat_idx = many_start_pat_idx
+                if in_many and pat_idx >= len(input_pattern):
+                    # Save current captures and start new iteration
+                    captures_list.append(current_captures)
+                    current_captures = {}
+                    if val_idx < len(prop_values):
+                        # More values to process, loop back to MANY start
+                        pat_idx = many_start_pat_idx
 
             # All pattern elements matched, check if all values consumed
             if val_idx < len(prop_values) and not in_many:
-                return None
+                return None, False
 
-            return captures
+            # Add final captures if not already added (non-MANY case or last MANY iteration)
+            if not in_many:
+                captures_list.append(current_captures)
+
+            return captures_list, in_many
 
         # Helper to encode property using PROPDEF output pattern
-        def encode_propdef_output(captures, output_pattern, obj_name_to_num):
+        def encode_propdef_output(captures_list, output_pattern, obj_name_to_num, is_many=False):
             """Encode property value using PROPDEF output pattern.
 
-            Returns a list of bytes representing the encoded property.
+            captures_list is a list of capture dicts (one per MANY iteration).
+            Returns (bytes, defined_constants) tuple.
             """
             result = bytearray()
             defined_constants = {}  # Constants defined in this encoding
             length_placeholder_pos = None
 
-            for elem in output_pattern:
+            # Find MANY marker in output pattern - elements after it are repeated
+            many_idx = None
+            for i, elem in enumerate(output_pattern):
+                if elem[0] == 'MODIFIER' and elem[1] == 'MANY':
+                    many_idx = i
+                    break
+
+            # Split pattern into pre-MANY and post-MANY parts
+            if many_idx is not None:
+                pre_many_pattern = output_pattern[:many_idx]
+                post_many_pattern = output_pattern[many_idx + 1:]
+            else:
+                pre_many_pattern = output_pattern
+                post_many_pattern = []
+
+            def encode_element(elem, captures):
+                """Encode a single output element."""
+                nonlocal defined_constants
                 elem_type = elem[0]
 
                 if elem_type == 'LENGTH':
@@ -2228,7 +2272,7 @@ class ZILCompiler:
 
                 elif elem_type == 'AUTO_LENGTH':
                     # Auto-calculate length - position to patch later
-                    length_placeholder_pos = len(result)
+                    pass
 
                 elif elem_type == 'FORM':
                     form_type = elem[1]
@@ -2243,6 +2287,8 @@ class ZILCompiler:
                                     result.extend([(val >> 8) & 0xFF, val & 0xFF])
                                 else:
                                     result.extend([0, 0])
+                            elif arg_type == 'NUMBER':
+                                result.extend([(arg_val >> 8) & 0xFF, arg_val & 0xFF])
 
                     elif form_type == 'BYTE':
                         # Encode as 1-byte
@@ -2255,12 +2301,15 @@ class ZILCompiler:
                                     result.append(0)
 
                     elif form_type == 'ROOM':
-                        # Encode as room number (word)
+                        # Encode as room number (byte for V3, word for V4+)
                         for arg_type, arg_val in form_args:
                             if arg_type == 'VAR':
                                 room_name = captures.get(arg_val, '')
                                 room_num = obj_name_to_num.get(room_name, 0)
-                                result.extend([(room_num >> 8) & 0xFF, room_num & 0xFF])
+                                if self.version <= 3:
+                                    result.append(room_num & 0xFF)
+                                else:
+                                    result.extend([(room_num >> 8) & 0xFF, room_num & 0xFF])
 
                     elif form_type == 'OBJECT':
                         # Encode as object number (word)
@@ -2269,6 +2318,26 @@ class ZILCompiler:
                                 obj_name = captures.get(arg_val, '')
                                 obj_num = obj_name_to_num.get(obj_name, 0)
                                 result.extend([(obj_num >> 8) & 0xFF, obj_num & 0xFF])
+
+                    elif form_type == 'VOC':
+                        # Encode as vocabulary word (2-byte dictionary address placeholder)
+                        for arg_type, arg_val in form_args:
+                            if arg_type == 'VAR':
+                                word = captures.get(arg_val, '')
+                                if isinstance(word, str):
+                                    # Use W?* placeholder system (dict: idx -> word)
+                                    word_lower = word.lower()
+                                    # Find next available index
+                                    if vocab_placeholders:
+                                        placeholder_idx = max(vocab_placeholders.keys()) + 1
+                                    else:
+                                        placeholder_idx = 0
+                                    vocab_placeholders[placeholder_idx] = word_lower
+                                    # Placeholder value that will be fixed up
+                                    result.extend([(0xFB00 + placeholder_idx) >> 8,
+                                                   (0xFB00 + placeholder_idx) & 0xFF])
+                                else:
+                                    result.extend([0, 0])
 
                     elif form_type == 'GLOBAL':
                         # Encode as global variable reference
@@ -2287,10 +2356,28 @@ class ZILCompiler:
                         elif const_val[0] == 'FORM':
                             # Constant offset - calculate based on current position
                             defined_constants[const_name] = len(result)
+                            # Also encode the embedded FORM data
+                            form_elem = const_val  # ('FORM', type, args)
+                            encode_element(form_elem, captures)
 
-                elif elem_type == 'MODIFIER':
-                    # "MANY" in output - handled by caller
-                    pass
+            # Encode pre-MANY elements (using first capture set for any variables)
+            first_captures = captures_list[0] if captures_list else {}
+            for elem in pre_many_pattern:
+                if elem[0] != 'MODIFIER':
+                    encode_element(elem, first_captures)
+
+            # Encode MANY repeated elements for each capture set
+            if post_many_pattern:
+                for captures in captures_list:
+                    for elem in post_many_pattern:
+                        if elem[0] != 'MODIFIER':
+                            encode_element(elem, captures)
+            elif not pre_many_pattern:
+                # No MANY in output, just use first capture set
+                for captures in captures_list[:1]:
+                    for elem in output_pattern:
+                        if elem[0] != 'MODIFIER':
+                            encode_element(elem, captures)
 
             return bytes(result), defined_constants
 
@@ -2306,12 +2393,16 @@ class ZILCompiler:
             patterns = propdef_patterns[prop_name]
             for input_pattern, output_pattern in patterns:
                 # Skip the first element of input_pattern if it's the property name
-                if input_pattern and input_pattern[0][0] == 'LITERAL' and input_pattern[0][1] == prop_name:
-                    input_pattern = input_pattern[1:]
+                # For DIRECTIONS PROPDEF, the first element (e.g., "DIR") is a placeholder
+                # for the direction name and should always be skipped
+                if input_pattern and input_pattern[0][0] == 'LITERAL':
+                    first_elem = input_pattern[0][1]
+                    if first_elem == prop_name or prop_name == 'DIRECTIONS':
+                        input_pattern = input_pattern[1:]
 
-                captures = match_propdef_pattern(prop_values, input_pattern)
-                if captures is not None:
-                    encoded, constants = encode_propdef_output(captures, output_pattern, obj_name_to_num)
+                captures_list, is_many = match_propdef_pattern(prop_values, input_pattern)
+                if captures_list is not None:
+                    encoded, constants = encode_propdef_output(captures_list, output_pattern, obj_name_to_num, is_many)
                     return encoded, constants
 
             return None, None
@@ -2377,11 +2468,25 @@ class ZILCompiler:
                     prop_num = prop_map[key]
                     # Check if this is a direction property (e.g., NORTH, SOUTH, etc.)
                     if key in program.directions:
-                        # Direction property: extract destination from (DIR TO DEST) or (DIR PER ROUTINE)
-                        exit_value = self._extract_direction_exit(value, obj_name_to_num)
-                        if exit_value is not None:
-                            # Wrap in ByteValue so it's stored as single byte (for GETB access)
-                            props[prop_num] = ByteValue(exit_value)
+                        # Check if there's a PROPDEF DIRECTIONS pattern to use
+                        if 'DIRECTIONS' in propdef_patterns and isinstance(value, list):
+                            # Apply DIRECTIONS PROPDEF pattern to this direction property
+                            encoded, constants = apply_propdef('DIRECTIONS', value, obj_name_to_num)
+                            if encoded is not None:
+                                props[prop_num] = encoded
+                                for const_name, const_val in constants.items():
+                                    codegen.constants[const_name] = const_val
+                            else:
+                                # Pattern didn't match, use default handling
+                                exit_value = self._extract_direction_exit(value, obj_name_to_num)
+                                if exit_value is not None:
+                                    props[prop_num] = ByteValue(exit_value)
+                        else:
+                            # Default: extract destination from (DIR TO DEST) or (DIR PER ROUTINE)
+                            exit_value = self._extract_direction_exit(value, obj_name_to_num)
+                            if exit_value is not None:
+                                # Wrap in ByteValue so it's stored as single byte (for GETB access)
+                                props[prop_num] = ByteValue(exit_value)
                     # Check if this property has a PROPDEF pattern
                     elif isinstance(value, list) and key in propdef_patterns:
                         # Try to apply PROPDEF pattern matching
@@ -2532,6 +2637,28 @@ class ZILCompiler:
             codegen.objects[obj_name] = obj_num
 
         self.log(f"  Registered {len(flag_bit_map)} flags, {len(obj_name_to_num)} objects")
+
+        # Now build vocab_fixups after object table (PROPDEF may have added vocab placeholders)
+        vocab_fixups = []  # List of (placeholder_idx, word_offset)
+        missing_vocab_words = []
+        for placeholder_idx, word in vocab_placeholders.items():
+            if word in dict_word_offsets:
+                vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
+            else:
+                # Word not in dictionary - try to add it
+                dictionary.add_word(word, 'buzz')  # PROPDEF VOC uses BUZZ type
+                # Re-get offsets to include the new word
+                dict_word_offsets = dictionary.get_word_offsets()
+                if word in dict_word_offsets:
+                    vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
+                else:
+                    missing_vocab_words.append(word)
+                    vocab_fixups.append((placeholder_idx, 0))  # Default to 0
+
+        if vocab_placeholders:
+            self.log(f"  {len(vocab_placeholders)} vocabulary word references (W?*)")
+        if missing_vocab_words:
+            self.log(f"  WARNING: {len(missing_vocab_words)} missing vocab words: {missing_vocab_words[:5]}...")
 
         # Dictionary was already built earlier for SYNONYM property resolution
         # Just build the final dictionary data

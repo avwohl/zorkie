@@ -69,6 +69,9 @@ class ImprovedCodeGenerator:
             # Add parser constants (PS?OBJECT, PS?VERB, etc.)
             for const_name, const_val in symbol_tables.get('parser_constants', {}).items():
                 self.constants[const_name] = const_val
+            # Add PROPDEF constants (HEIGHTSIZE, H-FEET, etc.)
+            for const_name, const_val in symbol_tables.get('propdef_constants', {}).items():
+                self.constants[const_name] = const_val
             # Add pre-assigned object numbers for code generation
             # This allows ,FOO object references to be resolved during codegen
             for obj_name, obj_num in symbol_tables.get('objects', {}).items():

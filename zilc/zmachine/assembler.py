@@ -342,22 +342,31 @@ class ZAssembler:
         return bytes(result)
 
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
-                                     prop_defaults_size: int) -> bytes:
+                                     prop_defaults_size: int,
+                                     vocab_fixups: list = None) -> bytes:
         """
         Resolve dictionary word placeholders in object property tables.
 
-        Scans property DATA (not names) for values marked with 0x8000 (SYNONYM)
-        or 0xFE00 (ADJECTIVE) high bits and replaces them with dictionary addresses.
+        Scans property DATA (not names) for values marked with 0x8000 (SYNONYM),
+        0xFE00 (ADJECTIVE), or 0xFB00 (VOC from PROPDEF) high bits and replaces
+        them with dictionary addresses.
 
         Args:
             objects_data: Object table data with property tables
             dict_addr: Base address of dictionary in story file
             prop_defaults_size: Size of property defaults table in bytes
+            vocab_fixups: List of (placeholder_idx, word_offset) for VOC placeholders
 
         Returns:
             Modified object data with dictionary addresses resolved
         """
         result = bytearray(objects_data)
+
+        # Build lookup for vocab fixups: idx -> word_offset
+        vocab_lookup = {}
+        if vocab_fixups:
+            for idx, word_offset in vocab_fixups:
+                vocab_lookup[idx] = word_offset
 
         # Property tables start after property defaults and object entries
         if self.version <= 3:
@@ -427,6 +436,15 @@ class ZAssembler:
                         actual_addr = dict_addr + word_offset
                         result[j] = (actual_addr >> 8) & 0xFF
                         result[j + 1] = actual_addr & 0xFF
+                        j += 2
+                    # Check for VOC placeholder from PROPDEF: 0xFB00 | placeholder_idx
+                    elif (word & 0xFF00) == 0xFB00:
+                        placeholder_idx = word & 0x00FF
+                        if placeholder_idx in vocab_lookup:
+                            word_offset = vocab_lookup[placeholder_idx]
+                            actual_addr = dict_addr + word_offset
+                            result[j] = (actual_addr >> 8) & 0xFF
+                            result[j + 1] = actual_addr & 0xFF
                         j += 2
                     else:
                         j += 2  # Move by words in property data
@@ -587,10 +605,10 @@ class ZAssembler:
 
             # Resolve dictionary word placeholders in property tables BEFORE
             # fixing up property table addresses (since the resolver uses relative offsets)
-            # Placeholders are marked with 0x8000 bit set (SYNONYM) or 0xFE00 (ADJECTIVE)
-            # The low bits contain the word offset within dictionary data
+            # Placeholders are marked with 0x8000 bit set (SYNONYM), 0xFE00 (ADJECTIVE),
+            # or 0xFB00 (VOC from PROPDEF) - the low bits contain word offset or index
             objects_fixed = bytearray(self._resolve_dict_placeholders(
-                bytes(objects_fixed), dict_addr_calc, prop_defaults_size
+                bytes(objects_fixed), dict_addr_calc, prop_defaults_size, vocab_fixups
             ))
 
             # Calculate number of objects

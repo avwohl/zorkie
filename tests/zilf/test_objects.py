@@ -246,7 +246,6 @@ class TestPropdef:
             "<=? <GETB <GETPT ,GIANT2 ,P?HEIGHT> 2> 11>"
         )
 
-    @pytest.mark.xfail(reason="PROPDEF pattern matching not implemented")
     def test_propdef_many(self):
         """Test PROPDEF with MANY modifier."""
         AssertGlobals(
@@ -261,7 +260,6 @@ class TestPropdef:
             "<=? <GET <GETPT ,NUMBERS ,P?TRANSLATE> 3> 2>"
         )
 
-    @pytest.mark.xfail(reason="PROPDEF pattern matching not implemented")
     def test_propdef_constants(self):
         """Test PROPDEF with constant definitions."""
         AssertGlobals(
@@ -280,7 +278,6 @@ class TestPropdef:
             " (HEIGHT FEET:FIX FT INCHES:FIX = <> (H-FEET <WORD .FEET>) (H-INCHES <BYTE .INCHES>))>"
         ).compiles()
 
-    @pytest.mark.xfail(reason="PROPDEF for DIRECTIONS not implemented")
     def test_propdef_for_directions_used_for_all_directions(self):
         """Test that PROPDEF for DIRECTIONS applies to all directions."""
         AssertGlobals(
