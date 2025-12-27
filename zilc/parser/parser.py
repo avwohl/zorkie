@@ -109,6 +109,9 @@ class Parser:
         elif isinstance(node, DirectionsNode):
             # Add all direction names to program's directions list
             program.directions.extend(node.names)
+        elif isinstance(node, BitSynonymNode):
+            # Add bit synonym to program's bit_synonyms list
+            program.bit_synonyms.append(node)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -426,6 +429,12 @@ class Parser:
             elif op_name == "SYNONYM":
                 # Standalone SYNONYM declaration (not in an object)
                 node = self.parse_synonym_declaration(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "BIT-SYNONYM":
+                # BIT-SYNONYM flag alias declaration
+                node = self.parse_bit_synonym(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 
@@ -1359,6 +1368,28 @@ class Parser:
                 self.error(f"Expected word in SYNONYM declaration, got {self.current_token.type}")
 
         return SynonymNode(words, line, col)
+
+    def parse_bit_synonym(self, line: int, col: int):
+        """Parse BIT-SYNONYM flag alias declaration.
+
+        Syntax: <BIT-SYNONYM original-flag alias-flag>
+
+        Example: <BIT-SYNONYM TOUCHBIT TOUCHEDBIT>
+        This makes TOUCHEDBIT an alias for TOUCHBIT.
+        """
+        from .ast_nodes import BitSynonymNode
+
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected original flag name in BIT-SYNONYM")
+        original = self.current_token.value
+        self.advance()
+
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected alias flag name in BIT-SYNONYM")
+        alias = self.current_token.value
+        self.advance()
+
+        return BitSynonymNode(original, alias, line, col)
 
     def parse_table(self, table_type: str, line: int, col: int) -> TableNode:
         """Parse TABLE/ITABLE/LTABLE definition."""

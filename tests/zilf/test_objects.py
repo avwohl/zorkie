@@ -159,7 +159,6 @@ class TestAttributeNumbering:
             "<NOT <0? ,F32BIT>>"
         )
 
-    @pytest.mark.xfail(reason="BIT-SYNONYM not implemented")
     def test_bit_synonym_should_work_in_flags(self):
         """Test that bit synonyms work in FLAGS."""
         AssertRoutine(
@@ -170,7 +169,6 @@ class TestAttributeNumbering:
             .with_global("<OBJECT BAR (FLAGS ALIASBIT)>") \
             .gives_number("1")
 
-    @pytest.mark.xfail(reason="BIT-SYNONYM not implemented")
     def test_bit_synonym_should_not_be_clobbered_by_find(self):
         """Test that bit synonyms aren't clobbered by FIND."""
         AssertRoutine("", "<==? ,MAINBIT ,ALIASBIT>") \

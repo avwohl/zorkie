@@ -1412,6 +1412,12 @@ class ZILCompiler:
         next_flag_bit = 0
         max_attributes = 32 if self.version <= 3 else 48
 
+        # Build BIT-SYNONYM alias map: alias -> original
+        bit_synonym_map = {}
+        for bs in program.bit_synonyms:
+            bit_synonym_map[bs.alias] = bs.original
+            self.log(f"  BIT-SYNONYM: {bs.alias} -> {bs.original}")
+
         # Collect all flags from objects and rooms
         all_flags = set()
         for obj in program.objects + program.rooms:
@@ -1432,8 +1438,14 @@ class ZILCompiler:
 
         # Assign bit numbers to flags
         for flag in sorted(all_flags):
+            # Resolve alias to original if this is a BIT-SYNONYM alias
+            resolved_flag = bit_synonym_map.get(flag, flag)
+
             if flag in defined_constants:
                 flags[flag] = defined_constants[flag]
+            elif resolved_flag in flags:
+                # Alias of already-assigned flag - use same bit number
+                flags[flag] = flags[resolved_flag]
             else:
                 if next_flag_bit >= max_attributes:
                     raise ValueError(
@@ -1441,7 +1453,17 @@ class ZILCompiler:
                         f"(max {max_attributes} in V{self.version}, got {len(all_flags)})"
                     )
                 flags[flag] = next_flag_bit
+                # Also assign to original if this is an alias
+                if resolved_flag != flag:
+                    flags[resolved_flag] = next_flag_bit
                 next_flag_bit += 1
+
+        # Ensure all BIT-SYNONYM pairs are in flags map with same bit number
+        for alias, original in bit_synonym_map.items():
+            if original in flags and alias not in flags:
+                flags[alias] = flags[original]
+            elif alias in flags and original not in flags:
+                flags[original] = flags[alias]
 
         # Standard property assignments (must match _build_object_table prop_map)
         # Only DESC and LDESC are pre-defined; others are assigned dynamically
@@ -1961,6 +1983,11 @@ class ZILCompiler:
         next_flag_bit = 0
         max_attributes = 32 if self.version <= 3 else 48
 
+        # Build BIT-SYNONYM alias map: alias -> original
+        bit_synonym_map = {}
+        for bs in program.bit_synonyms:
+            bit_synonym_map[bs.alias] = bs.original
+
         # Helper to convert FLAGS to attribute bitmask
         def flags_to_attributes(flags):
             """Convert FLAGS list to attribute bitmask."""
@@ -1988,18 +2015,33 @@ class ZILCompiler:
                 return 0
 
             for flag in flags:
+                # Resolve alias to original if this is a BIT-SYNONYM alias
+                resolved_flag = bit_synonym_map.get(flag, flag)
+
                 # Try to get flag number from constants first
                 if flag in codegen.constants:
                     bit_num = codegen.constants[flag]
+                    attr_mask |= (1 << (31 - bit_num)) if self.version <= 3 else (1 << (47 - bit_num))
+                elif resolved_flag in codegen.constants:
+                    # Original flag is in constants - use its bit number
+                    bit_num = codegen.constants[resolved_flag]
                     attr_mask |= (1 << (31 - bit_num)) if self.version <= 3 else (1 << (47 - bit_num))
                 elif flag in flag_bit_map:
                     # Already auto-assigned
                     bit_num = flag_bit_map[flag]
                     attr_mask |= (1 << (31 - bit_num)) if self.version <= 3 else (1 << (47 - bit_num))
+                elif resolved_flag in flag_bit_map:
+                    # Original flag already assigned - use same bit
+                    bit_num = flag_bit_map[resolved_flag]
+                    flag_bit_map[flag] = bit_num
+                    attr_mask |= (1 << (31 - bit_num)) if self.version <= 3 else (1 << (47 - bit_num))
                 else:
                     # Auto-assign new bit number
                     if next_flag_bit < max_attributes:
                         flag_bit_map[flag] = next_flag_bit
+                        # Also map original if this is an alias
+                        if resolved_flag != flag:
+                            flag_bit_map[resolved_flag] = next_flag_bit
                         self.log(f"  Auto-assigned FLAG {flag} -> bit {next_flag_bit}")
                         attr_mask |= (1 << (31 - next_flag_bit)) if self.version <= 3 else (1 << (47 - next_flag_bit))
                         next_flag_bit += 1

@@ -30,6 +30,7 @@ class NodeType(Enum):
     PROPDEF = auto()       # <PROPDEF name default>
     BUZZ = auto()          # <BUZZ word1 word2 ...>
     SYNONYM = auto()       # <SYNONYM word1 word2 ...> (standalone)
+    BIT_SYNONYM = auto()   # <BIT-SYNONYM flag1 flag2> (flag alias)
 
     # Table/Array
     TABLE = auto()         # <TABLE ...>
@@ -333,6 +334,21 @@ class SynonymNode(ASTNode):
         return f"Synonym({len(self.words)} words)"
 
 
+class BitSynonymNode(ASTNode):
+    """BIT-SYNONYM flag alias declaration.
+
+    Makes one flag an alias for another, so both names refer to the same bit.
+    Syntax: <BIT-SYNONYM original-flag alias-flag>
+    """
+    def __init__(self, original: str, alias: str, line: int = 0, column: int = 0):
+        super().__init__(NodeType.BIT_SYNONYM, line, column)
+        self.original = original  # The original flag name
+        self.alias = alias  # The alias flag name
+
+    def __repr__(self):
+        return f"BitSynonym({self.original} -> {self.alias})"
+
+
 class QuasiquoteNode(ASTNode):
     """Quasiquote (backtick) expression.
 
@@ -425,6 +441,7 @@ class Program:
     buzz_words: List[str] = field(default_factory=list)
     synonym_words: List[str] = field(default_factory=list)
     directions: List[str] = field(default_factory=list)  # Direction names
+    bit_synonyms: List['BitSynonymNode'] = field(default_factory=list)  # Flag aliases
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "
