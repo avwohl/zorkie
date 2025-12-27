@@ -19,8 +19,13 @@ Focus areas for next session:
 
 ## Zork1 Compilation Status
 - **Zork1 compiles** to a 103KB story file
-- **Runtime status**: Hangs on startup (no output)
-- **Root cause**: Unknown - parser/initialization issue (not PREPOSITIONS, that's now implemented)
+- **Runtime status**: Crashes/hangs due to unresolved routine placeholders
+- **Root cause**: Object properties with routine values (e.g., `(ACTION BOARD-F)`) create
+  routine placeholders (0xFD00+) that are stored in property data but never resolved.
+  The assembler only resolves placeholders in code and table data, not in object properties.
+- **Required fix**: Add property routine fixup mechanism to track and resolve routine
+  placeholders in object property data during assembly
+- **Affected features**: ACTION property on ~124 objects references routines
 - **Remaining warnings**: ON-LAKE, IN-LAKE only (missing room definitions in source)
 - **Previous issues (FIXED)**: Illegal opcode, backward branch offsets, ACT? constants, PREPOSITIONS
 
