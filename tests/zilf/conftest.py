@@ -301,13 +301,11 @@ class ZMachine:
             # User override - assume dfrotz-compatible flags
             return (override, ["-q", "-m", "-p"], "custom")
 
-        # V7-V8: Use fizmo-console (dfrotz has issues with these versions)
-        if self.version >= 7:
-            fizmo_path = "/usr/games/fizmo-console"
-            if os.path.exists(fizmo_path):
-                # fizmo-console flags use long form
-                return (fizmo_path, ["--disable-hyphenation"], "fizmo")
-            # Fallback to dfrotz if fizmo not available
+        # Try bocfel first for V5+ (better spec compliance, supports V8)
+        # Note: bocfel has a bug with V7 (treats it as V5 incorrectly)
+        bocfel_path = "/tmp/bocfel-2.4/bocfel"
+        if os.path.exists(bocfel_path) and self.version >= 5 and self.version != 7:
+            return (bocfel_path, [], "bocfel")
 
         # V1-V6: Use dfrotz
         dfrotz_paths = [
@@ -369,6 +367,23 @@ class ZMachine:
                     if not line.startswith("[STEP")
                 ]
                 output = "\n".join(output_lines)
+
+                # Strip ANSI escape codes (bocfel outputs these)
+                import re
+                output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+
+                # Filter out bocfel warning messages (e.g., V6 support warning)
+                output_lines = [
+                    line for line in output.split("\n")
+                    if not line.startswith("[Version") and not line.startswith("[Fatal")
+                ]
+                output = "\n".join(output_lines)
+
+                # Strip leading/trailing whitespace (bocfel adds extra newlines)
+                output = output.strip()
+                # Re-add trailing newline if there was content
+                if output:
+                    output = output + "\n"
 
                 # Also check stderr for errors
                 if result.returncode != 0 and result.stderr:

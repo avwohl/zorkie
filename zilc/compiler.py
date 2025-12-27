@@ -1549,11 +1549,32 @@ class ZILCompiler:
 
         # Collect custom properties from object/room definitions
         # Properties like (MYPROP 123) need P?MYPROP constants
-        # This must match the order and numbering in _build_object_table
+        # This must match the order and numbering in compile_string's object building
         # FLAGS, IN, LOC are structural - not actual properties
         # SYNONYM and ADJECTIVE ARE properties if P?SYNONYM/P?ADJECTIVE exist
         reserved_props = {'FLAGS', 'IN', 'LOC'}
-        for obj in program.objects + program.rooms:
+
+        # Build object list in same order as compile_string's object building:
+        # 1. Combine objects and rooms
+        # 2. Sort by source line number
+        # 3. Reverse for object numbering (last defined = lowest number)
+        # 4. Then sort by object number for property extraction
+        all_items = [(obj.name, obj, False, getattr(obj, 'line', 0)) for obj in program.objects]
+        all_items.extend([(room.name, room, True, getattr(room, 'line', 0)) for room in program.rooms])
+        all_items.sort(key=lambda x: x[3])
+
+        # Assign object numbers (reverse order: last defined = lowest number)
+        total_objects = len(all_items)
+        obj_name_to_num = {}
+        for i, (name, node, is_room, _) in enumerate(all_items):
+            obj_num = total_objects - i
+            obj_name_to_num[name] = obj_num
+
+        # Sort by object number (same order as extract_properties is called)
+        all_items_sorted = sorted(all_items, key=lambda x: obj_name_to_num[x[0]])
+
+        # Now iterate in the same order as object building
+        for name, obj, is_room, _ in all_items_sorted:
             for key in obj.properties.keys():
                 if key not in reserved_props:
                     prop_name = f'P?{key}'
@@ -1827,7 +1848,7 @@ class ZILCompiler:
         preserve_spaces = self.compile_globals.get('PRESERVE-SPACES?', False)
         text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table,
                                     crlf_character=crlf_char, preserve_spaces=preserve_spaces)
-        string_table = StringTable(text_encoder)
+        string_table = StringTable(text_encoder, version=self.version)
         if self.enable_string_dedup:
             self.log("String table deduplication enabled")
 
@@ -2407,6 +2428,31 @@ class ZILCompiler:
 
             return None, None
 
+        # Helper to resolve an atom value (flag, object, or constant name) to its numeric value
+        def resolve_atom_value(atom_name):
+            """Resolve an atom name to its numeric value.
+
+            Checks in order:
+            1. Flag bit assignments (NONLANDBIT, TOUCHBIT, etc.)
+            2. Object/room names
+            3. Constants
+
+            Returns the numeric value or None if not found.
+            """
+            # Check if it's a flag name
+            if atom_name in flag_bit_map:
+                return flag_bit_map[atom_name]
+            # Check if it's an object/room name
+            if atom_name in obj_name_to_num:
+                return obj_name_to_num[atom_name]
+            # Check if it's a constant (from constants dict or codegen)
+            if atom_name in codegen.constants:
+                val = codegen.constants[atom_name]
+                if isinstance(val, int):
+                    return val
+            # Not found
+            return None
+
         # Helper to extract property number and value
         def extract_properties(obj_node, obj_idx):
             """Extract properties from object node."""
@@ -2501,7 +2547,10 @@ class ZILCompiler:
                             props[prop_num] = value
                     # Extract value from AST node
                     elif hasattr(value, 'value'):
-                        props[prop_num] = value.value
+                        # Try to resolve atom values (flags, objects, constants)
+                        str_val = value.value
+                        resolved = resolve_atom_value(str_val) if isinstance(str_val, str) else None
+                        props[prop_num] = resolved if resolved is not None else str_val
                     else:
                         props[prop_num] = value
                 elif key not in ['FLAGS', 'IN', 'LOC']:
@@ -2512,7 +2561,10 @@ class ZILCompiler:
                         next_prop_num += 1
                     prop_num = prop_map[key]
                     if hasattr(value, 'value'):
-                        props[prop_num] = value.value
+                        # Try to resolve atom values (flags, objects, constants)
+                        str_val = value.value
+                        resolved = resolve_atom_value(str_val) if isinstance(str_val, str) else None
+                        props[prop_num] = resolved if resolved is not None else str_val
                     else:
                         props[prop_num] = value
 

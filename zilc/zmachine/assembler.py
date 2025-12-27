@@ -251,8 +251,9 @@ class ZAssembler:
             elif self.version <= 5:
                 packed_addr = actual_addr // 4
             elif self.version <= 7:
-                # V6-7 use routines_offset, so packed = routine_offset / 4
-                packed_addr = routine_offset // 4
+                # V6-7 use routines_offset, with 4-byte padding before first routine
+                # packed = (4 + routine_offset) / 4
+                packed_addr = (4 + routine_offset) // 4
             else:
                 packed_addr = actual_addr // 8
 
@@ -534,8 +535,7 @@ class ZAssembler:
         calc_addr = (calc_addr + 1) // 2 * 2  # pad
         calc_addr += len(objects) if objects else 0  # objects
         calc_addr = (calc_addr + 1) // 2 * 2  # pad
-        calc_addr += len(dictionary) if dictionary else 0  # dictionary
-        calc_addr = (calc_addr + 1) // 2 * 2  # pad
+        # Dictionary is in static memory, not here
 
         # NOW we know where tables will be placed
         table_base_addr = calc_addr
@@ -602,11 +602,21 @@ class ZAssembler:
             obj_entry_size = 9 if self.version <= 3 else 14
 
             # Calculate dictionary address ahead of time to resolve property placeholders
-            # Dictionary comes right after objects (with padding)
+            # Dictionary is in static memory: after objects, tables, and extension table
             objects_end = current_addr + len(objects_fixed)
             if objects_end % 2 != 0:
                 objects_end += 1  # Account for padding
+            # Add table_data size
             dict_addr_calc = objects_end
+            if table_data:
+                dict_addr_calc += len(table_data)
+                if dict_addr_calc % 2 != 0:
+                    dict_addr_calc += 1
+            # Add extension_table size (V5+)
+            if extension_table and self.version >= 5:
+                dict_addr_calc += len(extension_table)
+                if dict_addr_calc % 2 != 0:
+                    dict_addr_calc += 1
 
             # Resolve dictionary word placeholders in property tables BEFORE
             # fixing up property table addresses (since the resolver uses relative offsets)
@@ -650,17 +660,6 @@ class ZAssembler:
             story.append(0)
             current_addr += 1
 
-        # Add dictionary
-        dict_addr = current_addr
-        if dictionary:
-            story.extend(dictionary)
-            current_addr += len(dictionary)
-
-        # Align to even boundary
-        while len(story) % 2 != 0:
-            story.append(0)
-            current_addr += 1
-
         # Add table data in dynamic memory (before static memory)
         # Tables need to be writable, so they go in dynamic memory
         table_base_addr = current_addr
@@ -676,10 +675,16 @@ class ZAssembler:
 
         # Add extension table (V5+) in dynamic memory
         extension_table_addr = 0
-        if extension_table and self.version >= 5:
+        if self.version >= 5:
             extension_table_addr = current_addr
-            story.extend(extension_table)
-            current_addr += len(extension_table)
+            if extension_table:
+                story.extend(extension_table)
+                current_addr += len(extension_table)
+            else:
+                # Minimal extension table: 2 bytes with 0 entries
+                # (needed for bocfel which reads entry count even when addr=0)
+                story.extend([0, 0])
+                current_addr += 2
 
             # Align to even boundary
             while len(story) % 2 != 0:
@@ -688,6 +693,17 @@ class ZAssembler:
 
         # Static memory starts after tables and extension table (in dynamic memory)
         self.static_mem_base = current_addr
+
+        # Add dictionary in static memory (read-only)
+        dict_addr = current_addr
+        if dictionary:
+            story.extend(dictionary)
+            current_addr += len(dictionary)
+
+        # Align to even boundary
+        while len(story) % 2 != 0:
+            story.append(0)
+            current_addr += 1
 
         # Mark start of high memory (where code begins)
         self.high_mem_base = len(story)
@@ -707,6 +723,14 @@ class ZAssembler:
             story.append(0)
             self.high_mem_base = len(story)
 
+        # For V6-7, add padding so first routine is at packed address 1, not 0
+        # (some interpreters like bocfel reject packed address 0 as invalid)
+        # The padding goes AFTER high_mem_base, so routines_offset calculation stays correct
+        if self.version in (6, 7):
+            for _ in range(4):  # 4 bytes = packed address offset of 1
+                story.append(0)
+            # Don't update high_mem_base - routines_offset needs the original value
+
         # Resolve table routine fixups (for ACTIONS table packed addresses)
         # Now that we know high_mem_base, patch table data with routine addresses
         if table_routine_fixups and table_data:
@@ -717,8 +741,11 @@ class ZAssembler:
                 # Convert to packed address based on version
                 if self.version <= 3:
                     packed_addr = actual_addr // 2
-                elif self.version <= 7:
+                elif self.version <= 5:
                     packed_addr = actual_addr // 4
+                elif self.version <= 7:
+                    # V6-7 use routines_offset, with 4-byte padding before first routine
+                    packed_addr = (4 + routine_offset) // 4
                 else:
                     packed_addr = actual_addr // 8
 
@@ -748,7 +775,9 @@ class ZAssembler:
                     i += 1
 
             # Now calculate where string table will be located
-            string_table_base = self.high_mem_base + final_routines_len
+            # For V6-7, add 4 bytes for padding before routines
+            padding = 4 if self.version in (6, 7) else 0
+            string_table_base = self.high_mem_base + padding + final_routines_len
 
             # Align based on version (packed address requirements)
             # V1-3: 2-byte alignment
@@ -842,7 +871,7 @@ class ZAssembler:
             # With routines_offset = high_mem_base / 8:
             # packed = (high_mem_base - high_mem_base) / 4 = 0
             # So the first routine is always at packed address 0 relative to routines_offset
-            initial_pc = 0  # Packed address of first routine
+            initial_pc = 1  # Packed address of first routine (after 4-byte padding)
 
         # Update header with correct addresses
         struct.pack_into('>H', story, 0x04, self.high_mem_base)  # High memory base

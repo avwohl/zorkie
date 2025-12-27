@@ -236,8 +236,8 @@ class TestReleaseid:
 
     @pytest.mark.parametrize("zversion", [
         3, 4, 5, 6,
-        pytest.param(7, marks=pytest.mark.xfail(reason="V7 interpreter support limited")),
-        pytest.param(8, marks=pytest.mark.xfail(reason="V8 interpreter support limited")),
+        pytest.param(7, marks=pytest.mark.xfail(reason="V7 has interpreter bugs (bocfel/dfrotz)")),
+        8,
     ])
     def test_releaseid_is_optional(self, zversion):
         """Test RELEASEID is optional for all versions."""

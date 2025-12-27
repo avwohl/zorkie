@@ -35,8 +35,8 @@ class TestHelloWorld:
         ("EZIP", "V4"),
         ("XZIP", "V5"),
         ("YZIP", "V6"),
-        pytest.param("7", "V7", marks=pytest.mark.xfail(reason="V7 interpreter support limited")),
-        pytest.param("8", "V8", marks=pytest.mark.xfail(reason="V8 interpreter support limited")),
+        pytest.param("7", "V7", marks=pytest.mark.xfail(reason="V7 has interpreter bugs (bocfel/dfrotz)")),
+        ("8", "V8"),
     ])
     def test_hello_world(self, zversion, version_name):
         """Test Hello World compiles and runs for each Z-machine version."""

@@ -13,19 +13,32 @@ from .text_encoding import ZTextEncoder
 class StringTable:
     """Manages deduplicated string storage for Z-machine."""
 
-    def __init__(self, text_encoder: ZTextEncoder):
+    def __init__(self, text_encoder: ZTextEncoder, version: int = 3):
         """
         Initialize string table.
 
         Args:
             text_encoder: ZTextEncoder instance for encoding strings
+            version: Z-machine version (affects alignment requirements)
         """
         self.text_encoder = text_encoder
+        self.version = version
         self.strings: Dict[str, bytes] = {}  # text -> encoded bytes
         self.addresses: Dict[str, int] = {}  # text -> address in story file
         self.encoded_data = bytearray()  # All encoded strings concatenated
         self.base_address = 0  # Base address where strings start in story file
         self.strings_offset = 0  # V6-7: offset value (actual offset = strings_offset * 8)
+
+        # Alignment requirement based on version
+        # V1-3: 2-byte (packed = addr / 2)
+        # V4-7: 4-byte (packed = addr / 4)
+        # V8:   8-byte (packed = addr / 8)
+        if version >= 8:
+            self.alignment = 8
+        elif version >= 4:
+            self.alignment = 4
+        else:
+            self.alignment = 2
 
     def add_string(self, text: str) -> int:
         """
@@ -43,6 +56,10 @@ class StringTable:
 
         # Encode the string
         encoded = self.text_encoder.encode_text_zchars(text, use_abbreviations=True)
+
+        # Pad to alignment boundary before adding (for V8 8-byte, V4-7 4-byte, V1-3 2-byte)
+        while len(self.encoded_data) % self.alignment != 0:
+            self.encoded_data.append(0)
 
         # Store in table
         offset = len(self.encoded_data)
