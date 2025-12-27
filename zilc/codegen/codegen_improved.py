@@ -3772,34 +3772,31 @@ class ImprovedCodeGenerator:
     def _gen_push_const(self, value: int) -> bytes:
         """Generate code to push a constant value to the stack.
 
-        Uses a simple ADD 0,value -> stack approach for constants.
+        Uses ADD 0, value -> sp to push constants onto the stack.
+        ADD stores its result to a variable, and storing to sp (var 0) is a push.
+        ADD is 2OP:20 (0x14 in long form with small,small operands).
         """
         code = bytearray()
         # Handle signed values
         if value < 0:
             value = (1 << 16) + value
 
-        if value == 0:
-            # ADD 0, 0 -> stack  (long form: both small constants)
-            # Opcode: 0 0 0 10100 = 0x14
+        if 0 <= value <= 255:
+            # ADD 0, value -> sp (long form: both small constants)
+            # 2OP:20 with small,small = 0x14
             code.append(0x14)  # Long 2OP, both small const, ADD
             code.append(0x00)  # First operand: 0
-            code.append(0x00)  # Second operand: 0
-            code.append(0x00)  # Store to stack
-        elif 0 <= value <= 255:
-            # ADD 0, value -> stack (long form)
-            code.append(0x14)  # Long 2OP, both small const, ADD
-            code.append(0x00)  # First operand: 0
-            code.append(value & 0xFF)  # Second operand
-            code.append(0x00)  # Store to stack
+            code.append(value & 0xFF)  # Second operand: value
+            code.append(0x00)  # Store result to sp (variable 0)
         else:
-            # Need VAR form for large constant
-            code.append(0xD4)  # VAR form, ADD (0xC0 | 0x14)
+            # ADD 0, value -> sp (VAR form for large constant)
+            # 2OP:20 VAR form = 0xC0 | 0x14 = 0xD4
+            code.append(0xD4)  # VAR form, ADD
             code.append(0x4F)  # Types: 01 00 11 11 = small const, large const, omit, omit
             code.append(0x00)  # First operand: 0
             code.append((value >> 8) & 0xFF)
             code.append(value & 0xFF)
-            code.append(0x00)  # Store to stack
+            code.append(0x00)  # Store result to sp (variable 0)
 
         return bytes(code)
 
@@ -9603,8 +9600,19 @@ class ImprovedCodeGenerator:
             # Generate code for each statement in sequence
             for i in range(body_start, len(operands)):
                 stmt = operands[i]
+
+                # Track placeholder count before generating statement
+                placeholder_count_before = len(self._current_stmt_routine_offsets)
+
                 stmt_code = self.generate_statement(stmt)
+
+                # Adjust any new placeholder offsets to account for position in block
                 if stmt_code:
+                    stmt_insert_offset = len(code)
+                    for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                        rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                        self._current_stmt_routine_offsets[k] = (stmt_insert_offset + rel_offset, placeholder_val)
+
                     code.extend(stmt_code)
 
             # Exit point is at the end of the block
@@ -9814,8 +9822,19 @@ class ImprovedCodeGenerator:
             # Generate code for each statement in sequence
             for i in range(1, len(operands)):
                 stmt = operands[i]
+
+                # Track placeholder count before generating statement
+                placeholder_count_before = len(self._current_stmt_routine_offsets)
+
                 stmt_code = self.generate_statement(stmt)
+
+                # Adjust any new placeholder offsets to account for position in block
                 if stmt_code:
+                    stmt_insert_offset = len(code)
+                    for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                        rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                        self._current_stmt_routine_offsets[k] = (stmt_insert_offset + rel_offset, placeholder_val)
+
                     code.extend(stmt_code)
 
             # Exit point is at the end of the block
@@ -10439,8 +10458,18 @@ class ImprovedCodeGenerator:
             if end_clause:
                 # Generate END clause statements
                 for stmt in end_clause:
+                    # Track placeholder count before generating statement
+                    placeholder_count_before = len(self._current_stmt_routine_offsets)
+
                     stmt_code = self.generate_statement(stmt)
+
+                    # Adjust any new placeholder offsets to account for position in block
                     if stmt_code:
+                        stmt_insert_offset = len(code)
+                        for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                            rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                            self._current_stmt_routine_offsets[k] = (stmt_insert_offset + rel_offset, placeholder_val)
+
                         code.extend(stmt_code)
 
             # Return point is after END clause (where RETURN jumps to)
@@ -11117,8 +11146,19 @@ class ImprovedCodeGenerator:
             # Generate code for each statement in loop body
             for i in range(1, len(operands)):
                 stmt = operands[i]
+
+                # Track placeholder count before generating statement
+                placeholder_count_before = len(self._current_stmt_routine_offsets)
+
                 stmt_code = self.generate_statement(stmt)
+
+                # Adjust any new placeholder offsets to account for position in loop
                 if stmt_code:
+                    stmt_insert_offset = len(code)
+                    for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                        rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                        self._current_stmt_routine_offsets[k] = (stmt_insert_offset + rel_offset, placeholder_val)
+
                     code.extend(stmt_code)
 
             # At end of loop, add unconditional jump back to start
@@ -12495,8 +12535,37 @@ class ImprovedCodeGenerator:
         self._track_flag_usage(operands[1])
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+
+        # Handle nested form operands - generate their code first
+        # Since FSET uses operands twice (TEST_ATTR + SET_ATTR), we need to save
+        # nested form results to temp variables
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Save stack to temp global (0x10) using ADD sp, 0 -> temp
+            code.append(0xD4)  # VAR form ADD
+            code.append(0x9F)  # Types: var(10), small(01), omit(11), omit(11)
+            code.append(0x00)  # sp
+            code.append(0x00)  # 0
+            code.append(0x10)  # store to global 0x10 (temp)
+            op1_type = 1  # Variable
+            op1_val = 0x10  # Temp global
+        else:
+            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+
+        if isinstance(operands[1], FormNode):
+            inner_code = self.generate_form(operands[1])
+            code.extend(inner_code)
+            # Save stack to temp global (0x11) using ADD sp, 0 -> temp
+            code.append(0xD4)  # VAR form ADD
+            code.append(0x9F)  # Types: var(10), small(01), omit(11), omit(11)
+            code.append(0x00)  # sp
+            code.append(0x00)  # 0
+            code.append(0x11)  # store to global 0x11 (temp)
+            op2_type = 1  # Variable
+            op2_val = 0x11  # Temp global
+        else:
+            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
         # First, test the attribute to get the previous value
         # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
@@ -12504,18 +12573,20 @@ class ImprovedCodeGenerator:
         code.append(opcode)
         code.append(op1_val & 0xFF)
         code.append(op2_val & 0xFF)
-        # Branch on true (was set), offset 9 to skip false case
+        # Branch on true (was set), offset 9 to skip false case (7 bytes: 4 + 3)
+        # Note: ADD with store is 4 bytes, JUMP is 3 bytes
         code.append(0xC9)
 
         # FALSE case: attribute was not set
-        # Push 0, then set the attribute
-        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0 0 -> stack
-        # JUMP to skip true case (offset 6)
+        # Use ADD 0, 0 -> stack to push 0 (stores result which is a push)
+        # ADD is 2OP:20, long form with two small consts = 0x14
+        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0, 0 -> stack (push 0)
+        # JUMP to skip true case (offset 6 because TRUE case is 4 bytes)
         code.extend([0x8C, 0x00, 0x06])
 
         # TRUE case: attribute was set
-        # Push 1
-        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0 1 -> stack
+        # Use ADD 0, 1 -> stack to push 1
+        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0, 1 -> stack (push 1)
 
         # Now set the attribute (SET_ATTR is 2OP opcode 0x0B)
         opcode = 0x0B | (op1_type << 6) | (op2_type << 5)
@@ -12537,8 +12608,37 @@ class ImprovedCodeGenerator:
         self._track_flag_usage(operands[1])
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+
+        # Handle nested form operands - generate their code first
+        # Since FCLEAR uses operands twice (TEST_ATTR + CLEAR_ATTR), we need to save
+        # nested form results to temp variables
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Save stack to temp global (0x10) using ADD sp, 0 -> temp
+            code.append(0xD4)  # VAR form ADD
+            code.append(0x9F)  # Types: var(10), small(01), omit(11), omit(11)
+            code.append(0x00)  # sp
+            code.append(0x00)  # 0
+            code.append(0x10)  # store to global 0x10 (temp)
+            op1_type = 1  # Variable
+            op1_val = 0x10  # Temp global
+        else:
+            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+
+        if isinstance(operands[1], FormNode):
+            inner_code = self.generate_form(operands[1])
+            code.extend(inner_code)
+            # Save stack to temp global (0x11) using ADD sp, 0 -> temp
+            code.append(0xD4)  # VAR form ADD
+            code.append(0x9F)  # Types: var(10), small(01), omit(11), omit(11)
+            code.append(0x00)  # sp
+            code.append(0x00)  # 0
+            code.append(0x11)  # store to global 0x11 (temp)
+            op2_type = 1  # Variable
+            op2_val = 0x11  # Temp global
+        else:
+            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
         # First, test the attribute to get the previous value
         # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
@@ -12546,18 +12646,20 @@ class ImprovedCodeGenerator:
         code.append(opcode)
         code.append(op1_val & 0xFF)
         code.append(op2_val & 0xFF)
-        # Branch on true (was set), offset 9 to skip false case
+        # Branch on true (was set), offset 9 to skip false case (7 bytes: 4 + 3)
+        # Note: ADD with store is 4 bytes, JUMP is 3 bytes
         code.append(0xC9)
 
         # FALSE case: attribute was not set
-        # Push 0, then clear the attribute
-        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0 0 -> stack
-        # JUMP to skip true case (offset 6)
+        # Use ADD 0, 0 -> stack to push 0 (stores result which is a push)
+        # ADD is 2OP:20, long form with two small consts = 0x14
+        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0, 0 -> stack (push 0)
+        # JUMP to skip true case (offset 6 because TRUE case is 4 bytes)
         code.extend([0x8C, 0x00, 0x06])
 
         # TRUE case: attribute was set
-        # Push 1
-        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0 1 -> stack
+        # Use ADD 0, 1 -> stack to push 1
+        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0, 1 -> stack (push 1)
 
         # Now clear the attribute (CLEAR_ATTR is 2OP opcode 0x0C)
         opcode = 0x0C | (op1_type << 6) | (op2_type << 5)
@@ -12580,25 +12682,42 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Handle nested form operands - generate their code first
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            op1_type = 1  # Variable
+            op1_val = 0   # Stack
+        else:
+            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+
+        if isinstance(operands[1], FormNode):
+            inner_code = self.generate_form(operands[1])
+            code.extend(inner_code)
+            op2_type = 1  # Variable
+            op2_val = 0   # Stack
+        else:
+            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
         # TEST_ATTR is 2OP opcode 0x0A (branch)
         opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
         code.append(opcode)
         code.append(op1_val & 0xFF)
         code.append(op2_val & 0xFF)
-        # Branch on true (attribute set), offset 9 to skip false case
+        # Branch on true (attribute set), offset 9 to skip false case (7 bytes: 4 + 3)
+        # Note: ADD with store is 4 bytes, JUMP is 3 bytes
         code.append(0xC9)
 
         # FALSE case: attribute not set, push 0
-        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0 0 -> stack
-        # JUMP to skip true case (offset 6)
+        # Use ADD 0, 0 -> stack to push 0 (stores result which is a push)
+        # ADD is 2OP:20, long form with two small consts = 0x14
+        code.extend([0x14, 0x00, 0x00, 0x00])  # ADD 0, 0 -> stack (push 0)
+        # JUMP to skip true case (offset 6 because TRUE case is 4 bytes)
         code.extend([0x8C, 0x00, 0x06])
 
         # TRUE case: attribute set, push 1
-        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0 1 -> stack
+        # Use ADD 0, 1 -> stack to push 1
+        code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0, 1 -> stack (push 1)
 
         return bytes(code)
 
@@ -12798,6 +12917,10 @@ class ImprovedCodeGenerator:
         """
         code = bytearray()
 
+        # Track accumulated offset for placeholder position adjustment.
+        # This is the offset within the COND bytecode where code will be placed.
+        accumulated_offset = 0
+
         # First pass: generate all clause code WITHOUT branch offsets
         clause_data = []
         for i, (condition, actions) in enumerate(cond.clauses):
@@ -12808,14 +12931,36 @@ class ImprovedCodeGenerator:
             test_code = bytearray()
             test_size = 0
             if not is_t_clause:
+                # Track placeholder count before generating test code
+                test_placeholder_count_before = len(self._current_stmt_routine_offsets)
+
                 test_code = bytearray(self.generate_condition_test(condition, branch_on_false=True))
                 test_size = len(test_code)
+
+                # Adjust any test code placeholders to be relative to COND start
+                for k in range(test_placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                    rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (accumulated_offset + rel_offset, placeholder_val)
+
+            # Actions will start after test_code
+            actions_start_offset = accumulated_offset + test_size
 
             # Generate actions for this clause
             actions_code = bytearray()
             for j, action in enumerate(actions):
                 is_last_action = (j == len(actions) - 1)
+
+                # Track placeholder count before generating action
+                placeholder_count_before = len(self._current_stmt_routine_offsets)
+
                 action_code = self.generate_statement(action)
+
+                # Adjust any new placeholder offsets to be relative to COND start
+                # The action's code will be placed at actions_start_offset + len(actions_code)
+                action_insert_offset = actions_start_offset + len(actions_code)
+                for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                    rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (action_insert_offset + rel_offset, placeholder_val)
 
                 if is_last_action and len(action_code) == 0:
                     # Last action is a value that doesn't generate code (number, atom)
@@ -12892,6 +13037,12 @@ class ImprovedCodeGenerator:
                 'test_size': test_size,
                 'actions_code': actions_code,
             })
+
+            # Update accumulated_offset for next clause.
+            # Jump size is 3 bytes for non-T clauses (will be refined later, but
+            # this is sufficient for placeholder adjustment purposes).
+            jump_size_estimate = 0 if is_t_clause else 3
+            accumulated_offset += test_size + len(actions_code) + jump_size_estimate
 
         # Check if we need a default FALSE at the end (no T/ELSE clause)
         has_t_clause = clause_data and clause_data[-1]['is_t_clause']
@@ -13051,17 +13202,20 @@ class ImprovedCodeGenerator:
             # Handle FSET? (TEST_ATTR)
             if op_name == 'FSET?':
                 if len(condition.operands) >= 2:
-                    obj = self.get_object_number(condition.operands[0])
-                    attr = self.get_operand_value(condition.operands[1])
+                    obj_node = condition.operands[0]
+                    attr_node = condition.operands[1]
 
-                    if obj is not None and isinstance(attr, int):
-                        # TEST_ATTR is 2OP opcode 0x0A
-                        # Long form: bit 7=0, bit 6=op1 type, bit 5=op2 type, bits 4-0=opcode
-                        # Both operands are small constants (type 0), so opcode = 0x0A
-                        code.append(0x0A)  # TEST_ATTR with small constant operands
-                        code.append(obj & 0xFF)
-                        code.append(attr & 0xFF)
-                        # Branch byte will be added below
+                    # Get operand types and values using the standard method
+                    # This handles all cases: objects, globals, locals, constants
+                    op1_type, op1_val = self._get_operand_type_and_value(obj_node)
+                    op2_type, op2_val = self._get_operand_type_and_value(attr_node)
+
+                    # TEST_ATTR is 2OP opcode 0x0A
+                    opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
+                    code.append(opcode)
+                    code.append(op1_val & 0xFF)
+                    code.append(op2_val & 0xFF)
+                    # Branch byte will be added below
 
             # Handle EQUAL? (JE) - variadic: tests if first equals ANY of the rest
             elif op_name in ('=', 'EQUAL?', '==?', '=?'):
@@ -13517,7 +13671,18 @@ class ImprovedCodeGenerator:
 
         # Generate body statements
         for stmt in repeat.body:
-            code.extend(self.generate_statement(stmt))
+            # Track placeholder count before generating statement
+            placeholder_count_before = len(self._current_stmt_routine_offsets)
+
+            stmt_code = self.generate_statement(stmt)
+
+            # Adjust any new placeholder offsets to account for position in REPEAT
+            stmt_insert_offset = len(code)
+            for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (stmt_insert_offset + rel_offset, placeholder_val)
+
+            code.extend(stmt_code)
 
         # Generate jump back to loop start
         # JUMP instruction: opcode + 2 offset bytes
