@@ -6,15 +6,15 @@ All ZILF integration tests are now either passing, skipped, or marked xfail for
 unimplemented ZILF-specific features.
 
 Focus areas for next session:
-1. **PROPDEF (remaining)** - MANY modifier, constant exports, DIRECTIONS propdef (4 tests)
-2. **Object ordering (complex)** - Investigate ZILF algorithm for mixed object/room ordering
-3. **BIT-SYNONYM** - Attribute aliases (2 tests)
-4. **NEW-PARSER?** - Extended vocabulary format (8 tests)
+1. **Object ordering (complex)** - Investigate ZILF algorithm for mixed object/room ordering
+2. **NEW-PARSER?** - Extended vocabulary format (8 tests)
+3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-27)
-- **Tests:** 408 passed, 0 failed, 144 skipped, 75 xfailed, 1 xpassed
-- **Hello world works** in V3, V4, V5, V6
-- **Zork1 compiles** to 98KB and shows initial game text before stack underflow
+- **Tests:** 578 passed, 0 failed, 1 skipped, 72 xfailed
+- **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
+- **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
+- **Zork1 compiles** to 103KB but has runtime issues (missing parser features)
 - All tests passing (excluding skips/xfails for unimplemented ZILF features)
 
 ## Zork1 Compilation Status
@@ -24,14 +24,24 @@ Focus areas for next session:
 - **Previous issue (FIXED)**: Illegal opcode error due to backward branch offset bugs
 
 ## Recent Changes (2025-12-27)
-- Implemented PROPDEF pattern matching for property encoding
-  - Parser now captures PROPDEF patterns (input and output specifications)
-  - Pattern matching supports literals, captures (VAR:TYPE), OPT modifiers
-  - Output encoding supports WORD, BYTE, ROOM, OBJECT forms
-  - Constant definitions in output patterns are captured
-  - Added `bytes` type handling in ZObjectTable.encode_property_value()
-  - Basic pattern and OPT tests passing (test_propdef_basic_pattern, test_propdef_opt)
-  - MANY modifier and constant exports still need work
+- **Full V1-V8 Z-machine support**
+  - Fixed memory layout: dictionary now in static memory (bocfel requirement)
+  - Added 4-byte padding before routines for V6-7 (bocfel rejects packed addr 0)
+  - Added version-aware string alignment (V8 requires 8-byte alignment)
+  - Test infrastructure uses bocfel for V5+ (except V7), dfrotz for V1-V6
+  - Fixed COLOR opcode encoding (EXT:27 = 0xBE 0x1B, not VAR:27)
+  - V8 now fully working; V7 xfail due to interpreter bugs in bocfel/dfrotz
+- Completed PROPDEF implementation (6/7 tests pass, 1 xfail for PROPSPEC clearing)
+  - Added MANY modifier for repeating pattern elements
+  - Export PROPDEF constants (HEIGHTSIZE, H-FEET, etc.) to codegen
+  - Apply PROPDEF DIRECTIONS pattern to all direction properties
+  - Fixed constant form encoding to output embedded FORM data
+  - Added VOC placeholder (0xFB00) resolution in assembler
+  - All pattern types working: WORD, BYTE, ROOM, OBJECT, VOC
+- Implemented BIT-SYNONYM flag alias support (2 tests pass)
+  - Parser collects BitSynonymNode instances
+  - Compiler resolves synonyms to original attribute numbers
+  - `<BIT-SYNONYM NEWNAME ORIGINALBIT>` creates alias
 
 ## Previous Changes (2025-12-26)
 - Implemented ZILF-compatible object numbering (reverse definition order)
