@@ -1552,14 +1552,18 @@ class ZILCompiler:
 
         # Pre-assign object numbers for code generation
         # This allows object references like ,FOO to be resolved during codegen
+        # ZILF numbers objects in reverse definition order (last defined = lowest number)
+        # Combine objects and rooms, sort by source line, then reverse
         objects = {}
-        obj_num = 1  # Objects start at 1 (0 is reserved for "nothing")
-        for obj in program.objects:
-            objects[obj.name] = obj_num
-            obj_num += 1
-        for room in program.rooms:
-            objects[room.name] = obj_num
-            obj_num += 1
+        all_items = [(obj, getattr(obj, 'line', 0)) for obj in program.objects]
+        all_items.extend([(room, getattr(room, 'line', 0)) for room in program.rooms])
+        # Sort by line number to get original definition order
+        all_items.sort(key=lambda x: x[1])
+        # Assign numbers in reverse order (last defined = lowest number)
+        total_objects = len(all_items)
+        for i, (item, _) in enumerate(all_items):
+            # Reverse: first defined (low line) gets high number, last defined gets low number
+            objects[item.name] = total_objects - i
 
         return {
             'flags': flags,
@@ -2160,19 +2164,22 @@ class ZILCompiler:
 
         # Build object name -> number mapping first (objects are 1-indexed)
         # Rooms and objects share the same number space
+        # ZILF numbers objects in reverse definition order (last defined = lowest number)
+        # Combine objects and rooms, sort by source line to get original interleaved order
+        all_items = [(obj.name, obj, False, getattr(obj, 'line', 0)) for obj in program.objects]
+        all_items.extend([(room.name, room, True, getattr(room, 'line', 0)) for room in program.rooms])
+        # Sort by line number to get original definition order
+        all_items.sort(key=lambda x: x[3])
+
         all_objects = []  # List of (name, node, is_room)
         obj_name_to_num = {}
-        obj_num = 1
+        total_objects = len(all_items)
 
-        for obj in program.objects:
-            obj_name_to_num[obj.name] = obj_num
-            all_objects.append((obj.name, obj, False))
-            obj_num += 1
-
-        for room in program.rooms:
-            obj_name_to_num[room.name] = obj_num
-            all_objects.append((room.name, room, True))
-            obj_num += 1
+        for i, (name, node, is_room, _) in enumerate(all_items):
+            # Reverse: first defined (low line) gets high number, last defined gets low number
+            obj_num = total_objects - i
+            obj_name_to_num[name] = obj_num
+            all_objects.append((name, node, is_room))
 
         self.log(f"  {len(all_objects)} objects/rooms total")
 
@@ -2248,7 +2255,9 @@ class ZILCompiler:
                 sibling_of[child_list[-1]] = 0
 
         # Add objects with properties and tree structure
-        for obj_idx, (name, node, is_room) in enumerate(all_objects):
+        # Sort by object number so objects are added in the correct order for the table
+        sorted_objects = sorted(all_objects, key=lambda x: obj_name_to_num[x[0]])
+        for obj_idx, (name, node, is_room) in enumerate(sorted_objects):
             obj_num = obj_name_to_num[name]
             attributes = flags_to_attributes(node.properties.get('FLAGS', []))
             properties = extract_properties(node, obj_idx)

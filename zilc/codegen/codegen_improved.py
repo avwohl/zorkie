@@ -461,12 +461,14 @@ class ImprovedCodeGenerator:
 
         # Pre-assign object numbers FIRST so globals can reference them
         # (e.g., <GLOBAL HERE CAT> needs CAT to be assigned number 1)
-        for obj in program.objects:
-            self.objects[obj.name] = self.next_object
-            self.next_object += 1
-        for room in program.rooms:
-            self.objects[room.name] = self.next_object
-            self.next_object += 1
+        # Skip if objects were already pre-assigned from symbol_tables (ZILF reverse ordering)
+        if not self.objects:
+            for obj in program.objects:
+                self.objects[obj.name] = self.next_object
+                self.next_object += 1
+            for room in program.rooms:
+                self.objects[room.name] = self.next_object
+                self.next_object += 1
 
         # Check if REDEFINE is allowed
         allow_redefine = False

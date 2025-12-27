@@ -6,13 +6,13 @@ All ZILF integration tests are now either passing, skipped, or marked xfail for
 unimplemented ZILF-specific features.
 
 Focus areas for next session:
-1. **Object ordering** - ZILF-specific numbering (rooms first, reverse-order contents)
+1. **Object ordering (complex)** - Investigate ZILF algorithm for mixed object/room ordering
 2. **PROPDEF** - Property pattern matching (6 tests)
 3. **BIT-SYNONYM** - Attribute aliases (2 tests)
 4. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 
 ## Current Status (2025-12-26)
-- **Tests:** 410 passed, 0 failed, 144 skipped, 78 xfailed, 1 xpassed
+- **Tests:** 406 passed, 0 failed, 144 skipped, 77 xfailed, 1 xpassed
 - **Hello world works** in V3, V4, V5, V6
 - **Zork1 compiles** to 98KB and shows initial game text before stack underflow
 - All tests passing (excluding skips/xfails for unimplemented ZILF features)
@@ -24,6 +24,13 @@ Focus areas for next session:
 - **Previous issue (FIXED)**: Illegal opcode error due to backward branch offset bugs
 
 ## Recent Changes (2025-12-26)
+- Implemented ZILF-compatible object numbering (reverse definition order)
+  - Objects now numbered in reverse source order (last defined = lowest number)
+  - Combines objects and rooms, sorts by source line, then reverses
+  - `_build_symbol_tables` and `_build_object_table` both use interleaved order
+  - Fixed codegen to use pre-assigned object numbers from symbol_tables
+  - Simple object ordering tests pass (test_contents_default_order)
+  - Complex ordering (with rooms interleaved) marked xfail pending further investigation
 - Added lexer apostrophe support for vocabulary words like `CAT'S`
   - Added `'` to valid atom characters in `is_atom_char()`
   - MDL0429 warning already implemented for apostrophes in vocab words

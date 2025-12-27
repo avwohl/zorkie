@@ -62,7 +62,6 @@ def tree_implications(numbering, *contents_specs):
 class TestObjectNumberingAndOrdering:
     """Tests for object numbering and tree ordering."""
 
-    @pytest.mark.xfail(reason="ZILF-specific object ordering not implemented")
     def test_contents_default_order(self):
         """Test default object ordering with contents."""
         AssertGlobals(
@@ -76,7 +75,7 @@ class TestObjectNumberingAndOrdering:
             ["RAINBOW", "RED", "BLUE", "GREEN", "YELLOW"]
         ))
 
-    @pytest.mark.xfail(reason="ZILF-specific object ordering not implemented")
+    @pytest.mark.xfail(reason="ZILF object ordering algorithm needs investigation")
     def test_house_default_order(self):
         """Test default object ordering with house example."""
         AssertGlobals(
