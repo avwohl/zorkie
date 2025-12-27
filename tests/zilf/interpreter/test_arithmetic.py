@@ -244,8 +244,8 @@ class TestXORB:
         """Bitwise XOR of multiple numbers."""
         eval_and_assert("<XORB 0 16>", ZilFix(16))
         eval_and_assert("<XORB 64 96>", ZilFix(32))
-        # Note: 0xfee0a72f is the expected value (signed)
-        eval_and_assert("<XORB *05777777776* *32107654321*>", ZilFix(-18024657))
+        # Note: 0xfee0a72f is the expected value (signed 32-bit = -18831569)
+        eval_and_assert("<XORB *05777777776* *32107654321*>", ZilFix(-18831569))
 
     def test_arguments_must_be_numbers(self):
         """Non-numeric arguments should raise error."""

@@ -95,6 +95,10 @@ class ZilString(ZilObject):
     def from_string(cls, s: str) -> 'ZilString':
         return cls(s)
 
+    def python_str(self) -> str:
+        """Return the Python string value."""
+        return self.value
+
     def structurally_equals(self, other: ZilObject) -> bool:
         if isinstance(other, ZilString):
             return self.value == other.value
@@ -206,16 +210,35 @@ class ZilForm(ZilObject):
 class ZilSegment(ZilObject):
     """ZIL segment type."""
 
-    def __init__(self, form: ZilForm):
-        self.form = form
+    def __init__(self, expr):
+        self.expr = expr  # Can be any expression (form, lval, etc.)
 
     def structurally_equals(self, other: ZilObject) -> bool:
         if isinstance(other, ZilSegment):
-            return self.form.structurally_equals(other.form)
+            if isinstance(self.expr, ZilObject) and isinstance(other.expr, ZilObject):
+                return self.expr.structurally_equals(other.expr)
+            return self.expr == other.expr
         return False
 
     def __repr__(self):
-        return f"ZilSegment({self.form})"
+        return f"ZilSegment({self.expr})"
+
+
+class ZilAdecl(ZilObject):
+    """ZIL ADECL (Annotated declaration) type, like A:FIX."""
+
+    def __init__(self, value: ZilObject, decl: ZilObject):
+        self.value = value  # The atom or value
+        self.decl = decl    # The type declaration
+
+    def structurally_equals(self, other: ZilObject) -> bool:
+        if isinstance(other, ZilAdecl):
+            return (self.value.structurally_equals(other.value) and
+                    self.decl.structurally_equals(other.decl))
+        return False
+
+    def __repr__(self):
+        return f"ZilAdecl({self.value}, {self.decl})"
 
 
 class ZilOffset(ZilObject):
@@ -279,10 +302,11 @@ class ZilStructuredHash(ZilObject):
 class ZilFunction(ZilObject):
     """ZIL function type."""
 
-    def __init__(self, name: str, args: list, body: list):
+    def __init__(self, name: str, args: list, body: list, activation=None):
         self.name = name
         self.args = args
         self.body = body
+        self.activation = activation
 
     def structurally_equals(self, other: ZilObject) -> bool:
         return self is other
@@ -304,6 +328,19 @@ class ZilEvalMacro(ZilObject):
 
     def __repr__(self):
         return f"ZilEvalMacro({self.name})"
+
+
+class ZilSubr(ZilObject):
+    """ZIL builtin function (SUBR) type."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def structurally_equals(self, other: ZilObject) -> bool:
+        return isinstance(other, ZilSubr) and self.name == other.name
+
+    def __repr__(self):
+        return f"ZilSubr({self.name})"
 
 
 class ObList(ZilObject):
@@ -518,7 +555,7 @@ class MDLParser:
         elif ch == '!':
             self.pos += 1
             expr = self.parse_expr()
-            return ZilSegment(expr if isinstance(expr, ZilForm) else ZilForm([expr]))
+            return ZilSegment(expr)
         # LVAL: .name
         elif ch == '.':
             self.pos += 1
@@ -665,10 +702,18 @@ class MDLParser:
             raise InterpreterError(f"Expected atom name at position {self.pos}")
         return self.text[start:self.pos]
 
-    def parse_atom(self) -> ZilAtom:
-        """Parse an atom."""
+    def parse_atom(self) -> ZilObject:
+        """Parse an atom, potentially with ADECL syntax (A:FIX)."""
         name = self.parse_atom_name()
-        return ZilAtom(name)
+        atom = ZilAtom(name)
+
+        # Check for ADECL syntax: ATOM:DECL
+        if self.pos < len(self.text) and self.text[self.pos] == ':':
+            self.pos += 1  # Skip ':'
+            decl_name = self.parse_atom_name()
+            return ZilAdecl(atom, ZilAtom(decl_name))
+
+        return atom
 
 
 # =============================================================================
@@ -745,8 +790,28 @@ class MDLEvaluator:
         """Get global value."""
         val = self.ctx.get_global_val(ZilAtom(name))
         if val is None:
+            # For builtins, return a ZilSubr wrapper that is applicable
+            if name in self.BUILTIN_NAMES:
+                return ZilSubr(name)
             raise InterpreterError(f"Unbound global variable: {name}")
         return val
+
+    # Set of builtin function names
+    BUILTIN_NAMES = {
+        '+', '-', '*', '/', 'MOD', 'LSH', 'ORB', 'ANDB', 'XORB', 'EQVB',
+        'L?', 'L=?', 'G?', 'G=?', '=?', '==?', 'N==?', 'N=?', 'NEQUAL?',
+        'MIN', 'MAX', 'ABS', 'RANDOM',
+        'SET', 'SETG', 'LVAL', 'GVAL', 'BOUND?', 'ASSIGNED?', 'GASSIGNED?', 'GUNASSIGN',
+        'TYPE', 'PRIMTYPE', 'CHTYPE', 'TYPE?', 'APPLICABLE?', 'STRUCTURED?',
+        'LIST', 'VECTOR', 'FORM', 'NTH', 'REST', 'LENGTH', 'EMPTY?', 'PUT', 'GET',
+        'MEMQ', 'MEMBER', 'ILIST', 'IVECTOR', 'ISTRING', 'SUBSTRUC', 'PUTREST', 'SORT',
+        'COND', 'VERSION?', 'AGAIN', 'QUOTE', 'EVAL', 'APPLY',
+        'AND', 'OR', 'NOT', 'PROG', 'REPEAT', 'RETURN',
+        'DEFINE', 'DEFMAC', 'FUNCTION', 'DEFSTRUCT',
+        'MAPF', 'MAPR',
+        'ASCII', 'STRING', 'SPNAME', 'ATOM', 'PARSE', 'LPARSE', 'VALUE', 'GDECL',
+        'TABLE', 'ITABLE', 'ZGET', 'ZPUT', 'ZREST', 'GETB', 'PUTB',
+    }
 
     def eval_typed(self, type_name: str, value) -> ZilObject:
         """Evaluate a typed value #TYPE value."""
@@ -760,10 +825,25 @@ class MDLEvaluator:
             return ZilStructuredHash(ZilAtom(type_name), struct_info['primtype'], val)
         return val
 
+    def eval_args_for_function(self, args: list) -> list:
+        """Evaluate arguments for a function call, expanding segments."""
+        result = []
+        for arg in args:
+            if isinstance(arg, ZilSegment):
+                # Evaluate the segment's form and splice its elements
+                val = self.eval(arg.expr)
+                if isinstance(val, (ZilList, ZilVector)):
+                    result.extend(val.elements)
+                else:
+                    result.append(val)
+            else:
+                result.append(arg)  # Return unevaluated for apply_function to evaluate
+        return result
+
     def eval_form(self, form: ZilForm) -> ZilObject:
         """Evaluate a form."""
         if not form.elements:
-            return form  # Empty form
+            return self.ctx.FALSE  # Empty form is FALSE
 
         # Get the function/operator
         first = form.elements[0]
@@ -777,6 +857,20 @@ class MDLEvaluator:
             # ,FUNC form
             name = first[1]
             return self.apply_builtin(name, args)
+        elif isinstance(first, ZilForm):
+            # Evaluate the form to get the function
+            func = self.eval_form(first)
+            if isinstance(func, ZilFunction):
+                # Evaluate args (with segment expansion) and apply
+                evaled_args = self.eval_args_for_function(args)
+                return self.apply_function(func, evaled_args)
+            elif isinstance(func, ZilSubr):
+                return self.apply_builtin(func.name, args)
+            raise InterpreterError(f"Cannot apply result of form: {func}")
+        elif isinstance(first, ZilFunction):
+            # Direct function application
+            evaled_args = self.eval_args_for_function(args)
+            return self.apply_function(first, evaled_args)
 
         raise InterpreterError(f"Cannot apply: {first}")
 
@@ -983,7 +1077,8 @@ class MDLEvaluator:
         # Check for user-defined function
         func = self.ctx.get_function(name)
         if func:
-            return self.apply_function(func, args)
+            expanded_args = self.eval_args_for_function(args)
+            return self.apply_function(func, expanded_args)
 
         # Check for macro
         macro = self.ctx.get_macro(name)
@@ -1252,6 +1347,12 @@ class MDLEvaluator:
         else:
             raise ArgumentTypeError("SET first argument must be an atom")
         value = self.eval(args[1])
+
+        # Check DECL type constraint if any
+        if hasattr(self, '_current_decls') and name in self._current_decls:
+            decl = self._current_decls[name]
+            self._check_decl(value, decl, name)
+
         self.ctx.set_local_val(ZilAtom(name), value)
         return value
 
@@ -1358,16 +1459,31 @@ class MDLEvaluator:
     # List/structure builtins
     # =========================================================================
 
+    def eval_and_splice(self, args: list) -> list:
+        """Evaluate arguments, splicing segments."""
+        result = []
+        for arg in args:
+            if isinstance(arg, ZilSegment):
+                # Evaluate the segment's form and splice its elements
+                val = self.eval(arg.expr)
+                if isinstance(val, (ZilList, ZilVector)):
+                    result.extend(val.elements)
+                else:
+                    result.append(val)
+            else:
+                result.append(self.eval(arg))
+        return result
+
     def builtin_list(self, args: list) -> ZilList:
-        elements = [self.eval(arg) for arg in args]
+        elements = self.eval_and_splice(args)
         return ZilList(elements)
 
     def builtin_vector(self, args: list) -> ZilVector:
-        elements = [self.eval(arg) for arg in args]
+        elements = self.eval_and_splice(args)
         return ZilVector(*elements)
 
     def builtin_form(self, args: list) -> ZilForm:
-        elements = [self.eval(arg) for arg in args]
+        elements = self.eval_and_splice(args)
         return ZilForm(elements)
 
     def builtin_nth(self, args: list) -> ZilObject:
@@ -1791,31 +1907,79 @@ class MDLEvaluator:
             env = self.eval(args[1])
             if not isinstance(env, (ZilList, ZilVector)):
                 raise ArgumentTypeError("EVAL second argument must be an environment")
-        expr = args[0]
-        # If it's already evaluated, evaluate again
-        if isinstance(expr, tuple):
-            return self.eval(expr)
-        elif isinstance(expr, ZilList):
-            # Evaluate elements of the list
-            return ZilList([self.eval(e) for e in expr.elements])
+
+        # First, evaluate the argument to get the value to be evaluated
+        expr = self.eval(args[0])
+
+        # Now evaluate that value
+        if isinstance(expr, ZilList):
+            # Lists: evaluate each element that's a form
+            result = []
+            for e in expr.elements:
+                if isinstance(e, ZilForm):
+                    result.append(self.eval_form(e))
+                else:
+                    result.append(e)
+            return ZilList(result)
         elif isinstance(expr, ZilForm):
+            # Forms: execute
             return self.eval_form(expr)
+        # Atoms, numbers, strings etc. evaluate to themselves
         return expr
 
     def builtin_apply(self, args: list) -> ZilObject:
         """APPLY - apply a function to arguments."""
-        if len(args) < 2:
-            raise ArgumentCountError("APPLY requires at least 2 arguments")
+        if len(args) < 1:
+            raise InterpreterError("APPLY requires at least 1 argument")
+
         func = self.eval(args[0])
-        arg_list = self.eval(args[1])
 
-        if not isinstance(arg_list, ZilList):
-            raise ArgumentTypeError("APPLY second argument must be a list")
+        # Collect remaining arguments - evaluate each one
+        func_args = [self.eval(arg) for arg in args[1:]]
 
+        # Helper to flatten list args
+        def flatten_args(func_args):
+            flat_args = []
+            for arg in func_args:
+                if isinstance(arg, ZilList):
+                    flat_args.extend(arg.elements)
+                else:
+                    flat_args.append(arg)
+            return flat_args
+
+        # Apply based on function type
         if isinstance(func, ZilFunction):
-            return self.apply_function(func, arg_list.elements)
+            return self.apply_function(func, flatten_args(func_args))
+        elif isinstance(func, ZilEvalMacro):
+            return self.apply_macro(func, flatten_args(func_args))
+        elif isinstance(func, ZilSubr):
+            # Builtin function (SUBR)
+            return self.apply_builtin(func.name, flatten_args(func_args))
+        elif isinstance(func, ZilFix):
+            # FIX as applicator means NTH
+            if len(func_args) != 1:
+                raise InterpreterError("FIX as applicator requires 1 argument")
+            struct = func_args[0]
+            # If struct is a list, evaluate its forms first
+            if isinstance(struct, ZilList):
+                evaled = []
+                for e in struct.elements:
+                    if isinstance(e, ZilForm):
+                        evaled.append(self.eval_form(e))
+                    else:
+                        evaled.append(e)
+                struct = ZilList(evaled)
+            # NTH expects (struct, index) order
+            return self.builtin_nth([struct, ZilFix(func.value)])
         elif isinstance(func, ZilAtom):
-            return self.apply_builtin(func.name, arg_list.elements)
+            # Check if it's a GVAL reference to a function/macro
+            val = self.ctx.get_global_val(func)
+            if isinstance(val, ZilFunction):
+                return self.apply_function(val, flatten_args(func_args))
+            elif isinstance(val, ZilEvalMacro):
+                return self.apply_macro(val, flatten_args(func_args))
+            # Atoms by themselves are not applicable
+            raise InterpreterError(f"Cannot apply: {func}")
 
         raise InterpreterError(f"Cannot apply: {func}")
 
@@ -1848,30 +2012,153 @@ class MDLEvaluator:
 
     def builtin_prog(self, args: list) -> ZilObject:
         if not args:
-            return self.ctx.FALSE
-        # First arg is bindings
-        bindings = args[0]
-        body = args[1:]
+            raise ArgumentDecodingError("PROG requires at least bindings and a body")
+
+        # Check for activation atom before bindings
+        idx = 0
+        activation = None
+        if isinstance(args[0], ZilAtom):
+            activation = args[0]
+            idx = 1
+
+        if idx >= len(args):
+            raise ArgumentDecodingError("PROG requires bindings list")
+
+        bindings = args[idx]
+        raw_body = args[idx + 1:]
+
+        # Separate #DECL from actual body expressions
+        body_decls = {}
+        body = []
+        for expr in raw_body:
+            if isinstance(expr, tuple) and expr[0] == 'TYPED' and expr[1] == 'DECL':
+                # Parse #DECL and collect declarations
+                decl_body = expr[2]
+                if isinstance(decl_body, ZilList):
+                    i = 0
+                    while i + 1 < len(decl_body.elements):
+                        vars_list = decl_body.elements[i]
+                        decl_type = decl_body.elements[i + 1]
+                        if isinstance(vars_list, ZilList):
+                            for var in vars_list.elements:
+                                if isinstance(var, ZilAtom):
+                                    if var.name in body_decls:
+                                        existing = body_decls[var.name]
+                                        if isinstance(existing, ZilAtom) and isinstance(decl_type, ZilAtom):
+                                            if existing.name != decl_type.name:
+                                                raise InterpreterError(
+                                                    f"Conflicting DECLs for {var.name}"
+                                                )
+                                    body_decls[var.name] = decl_type
+                        i += 2
+            else:
+                body.append(expr)
+
+        if not body:
+            raise ArgumentDecodingError("PROG requires a body (not just #DECL)")
+
+        # Collect binding DECLs and check for conflicts with body DECLs
+        binding_decls = {}
+        if isinstance(bindings, ZilList):
+            for binding in bindings.elements:
+                atom, decl = None, None
+                if isinstance(binding, ZilAtom):
+                    atom = binding
+                elif isinstance(binding, ZilAdecl):
+                    atom = binding.value if isinstance(binding.value, ZilAtom) else binding.value
+                    decl = binding.decl
+                elif isinstance(binding, ZilList) and len(binding.elements) >= 1:
+                    first = binding.elements[0]
+                    if isinstance(first, ZilAtom):
+                        atom = first
+                    elif isinstance(first, ZilAdecl):
+                        atom = first.value if isinstance(first.value, ZilAtom) else first.value
+                        decl = first.decl
+
+                if atom and decl:
+                    binding_decls[atom.name] = decl
+                    # Check conflict with body DECLs
+                    if atom.name in body_decls:
+                        body_decl = body_decls[atom.name]
+                        if isinstance(decl, ZilAtom) and isinstance(body_decl, ZilAtom):
+                            if decl.name != body_decl.name:
+                                raise InterpreterError(
+                                    f"Conflicting DECLs for {atom.name}: {decl.name} vs {body_decl.name}"
+                                )
+
+        # Merge decls (binding decls take precedence)
+        all_decls = {**body_decls, **binding_decls}
+
+        # Create a unique activation marker
+        activation_marker = object() if activation else None
 
         self.ctx.push_locals()
         try:
+            # Bind activation if present
+            if activation:
+                self.ctx.set_local_val(activation, ZilAtom(f"PROG-{id(activation_marker)}"))
+
+            # Process bindings
             if isinstance(bindings, ZilList):
                 for binding in bindings.elements:
                     if isinstance(binding, ZilAtom):
                         self.ctx.set_local_val(binding, self.ctx.FALSE)
+                    elif isinstance(binding, ZilAdecl):
+                        atom = binding.value if isinstance(binding.value, ZilAtom) else binding.value
+                        self.ctx.set_local_val(atom, self.ctx.FALSE)
                     elif isinstance(binding, ZilList) and len(binding.elements) >= 1:
-                        name = binding.elements[0]
-                        val = self.eval(binding.elements[1]) if len(binding.elements) > 1 else self.ctx.FALSE
-                        if isinstance(name, ZilAtom):
+                        first = binding.elements[0]
+                        if isinstance(first, ZilAtom):
+                            name = first
+                            val = self.eval(binding.elements[1]) if len(binding.elements) > 1 else self.ctx.FALSE
+                            # Check DECL if present
+                            if name.name in all_decls:
+                                self._check_decl(val, all_decls[name.name], name.name)
+                            self.ctx.set_local_val(name, val)
+                        elif isinstance(first, ZilAdecl):
+                            name = first.value if isinstance(first.value, ZilAtom) else first.value
+                            val = self.eval(binding.elements[1]) if len(binding.elements) > 1 else self.ctx.FALSE
+                            # Check DECL
+                            if name.name in all_decls:
+                                self._check_decl(val, all_decls[name.name], name.name)
                             self.ctx.set_local_val(name, val)
 
-            result = self.ctx.FALSE
-            for expr in body:
-                result = self.eval(expr)
-            return result
-        except ReturnException as ret:
-            return ret.value
+            # Store decls for SET checking
+            self._current_decls = all_decls
+
+            while True:
+                try:
+                    result = self.ctx.FALSE
+                    for expr in body:
+                        result = self.eval(expr)
+                    return result
+                except AgainException as ag:
+                    # Check if again is for this PROG or should propagate
+                    if ag.activation is None:
+                        # AGAIN with no activation - restart this block
+                        continue
+                    elif activation:
+                        local_act = self.ctx.get_local_val(activation)
+                        if isinstance(ag.activation, ZilAtom) and isinstance(local_act, ZilAtom):
+                            if ag.activation.name == local_act.name:
+                                continue
+                    # Not for us, propagate
+                    raise
+                except ReturnException as ret:
+                    # Check if return is for this PROG or should propagate
+                    if ret.activation is None:
+                        # Return with no activation - return from this block
+                        return ret.value
+                    elif activation:
+                        # Check if return activation matches our activation
+                        local_act = self.ctx.get_local_val(activation)
+                        if isinstance(ret.activation, ZilAtom) and isinstance(local_act, ZilAtom):
+                            if ret.activation.name == local_act.name:
+                                return ret.value
+                    # Not for us, propagate
+                    raise
         finally:
+            self._current_decls = {}
             self.ctx.pop_locals()
 
     def builtin_repeat(self, args: list) -> ZilObject:
@@ -1902,13 +2189,14 @@ class MDLEvaluator:
 
     def builtin_return(self, args: list) -> ZilObject:
         val = self.eval(args[0]) if args else self.ctx.TRUE
-        raise ReturnException(val)
+        activation = self.eval(args[1]) if len(args) > 1 else None
+        raise ReturnException(val, activation)
 
     def builtin_mapf(self, args: list) -> ZilObject:
         if len(args) < 2:
             raise ArgumentCountError("MAPF requires at least 2 arguments")
-        finisher = args[0]
-        func = args[1]
+        finisher = self.eval(args[0])
+        func = self.eval(args[1])
         structs = [self.eval(arg) for arg in args[2:]]
 
         results = []
@@ -1916,17 +2204,27 @@ class MDLEvaluator:
             # Get first element of each struct
             firsts = [self.first_of(s) for s in structs]
             # Apply function
-            if isinstance(func, ZilAtom):
+            if isinstance(func, ZilFunction):
+                result = self.apply_function(func, firsts)
+            elif isinstance(func, ZilSubr):
+                result = self.apply_builtin(func.name, firsts)
+            elif isinstance(func, ZilAtom):
                 result = self.apply_builtin(func.name, firsts)
             else:
-                result = self.eval(ZilForm([func] + firsts))
+                raise InterpreterError(f"MAPF: cannot apply {func}")
             results.append(result)
             # REST each struct
             structs = [self.rest_of(s) for s in structs]
 
         # Apply finisher
-        if isinstance(finisher, ZilForm) and not finisher.elements:
-            return self.ctx.FALSE
+        # FALSE finisher (empty list) returns last result
+        if self.is_false(finisher):
+            return results[-1] if results else self.ctx.FALSE
+        elif isinstance(finisher, ZilSubr):
+            if finisher.name == 'LIST':
+                return ZilList(results)
+            elif finisher.name == 'VECTOR':
+                return ZilVector(*results)
         elif isinstance(finisher, ZilAtom):
             if finisher.name == 'LIST':
                 return ZilList(results)
@@ -1990,32 +2288,109 @@ class MDLEvaluator:
     # =========================================================================
 
     def builtin_define(self, args: list) -> ZilAtom:
-        if len(args) < 2:
-            raise ArgumentCountError("DEFINE requires at least 2 arguments")
+        if len(args) < 3:
+            raise InterpreterError("DEFINE requires at least 3 arguments (name, params, body)")
+
         name = args[0]
         if not isinstance(name, ZilAtom):
             raise ArgumentTypeError("DEFINE name must be an atom")
-        params_form = args[1]
+
+        # Check for optional activation atom before params
+        idx = 1
+        activation = None
+        if isinstance(args[1], ZilAtom):
+            activation = args[1]
+            idx = 2
+
+        if idx >= len(args):
+            raise InterpreterError("DEFINE requires params list and body")
+
+        params_form = args[idx]
         if not isinstance(params_form, ZilList):
             raise ArgumentTypeError("DEFINE params must be a list")
-        body = args[2:]
-        func = ZilFunction(name.name, params_form.elements, body)
+
+        body = args[idx + 1:]
+        if not body:
+            raise InterpreterError("DEFINE requires a body")
+
+        # Collect parameter DECLs from ADECLs
+        param_decls = {}
+        for param in params_form.elements:
+            if isinstance(param, ZilAdecl) and isinstance(param.value, ZilAtom):
+                param_decls[param.value.name] = param.decl
+            elif isinstance(param, ZilList) and param.elements:
+                first = param.elements[0]
+                if isinstance(first, ZilAdecl) and isinstance(first.value, ZilAtom):
+                    param_decls[first.value.name] = first.decl
+
+        # Check for #DECL in body and validate no conflicts
+        for expr in body:
+            if isinstance(expr, tuple) and expr[0] == 'TYPED' and expr[1] == 'DECL':
+                # This is a #DECL form - check for conflicts
+                decl_body = expr[2]
+                if isinstance(decl_body, ZilList):
+                    # Parse DECL: ((VAR1 VAR2) TYPE ...)
+                    i = 0
+                    while i < len(decl_body.elements):
+                        if i + 1 < len(decl_body.elements):
+                            vars_list = decl_body.elements[i]
+                            decl_type = decl_body.elements[i + 1]
+                            if isinstance(vars_list, ZilList):
+                                for var in vars_list.elements:
+                                    if isinstance(var, ZilAtom) and var.name in param_decls:
+                                        existing_decl = param_decls[var.name]
+                                        if isinstance(existing_decl, ZilAtom) and isinstance(decl_type, ZilAtom):
+                                            if existing_decl.name != decl_type.name:
+                                                raise InterpreterError(
+                                                    f"Conflicting DECLs for {var.name}: "
+                                                    f"{existing_decl.name} vs {decl_type.name}"
+                                                )
+                            i += 2
+                        else:
+                            break
+
+        # Check for redefine
+        redefine_atom = self.ctx.get_std_atom('REDEFINE')
+        existing = self.ctx.get_global_val(name)
+        if existing is not None and isinstance(existing, ZilFunction):
+            redefine_val = self.ctx.get_local_val(redefine_atom)
+            if redefine_val is None or self.is_false(redefine_val):
+                raise InterpreterError(f"Cannot redefine {name.name} when .REDEFINE is false")
+
+        func = ZilFunction(name.name, params_form.elements, body, activation=activation)
         self.ctx.define_function(name.name, func)
         self.ctx.set_global_val(name, func)
         return name
 
     def builtin_defmac(self, args: list) -> ZilAtom:
-        if len(args) < 2:
-            raise ArgumentCountError("DEFMAC requires at least 2 arguments")
+        if len(args) < 3:
+            raise InterpreterError("DEFMAC requires at least 3 arguments (name, params, body)")
+
         name = args[0]
         if not isinstance(name, ZilAtom):
             raise ArgumentTypeError("DEFMAC name must be an atom")
-        params_form = args[1]
+
+        # Check for optional activation atom before params
+        idx = 1
+        activation = None
+        if isinstance(args[1], ZilAtom):
+            activation = args[1]
+            idx = 2
+
+        if idx >= len(args):
+            raise InterpreterError("DEFMAC requires params list and body")
+
+        params_form = args[idx]
         if not isinstance(params_form, ZilList):
             raise ArgumentTypeError("DEFMAC params must be a list")
-        body = args[2:]
+
+        body = args[idx + 1:]
+        if not body:
+            raise InterpreterError("DEFMAC requires a body")
+
         macro = ZilEvalMacro(name.name, params_form.elements, body)
         self.ctx.define_macro(name.name, macro)
+        self.ctx.set_global_val(name, macro)
         return name
 
     def builtin_function(self, args: list) -> ZilFunction:
@@ -2082,23 +2457,187 @@ class MDLEvaluator:
 
     def apply_function(self, func: ZilFunction, args: list) -> ZilObject:
         """Apply a user-defined function."""
+        # Parse parameter list to determine required/optional/aux counts
+        required_params = []
+        optional_params = []
+        aux_params = []
+        tuple_param = None
+
+        mode = 'required'  # 'required', 'optional', 'aux', 'tuple', 'args'
+        i = 0
+        while i < len(func.args):
+            param = func.args[i]
+
+            # Check for mode-changing strings
+            if isinstance(param, ZilString):
+                pstr = param.python_str()
+                if pstr == "OPT" or pstr == "OPTIONAL":
+                    mode = 'optional'
+                    i += 1
+                    continue
+                elif pstr == "AUX" or pstr == "EXTRA":
+                    mode = 'aux'
+                    i += 1
+                    continue
+                elif pstr == "TUPLE":
+                    mode = 'tuple'
+                    i += 1
+                    continue
+                elif pstr == "ARGS":
+                    mode = 'args'
+                    i += 1
+                    continue
+
+            # Handle parameter based on mode
+            if mode == 'required':
+                required_params.append(param)
+            elif mode == 'optional':
+                optional_params.append(param)
+            elif mode == 'aux':
+                aux_params.append(param)
+            elif mode == 'tuple' or mode == 'args':
+                tuple_param = (mode, param)
+            i += 1
+
+        # Check argument count
+        min_args = len(required_params)
+        max_args = len(required_params) + len(optional_params) if tuple_param is None else None
+
+        num_args = len(args)
+        if num_args < min_args:
+            raise ArgumentCountError(f"{func.name} requires at least {min_args} arguments, got {num_args}")
+        if max_args is not None and num_args > max_args:
+            raise ArgumentCountError(f"{func.name} accepts at most {max_args} arguments, got {num_args}")
+
         self.ctx.push_locals()
         try:
-            # Bind parameters
-            for i, param in enumerate(func.args):
-                if isinstance(param, ZilAtom):
-                    val = self.eval(args[i]) if i < len(args) else self.ctx.FALSE
-                    self.ctx.set_local_val(param, val)
+            arg_idx = 0
+
+            # Bind required parameters
+            for param in required_params:
+                atom, decl = self._extract_param_atom_and_decl(param)
+                val = self.eval(args[arg_idx])
+                if decl:
+                    self._check_decl(val, decl, atom.name)
+                self.ctx.set_local_val(atom, val)
+                arg_idx += 1
+
+            # Bind optional parameters
+            for param in optional_params:
+                atom, decl, default = self._extract_optional_param(param)
+                should_check_decl = False
+                if arg_idx < len(args):
+                    val = self.eval(args[arg_idx])
+                    arg_idx += 1
+                    should_check_decl = True  # Value was provided, check decl
+                elif default is not None:
+                    val = self.eval(default)
+                    should_check_decl = True  # Explicit default, check decl
+                else:
+                    val = self.ctx.FALSE  # Implicit default, don't check decl
+                if decl and should_check_decl:
+                    self._check_decl(val, decl, atom.name)
+                self.ctx.set_local_val(atom, val)
+
+            # Bind aux parameters (no arguments, just default values)
+            for param in aux_params:
+                atom, decl, default = self._extract_optional_param(param)
+                if default is not None:
+                    val = self.eval(default)
+                else:
+                    val = self.ctx.FALSE
+                if decl:
+                    self._check_decl(val, decl, atom.name)
+                self.ctx.set_local_val(atom, val)
+
+            # Bind tuple parameter (remaining args as list/tuple)
+            if tuple_param:
+                mode, param = tuple_param
+                atom, decl = self._extract_param_atom_and_decl(param)
+                remaining = [self.eval(arg) for arg in args[arg_idx:]] if mode == 'tuple' else list(args[arg_idx:])
+                val = ZilList(remaining)
+                self.ctx.set_local_val(atom, val)
+
+            # Bind activation atom if present
+            if func.activation:
+                # Create activation object - for now just use the function name as marker
+                self.ctx.set_local_val(func.activation, ZilAtom(func.name))
 
             # Execute body
             result = self.ctx.FALSE
             for expr in func.body:
                 result = self.eval(expr)
             return result
+        except AgainException as ag:
+            # AGAIN inside a function without matching activation should fail
+            if func.activation:
+                local_act = self.ctx.get_local_val(func.activation)
+                if ag.activation is None:
+                    # This shouldn't happen in well-formed code, but handle it
+                    pass
+                elif isinstance(ag.activation, ZilAtom) and isinstance(local_act, ZilAtom):
+                    if ag.activation.name == local_act.name:
+                        # Match - but functions don't loop, so this is an error
+                        pass
+            # Function has no activation - AGAIN should not propagate to outer scope
+            raise InterpreterError("AGAIN without matching activation block")
         except ReturnException as ret:
-            return ret.value
+            # Check if return is for this function's activation
+            # Only catch if function has an activation and it matches
+            if func.activation:
+                local_act = self.ctx.get_local_val(func.activation)
+                if ret.activation is None:
+                    # RETURN with no activation inside a function with activation - return here
+                    return ret.value
+                elif isinstance(ret.activation, ZilAtom) and isinstance(local_act, ZilAtom):
+                    if ret.activation.name == local_act.name:
+                        return ret.value
+            # If RETURN has a specific activation, let it propagate to find the matching block
+            if ret.activation is not None:
+                raise
+            # Function has no activation and RETURN has no activation - error
+            raise InterpreterError("RETURN without matching activation block")
         finally:
             self.ctx.pop_locals()
+
+    def _extract_param_atom_and_decl(self, param):
+        """Extract atom and optional DECL from a parameter."""
+        if isinstance(param, ZilAtom):
+            return param, None
+        elif isinstance(param, ZilAdecl):
+            return param.value, param.decl
+        elif isinstance(param, ZilList) and len(param.elements) >= 1:
+            # (ATOM DEFAULT) form
+            return self._extract_param_atom_and_decl(param.elements[0])
+        return param, None
+
+    def _extract_optional_param(self, param):
+        """Extract atom, decl, and default value from optional/aux parameter."""
+        if isinstance(param, ZilAtom):
+            return param, None, None
+        elif isinstance(param, ZilAdecl):
+            return param.value, param.decl, None
+        elif isinstance(param, ZilList) and len(param.elements) >= 1:
+            atom, decl = self._extract_param_atom_and_decl(param.elements[0])
+            default = param.elements[1] if len(param.elements) > 1 else None
+            return atom, decl, default
+        return param, None, None
+
+    def _check_decl(self, val, decl, param_name):
+        """Check that a value matches its DECL."""
+        if isinstance(decl, ZilAtom):
+            decl_name = decl.name
+            if decl_name == "FIX" and not isinstance(val, ZilFix):
+                raise DeclCheckError(f"Parameter {param_name} must be FIX, got {type(val).__name__}")
+            elif decl_name == "LIST" and not isinstance(val, ZilList):
+                raise DeclCheckError(f"Parameter {param_name} must be LIST, got {type(val).__name__}")
+            elif decl_name == "STRING" and not isinstance(val, ZilString):
+                raise DeclCheckError(f"Parameter {param_name} must be STRING, got {type(val).__name__}")
+            elif decl_name == "ATOM" and not isinstance(val, ZilAtom):
+                raise DeclCheckError(f"Parameter {param_name} must be ATOM, got {type(val).__name__}")
+            elif decl_name == "ANY":
+                pass  # Any type is acceptable
+            # Add more types as needed
 
     def apply_macro(self, macro: ZilEvalMacro, args: list) -> ZilObject:
         """Apply a macro (expand and evaluate)."""
@@ -2405,10 +2944,15 @@ def evaluate(expression: str, ctx: Optional[Context] = None) -> ZilObject:
     exprs = parser.parse_all()
     evaluator = MDLEvaluator(ctx)
 
-    result = ctx.FALSE
-    for expr in exprs:
-        result = evaluator.eval(expr)
-    return result
+    try:
+        result = ctx.FALSE
+        for expr in exprs:
+            result = evaluator.eval(expr)
+        return result
+    except ReturnException:
+        raise InterpreterError("RETURN without activation block")
+    except AgainException:
+        raise InterpreterError("AGAIN without activation block")
 
 
 def eval_and_assert(expression: str, expected: ZilObject, ctx: Optional[Context] = None):
