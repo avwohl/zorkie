@@ -6,13 +6,13 @@ All ZILF integration tests are now either passing, skipped, or marked xfail for
 unimplemented ZILF-specific features.
 
 Focus areas for next session:
-1. **Object ordering (complex)** - Investigate ZILF algorithm for mixed object/room ordering
-2. **PROPDEF** - Property pattern matching (6 tests)
+1. **PROPDEF (remaining)** - MANY modifier, constant exports, DIRECTIONS propdef (4 tests)
+2. **Object ordering (complex)** - Investigate ZILF algorithm for mixed object/room ordering
 3. **BIT-SYNONYM** - Attribute aliases (2 tests)
 4. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 
-## Current Status (2025-12-26)
-- **Tests:** 406 passed, 0 failed, 144 skipped, 77 xfailed, 1 xpassed
+## Current Status (2025-12-27)
+- **Tests:** 408 passed, 0 failed, 144 skipped, 75 xfailed, 1 xpassed
 - **Hello world works** in V3, V4, V5, V6
 - **Zork1 compiles** to 98KB and shows initial game text before stack underflow
 - All tests passing (excluding skips/xfails for unimplemented ZILF features)
@@ -23,7 +23,17 @@ Focus areas for next session:
 - **Current issue**: Stack underflow error after initial display
 - **Previous issue (FIXED)**: Illegal opcode error due to backward branch offset bugs
 
-## Recent Changes (2025-12-26)
+## Recent Changes (2025-12-27)
+- Implemented PROPDEF pattern matching for property encoding
+  - Parser now captures PROPDEF patterns (input and output specifications)
+  - Pattern matching supports literals, captures (VAR:TYPE), OPT modifiers
+  - Output encoding supports WORD, BYTE, ROOM, OBJECT forms
+  - Constant definitions in output patterns are captured
+  - Added `bytes` type handling in ZObjectTable.encode_property_value()
+  - Basic pattern and OPT tests passing (test_propdef_basic_pattern, test_propdef_opt)
+  - MANY modifier and constant exports still need work
+
+## Previous Changes (2025-12-26)
 - Implemented ZILF-compatible object numbering (reverse definition order)
   - Objects now numbered in reverse source order (last defined = lowest number)
   - Combines objects and rooms, sorts by source line, then reverses

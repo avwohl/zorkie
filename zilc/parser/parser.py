@@ -1000,7 +1000,7 @@ class Parser:
         """Parse PROPDEF property definition.
 
         Simple format: <PROPDEF name default-value>
-        Complex MDL format: <PROPDEF name <> (...) (...) ...> - skip these
+        Complex format: <PROPDEF name <> (PATTERN1) (PATTERN2) ...>
         """
         from .ast_nodes import PropdefNode
 
@@ -1011,41 +1011,194 @@ class Parser:
 
         # Default value (usually a number)
         default_value = None
+        patterns = []
+
         if self.current_token.type != TokenType.RANGLE:
-            # Check for complex MDL-style PROPDEF with parenthesized definitions
-            # These have format like: <PROPDEF DIRECTIONS <> (DIR TO R:ROOM = ...) ...>
-            # We detect this by seeing if the next tokens form a pattern list
+            # Check for complex PROPDEF with parenthesized pattern definitions
+            # Format: <PROPDEF NAME <> (PATTERN1) (PATTERN2) ...>
             if self.current_token.type == TokenType.LANGLE:
                 # Could be <> (empty) or a complex form
-                # Peek to see if it's <> followed by LPAREN
-                next_val = self.current_token.value
                 self.advance()  # skip <
                 if self.current_token.type == TokenType.RANGLE:
-                    self.advance()  # skip >
-                    if self.current_token.type == TokenType.LPAREN:
-                        # Complex MDL PROPDEF - skip until matching RANGLE
-                        depth = 1  # We're inside the outer <PROPDEF>
-                        while depth > 0 and self.current_token.type != TokenType.EOF:
-                            if self.current_token.type == TokenType.LANGLE:
-                                depth += 1
-                            elif self.current_token.type == TokenType.RANGLE:
-                                depth -= 1
-                                if depth == 0:
-                                    break
-                            self.advance()
-                        # Return None to skip this complex PROPDEF
-                        return None
-                    else:
-                        # It's <> (empty/false), treat as default value
-                        default_value = None
+                    self.advance()  # skip > - this is <> for default value
+                    default_value = None
+                    # Now check for pattern definitions
+                    while self.current_token.type == TokenType.LPAREN:
+                        pattern = self._parse_propdef_pattern()
+                        if pattern:
+                            patterns.append(pattern)
                 else:
-                    # It's something else - parse as expression
-                    # Put back the < we consumed by parsing from current state
+                    # It's something else - parse as a form expression
+                    # We've already consumed <, so parse the rest of the form
                     default_value = self.parse_form(line, col)
             else:
                 default_value = self.parse_expression()
 
-        return PropdefNode(name, default_value, line, col)
+        return PropdefNode(name, default_value, patterns, line, col)
+
+    def _parse_propdef_pattern(self):
+        """Parse a single PROPDEF pattern specification.
+
+        Format: (PROP_NAME INPUT... = OUTPUT...)
+
+        Returns a tuple (input_elements, output_elements) where:
+        - input_elements: list of (type, value, var_type) tuples
+        - output_elements: list of AST nodes representing output encoding
+        """
+        if self.current_token.type != TokenType.LPAREN:
+            return None
+
+        self.advance()  # skip (
+
+        input_elements = []
+        output_elements = []
+        in_output = False
+
+        while self.current_token.type != TokenType.RPAREN and self.current_token.type != TokenType.EOF:
+            if self.current_token.type == TokenType.ATOM:
+                atom_val = self.current_token.value
+                if atom_val == '=':
+                    # Switch to output parsing
+                    in_output = True
+                    self.advance()
+                    continue
+
+                if in_output:
+                    # In output section, atoms are typically numbers or constants
+                    # Try to parse as integer
+                    try:
+                        output_elements.append(('LENGTH', int(atom_val)))
+                    except ValueError:
+                        # It's a constant reference or something else
+                        output_elements.append(('ATOM', atom_val))
+                    self.advance()
+                else:
+                    # In input section
+                    # Check for VAR:TYPE pattern (like FEET:FIX)
+                    if ':' in atom_val:
+                        parts = atom_val.split(':', 1)
+                        var_name = parts[0]
+                        var_type = parts[1] if len(parts) > 1 else 'FIX'
+                        input_elements.append(('CAPTURE', var_name, var_type))
+                    else:
+                        # Literal atom
+                        input_elements.append(('LITERAL', atom_val, None))
+                    self.advance()
+
+            elif self.current_token.type == TokenType.STRING:
+                str_val = self.current_token.value
+                if not in_output:
+                    # In input section, strings are modifiers like "OPT" or "MANY"
+                    input_elements.append(('MODIFIER', str_val, None))
+                else:
+                    # In output section, strings like "MANY" indicate repeated output
+                    output_elements.append(('MODIFIER', str_val))
+                self.advance()
+
+            elif self.current_token.type == TokenType.NUMBER:
+                if in_output:
+                    output_elements.append(('LENGTH', self.current_token.value))
+                else:
+                    input_elements.append(('LITERAL', self.current_token.value, None))
+                self.advance()
+
+            elif self.current_token.type == TokenType.LANGLE:
+                # Parse a form like <WORD .FEET> or <BYTE .INCHES> or <>
+                self.advance()  # skip <
+                if self.current_token.type == TokenType.RANGLE:
+                    # Empty form <> - means auto-calculate length
+                    output_elements.append(('AUTO_LENGTH', None))
+                    self.advance()  # skip >
+                elif self.current_token.type == TokenType.ATOM:
+                    form_type = self.current_token.value
+                    self.advance()
+                    form_args = []
+                    while self.current_token.type != TokenType.RANGLE and self.current_token.type != TokenType.EOF:
+                        if self.current_token.type == TokenType.LOCAL_VAR:
+                            # Local variable reference like .FEET
+                            form_args.append(('VAR', self.current_token.value))
+                            self.advance()
+                        elif self.current_token.type == TokenType.PERIOD:
+                            # Standalone period followed by atom
+                            self.advance()
+                            if self.current_token.type == TokenType.ATOM:
+                                form_args.append(('VAR', self.current_token.value))
+                                self.advance()
+                        elif self.current_token.type == TokenType.ATOM:
+                            form_args.append(('ATOM', self.current_token.value))
+                            self.advance()
+                        elif self.current_token.type == TokenType.NUMBER:
+                            form_args.append(('NUMBER', self.current_token.value))
+                            self.advance()
+                        else:
+                            self.advance()  # skip unknown tokens
+                    if self.current_token.type == TokenType.RANGLE:
+                        self.advance()  # skip >
+                    output_elements.append(('FORM', form_type, form_args))
+                else:
+                    # Skip malformed form
+                    while self.current_token.type != TokenType.RANGLE and self.current_token.type != TokenType.EOF:
+                        self.advance()
+                    if self.current_token.type == TokenType.RANGLE:
+                        self.advance()
+
+            elif self.current_token.type == TokenType.LPAREN:
+                # Nested parentheses in output - constant definition like (HEIGHTSIZE 3)
+                self.advance()  # skip (
+                const_name = None
+                const_value = None
+                if self.current_token.type == TokenType.ATOM:
+                    const_name = self.current_token.value
+                    self.advance()
+                    # The value can be a number or a form like <WORD .FEET>
+                    if self.current_token.type == TokenType.NUMBER:
+                        const_value = ('NUMBER', self.current_token.value)
+                        self.advance()
+                    elif self.current_token.type == TokenType.LANGLE:
+                        # Parse form for constant value
+                        self.advance()  # skip <
+                        if self.current_token.type == TokenType.ATOM:
+                            form_type = self.current_token.value
+                            self.advance()
+                            form_args = []
+                            while self.current_token.type != TokenType.RANGLE and self.current_token.type != TokenType.EOF:
+                                if self.current_token.type == TokenType.LOCAL_VAR:
+                                    form_args.append(('VAR', self.current_token.value))
+                                    self.advance()
+                                elif self.current_token.type == TokenType.PERIOD:
+                                    self.advance()
+                                    if self.current_token.type == TokenType.ATOM:
+                                        form_args.append(('VAR', self.current_token.value))
+                                        self.advance()
+                                elif self.current_token.type == TokenType.ATOM:
+                                    form_args.append(('ATOM', self.current_token.value))
+                                    self.advance()
+                                else:
+                                    self.advance()
+                            if self.current_token.type == TokenType.RANGLE:
+                                self.advance()
+                            const_value = ('FORM', form_type, form_args)
+                        else:
+                            while self.current_token.type != TokenType.RANGLE and self.current_token.type != TokenType.EOF:
+                                self.advance()
+                            if self.current_token.type == TokenType.RANGLE:
+                                self.advance()
+                # Skip to closing paren
+                while self.current_token.type != TokenType.RPAREN and self.current_token.type != TokenType.EOF:
+                    self.advance()
+                if self.current_token.type == TokenType.RPAREN:
+                    self.advance()
+                if const_name:
+                    output_elements.append(('CONSTANT', const_name, const_value))
+
+            else:
+                # Skip unknown token types
+                self.advance()
+
+        if self.current_token.type == TokenType.RPAREN:
+            self.advance()  # skip )
+
+        return (input_elements, output_elements)
 
     def parse_defmac(self, line: int, col: int):
         """Parse DEFMAC macro definition.

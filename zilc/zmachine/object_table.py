@@ -203,6 +203,7 @@ class ObjectTable:
 
         Property values can be:
         - ByteValue: stored as 1 byte (for direction exits read via GETB)
+        - bytes: already encoded (from PROPDEF pattern matching)
         - Single integers: stored as 2 bytes (words) for GET compatibility
         - Strings (encoded and stored)
         - Lists of integers
@@ -214,6 +215,9 @@ class ObjectTable:
         if isinstance(value, ByteValue):
             # Store as single byte (for direction exits)
             return bytes([value.value & 0xFF])
+        elif isinstance(value, bytes):
+            # Already encoded (from PROPDEF pattern matching)
+            return value
         elif isinstance(value, int):
             # Always store single integers as 2-byte words (GET compatible)
             # This matches ZIL/ZILF behavior where default property values are words

@@ -263,14 +263,39 @@ class ConstantNode(ASTNode):
 
 
 class PropdefNode(ASTNode):
-    """PROPDEF property definition."""
+    """PROPDEF property definition.
+
+    Supports both simple and complex formats:
+    - Simple: <PROPDEF NAME DEFAULT>
+    - Complex: <PROPDEF NAME <> (PATTERN1) (PATTERN2) ...>
+
+    Each pattern has the format:
+        (PROP_NAME INPUT... = OUTPUT...)
+    Where INPUT elements are:
+        - Literal atoms (must match exactly)
+        - VAR:TYPE captures (FIX, ATOM, ROOM, GLOBAL, etc.)
+        - "OPT" modifier (following elements are optional)
+        - "MANY" modifier (following elements can repeat)
+    And OUTPUT elements are:
+        - Number (property length in bytes)
+        - <> (auto-calculate length)
+        - <WORD .VAR> (encode as 2-byte word)
+        - <BYTE .VAR> (encode as 1-byte)
+        - <VOC .VAR TYPE> (encode as vocabulary word)
+        - <ROOM .VAR> (encode as room number)
+        - <GLOBAL .VAR> (encode as global variable reference)
+        - (CONST_NAME VALUE) (define a constant)
+    """
     def __init__(self, name: str, default_value: ASTNode = None,
-                 line: int = 0, column: int = 0):
+                 patterns: list = None, line: int = 0, column: int = 0):
         super().__init__(NodeType.PROPDEF, line, column)
         self.name = name
         self.default_value = default_value
+        self.patterns = patterns or []  # List of pattern tuples (input_elements, output_elements)
 
     def __repr__(self):
+        if self.patterns:
+            return f"Propdef({self.name}, patterns={len(self.patterns)})"
         return f"Propdef({self.name})"
 
 

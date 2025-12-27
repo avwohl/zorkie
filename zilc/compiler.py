@@ -2077,6 +2077,203 @@ class ZILCompiler:
                 for v in value:
                     validate_property_value(v, obj_name, prop_name)
 
+        # Build PROPDEF pattern lookup by property name
+        propdef_patterns = {}
+        for propdef in program.propdefs:
+            if propdef.patterns:
+                propdef_patterns[propdef.name] = propdef.patterns
+
+        # Helper to match property value against PROPDEF input pattern
+        def match_propdef_pattern(prop_values, input_pattern):
+            """Try to match property values against a PROPDEF input pattern.
+
+            Returns dict of captured variables if matched, None otherwise.
+            """
+            from .parser.ast_nodes import AtomNode, NumberNode
+
+            captures = {}
+            val_idx = 0
+            pat_idx = 0
+            in_opt = False
+            in_many = False
+            many_start_pat_idx = None
+            many_start_val_idx = None
+
+            while pat_idx < len(input_pattern):
+                elem_type, elem_val, elem_extra = input_pattern[pat_idx]
+
+                if elem_type == 'MODIFIER':
+                    if elem_val == 'OPT':
+                        in_opt = True
+                    elif elem_val == 'MANY':
+                        in_many = True
+                        many_start_pat_idx = pat_idx + 1
+                        many_start_val_idx = val_idx
+                    pat_idx += 1
+                    continue
+
+                if val_idx >= len(prop_values):
+                    if in_opt or in_many:
+                        # Optional/MANY elements can be missing
+                        pat_idx += 1
+                        continue
+                    return None  # No more values but pattern expects more
+
+                val = prop_values[val_idx]
+
+                if elem_type == 'LITERAL':
+                    # Must match exactly
+                    if isinstance(val, AtomNode):
+                        if val.value != elem_val:
+                            if in_opt:
+                                pat_idx += 1
+                                continue
+                            return None
+                    elif isinstance(val, NumberNode):
+                        if val.value != elem_val:
+                            if in_opt:
+                                pat_idx += 1
+                                continue
+                            return None
+                    else:
+                        if in_opt:
+                            pat_idx += 1
+                            continue
+                        return None
+                    val_idx += 1
+
+                elif elem_type == 'CAPTURE':
+                    var_name = elem_val
+                    var_type = elem_extra
+                    # Capture the value
+                    if isinstance(val, NumberNode):
+                        captures[var_name] = val.value
+                    elif isinstance(val, AtomNode):
+                        captures[var_name] = val.value
+                    else:
+                        captures[var_name] = val
+                    val_idx += 1
+
+                pat_idx += 1
+
+                # Handle MANY repetition
+                if in_many and pat_idx >= len(input_pattern) and val_idx < len(prop_values):
+                    # More values to process, loop back to MANY start
+                    pat_idx = many_start_pat_idx
+
+            # All pattern elements matched, check if all values consumed
+            if val_idx < len(prop_values) and not in_many:
+                return None
+
+            return captures
+
+        # Helper to encode property using PROPDEF output pattern
+        def encode_propdef_output(captures, output_pattern, obj_name_to_num):
+            """Encode property value using PROPDEF output pattern.
+
+            Returns a list of bytes representing the encoded property.
+            """
+            result = bytearray()
+            defined_constants = {}  # Constants defined in this encoding
+            length_placeholder_pos = None
+
+            for elem in output_pattern:
+                elem_type = elem[0]
+
+                if elem_type == 'LENGTH':
+                    # Fixed length indicator - skip for now, length is implicit
+                    pass
+
+                elif elem_type == 'AUTO_LENGTH':
+                    # Auto-calculate length - position to patch later
+                    length_placeholder_pos = len(result)
+
+                elif elem_type == 'FORM':
+                    form_type = elem[1]
+                    form_args = elem[2]
+
+                    if form_type == 'WORD':
+                        # Encode as 2-byte word
+                        for arg_type, arg_val in form_args:
+                            if arg_type == 'VAR':
+                                val = captures.get(arg_val, 0)
+                                if isinstance(val, int):
+                                    result.extend([(val >> 8) & 0xFF, val & 0xFF])
+                                else:
+                                    result.extend([0, 0])
+
+                    elif form_type == 'BYTE':
+                        # Encode as 1-byte
+                        for arg_type, arg_val in form_args:
+                            if arg_type == 'VAR':
+                                val = captures.get(arg_val, 0)
+                                if isinstance(val, int):
+                                    result.append(val & 0xFF)
+                                else:
+                                    result.append(0)
+
+                    elif form_type == 'ROOM':
+                        # Encode as room number (word)
+                        for arg_type, arg_val in form_args:
+                            if arg_type == 'VAR':
+                                room_name = captures.get(arg_val, '')
+                                room_num = obj_name_to_num.get(room_name, 0)
+                                result.extend([(room_num >> 8) & 0xFF, room_num & 0xFF])
+
+                    elif form_type == 'OBJECT':
+                        # Encode as object number (word)
+                        for arg_type, arg_val in form_args:
+                            if arg_type == 'VAR':
+                                obj_name = captures.get(arg_val, '')
+                                obj_num = obj_name_to_num.get(obj_name, 0)
+                                result.extend([(obj_num >> 8) & 0xFF, obj_num & 0xFF])
+
+                    elif form_type == 'GLOBAL':
+                        # Encode as global variable reference
+                        for arg_type, arg_val in form_args:
+                            if arg_type == 'VAR':
+                                # This would need access to global table
+                                result.extend([0, 0])
+
+                elif elem_type == 'CONSTANT':
+                    # Define a constant (for later use)
+                    const_name = elem[1]
+                    const_val = elem[2]
+                    if const_val:
+                        if const_val[0] == 'NUMBER':
+                            defined_constants[const_name] = const_val[1]
+                        elif const_val[0] == 'FORM':
+                            # Constant offset - calculate based on current position
+                            defined_constants[const_name] = len(result)
+
+                elif elem_type == 'MODIFIER':
+                    # "MANY" in output - handled by caller
+                    pass
+
+            return bytes(result), defined_constants
+
+        # Helper to apply PROPDEF pattern to property value
+        def apply_propdef(prop_name, prop_values, obj_name_to_num):
+            """Try to apply PROPDEF pattern to encode property value.
+
+            Returns (encoded_bytes, constants) if matched, (None, None) otherwise.
+            """
+            if prop_name not in propdef_patterns:
+                return None, None
+
+            patterns = propdef_patterns[prop_name]
+            for input_pattern, output_pattern in patterns:
+                # Skip the first element of input_pattern if it's the property name
+                if input_pattern and input_pattern[0][0] == 'LITERAL' and input_pattern[0][1] == prop_name:
+                    input_pattern = input_pattern[1:]
+
+                captures = match_propdef_pattern(prop_values, input_pattern)
+                if captures is not None:
+                    encoded, constants = encode_propdef_output(captures, output_pattern, obj_name_to_num)
+                    return encoded, constants
+
+            return None, None
+
         # Helper to extract property number and value
         def extract_properties(obj_node, obj_idx):
             """Extract properties from object node."""
@@ -2143,6 +2340,18 @@ class ZILCompiler:
                         if exit_value is not None:
                             # Wrap in ByteValue so it's stored as single byte (for GETB access)
                             props[prop_num] = ByteValue(exit_value)
+                    # Check if this property has a PROPDEF pattern
+                    elif isinstance(value, list) and key in propdef_patterns:
+                        # Try to apply PROPDEF pattern matching
+                        encoded, constants = apply_propdef(key, value, obj_name_to_num)
+                        if encoded is not None:
+                            props[prop_num] = encoded
+                            # Store any constants defined by the pattern
+                            for const_name, const_val in constants.items():
+                                codegen.constants[const_name] = const_val
+                        else:
+                            # Pattern didn't match, fall through to default handling
+                            props[prop_num] = value
                     # Extract value from AST node
                     elif hasattr(value, 'value'):
                         props[prop_num] = value.value

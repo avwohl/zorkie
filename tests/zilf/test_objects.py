@@ -220,7 +220,6 @@ class TestAttributeNumbering:
 class TestPropdef:
     """Tests for PROPDEF and PROPSPEC."""
 
-    @pytest.mark.xfail(reason="PROPDEF pattern matching not implemented")
     def test_propdef_basic_pattern(self):
         """Test basic PROPDEF pattern matching."""
         AssertGlobals(
@@ -233,7 +232,6 @@ class TestPropdef:
             "<=? <GETB <GETPT ,GIANT ,P?HEIGHT> 2> 8>"
         )
 
-    @pytest.mark.xfail(reason="PROPDEF pattern matching not implemented")
     def test_propdef_opt(self):
         """Test PROPDEF with optional elements."""
         AssertGlobals(
