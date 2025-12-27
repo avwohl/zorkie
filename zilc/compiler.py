@@ -1710,12 +1710,42 @@ class ZILCompiler:
                 if action_routine in actions:
                     preactions[preaction_routine] = actions[action_routine]
 
+        # Collect prepositions from SYNTAX patterns
+        # Prepositions are words that appear between OBJECT slots
+        prepositions = {}  # word -> PR? number
+        prep_num = 1  # Start from 1
+
+        for syntax_def in program.syntax:
+            if not syntax_def.pattern:
+                continue
+
+            # Find prepositions: words between OBJECT slots
+            # e.g., ["PUT", "OBJECT", "IN", "OBJECT"] -> "IN" is a preposition
+            in_object = False
+            for word in syntax_def.pattern:
+                if not isinstance(word, str):
+                    continue
+                word_upper = word.upper()
+                if word_upper == 'OBJECT':
+                    in_object = True
+                elif in_object and word_upper not in ('=', 'OBJECT'):
+                    # This is a preposition
+                    if word_upper not in prepositions:
+                        prepositions[word_upper] = prep_num
+                        prep_num += 1
+
+        # Add PR? constants to verb_constants
+        for prep_word, prep_number in prepositions.items():
+            const_name = f'PR?{prep_word}'
+            verb_constants[const_name] = prep_number
+
         # Store for later use during code generation
         self._action_table = {
             'actions': [(num, name) for name, num in sorted(actions.items(), key=lambda x: x[1])],
             'preactions': [(num, name) for name, num in sorted(preactions.items(), key=lambda x: x[1])],
             'verb_constants': verb_constants,
             'action_to_routine': {v: k for k, v in actions.items()},
+            'prepositions': prepositions,  # word -> number mapping
         }
 
         return self._action_table

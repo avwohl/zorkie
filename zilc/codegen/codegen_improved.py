@@ -594,12 +594,15 @@ class ImprovedCodeGenerator:
         return bytes(self.code)
 
     def _setup_action_table_globals(self):
-        """Reserve globals for ACTIONS and PREACTIONS tables."""
+        """Reserve globals for ACTIONS, PREACTIONS, and PREPOSITIONS tables."""
         if 'actions' in self.action_table and self.action_table['actions']:
             self.globals['ACTIONS'] = self.next_global
             self.next_global += 1
         if 'preactions' in self.action_table and self.action_table['preactions']:
             self.globals['PREACTIONS'] = self.next_global
+            self.next_global += 1
+        if 'prepositions' in self.action_table and self.action_table['prepositions']:
+            self.globals['PREPOSITIONS'] = self.next_global
             self.next_global += 1
 
     def _compile_global_table_node(self, global_name: str, table_node: 'TableNode'):
@@ -948,6 +951,48 @@ class ImprovedCodeGenerator:
             # Link ACTIONS global to the table using placeholder
             if 'ACTIONS' in self.globals:
                 self.global_values['ACTIONS'] = 0xFF00 | table_index
+
+        # Generate PREPOSITIONS table if we have prepositions
+        if 'prepositions' in self.action_table and self.action_table['prepositions']:
+            prepositions = self.action_table['prepositions']
+
+            # Table format: [count, word1, prep1, word2, prep2, ...]
+            # count = number of word/prep pairs
+            table_data = bytearray()
+
+            # Write count (number of entries)
+            count = len(prepositions)
+            table_data.append((count >> 8) & 0xFF)
+            table_data.append(count & 0xFF)
+
+            # Write word/prep pairs - sorted by prep number for consistency
+            for word, prep_num in sorted(prepositions.items(), key=lambda x: x[1]):
+                # Word address placeholder (0xFB00 | index)
+                placeholder_idx = self._next_vocab_placeholder_index
+                self._vocab_placeholders[placeholder_idx] = word.lower()
+                self._next_vocab_placeholder_index += 1
+                placeholder_val = 0xFB00 | placeholder_idx
+
+                table_data.append((placeholder_val >> 8) & 0xFF)
+                table_data.append(placeholder_val & 0xFF)
+
+                # Prep number
+                table_data.append((prep_num >> 8) & 0xFF)
+                table_data.append(prep_num & 0xFF)
+
+            # Track table offset
+            table_index = len(self.tables)
+            self.table_offsets[table_index] = self._table_data_size
+            self._table_data_size += len(table_data)
+
+            # Store table
+            table_name = f'_PREPOSITIONS_TABLE_{self.table_counter}'
+            self.table_counter += 1
+            self.tables.append((table_name, bytes(table_data), True))
+
+            # Link PREPOSITIONS global to the table (global was reserved in _setup_action_table_globals)
+            if 'PREPOSITIONS' in self.globals:
+                self.global_values['PREPOSITIONS'] = 0xFF00 | table_index
 
     def get_routine_fixups(self) -> List[Tuple[int, int]]:
         """Get routine call fixups for the assembler to resolve.
