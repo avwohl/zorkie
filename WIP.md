@@ -20,11 +20,15 @@ Focus areas for next session:
 ## Zork1 Compilation Status
 - **Zork1 compiles** to a 103KB story file
 - **Runtime status**: Hangs on startup (no output)
-- **Root cause**: Missing PREPOSITIONS table generation (requires NEW-PARSER? implementation)
-- **Remaining warnings**: ON-LAKE, IN-LAKE (missing room definitions), PREPOSITIONS (missing global)
-- **Previous issues (FIXED)**: Illegal opcode, backward branch offsets, ACT? constants
+- **Root cause**: Unknown - parser/initialization issue (not PREPOSITIONS, that's now implemented)
+- **Remaining warnings**: ON-LAKE, IN-LAKE only (missing room definitions in source)
+- **Previous issues (FIXED)**: Illegal opcode, backward branch offsets, ACT? constants, PREPOSITIONS
 
 ## Recent Changes (2025-12-27)
+- **PREPOSITIONS table generation** - Added automatic table from SYNTAX definitions
+  - Extracts prepositions from SYNTAX patterns (words between OBJECT slots)
+  - Generates PR?PREP constants for each unique preposition
+  - Creates PREPOSITIONS table for parser PREP-FIND routine
 - **ACT? constant generation** - Added automatic ACT?ACTION constants from SYNTAX definitions
   - E.g., V-WALK action creates ACT?WALK constant
   - Eliminates unknown constant warnings for ACT?WALK, ACT?FIND, etc.
