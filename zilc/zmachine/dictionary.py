@@ -20,12 +20,16 @@ class Dictionary:
         self.words: Set[str] = set()
 
         # Track word types (for parser)
-        self.word_types: Dict[str, str] = {}  # word -> type (noun, verb, adj, etc.)
+        # Each word can have multiple types (e.g., both noun and adjective if they collide)
+        self.word_types: Dict[str, Set[str]] = {}  # word -> set of types
         self.word_objects: Dict[str, int] = {}  # word -> object number (for nouns)
 
         # Track verb synonyms: synonym_word -> main_verb_word
         # Verb synonyms share the same data bytes as their main verb
         self.verb_synonyms: Dict[str, str] = {}
+
+        # Collision warnings generated during build
+        self.collision_warnings: List[tuple] = []  # List of (code, message)
 
     def add_word(self, word: str, word_type: str = 'unknown', obj_num: int = None):
         """Add a word to the dictionary with optional type and object reference.
@@ -39,7 +43,9 @@ class Dictionary:
         self.words.add(word_lower)
 
         if word_type:
-            self.word_types[word_lower] = word_type
+            if word_lower not in self.word_types:
+                self.word_types[word_lower] = set()
+            self.word_types[word_lower].add(word_type)
 
         if obj_num is not None:
             self.word_objects[word_lower] = obj_num
@@ -88,9 +94,67 @@ class Dictionary:
         # Track the synonym relationship
         self.verb_synonyms[synonym_lower] = main_lower
 
+    def add_direction(self, word: str, prop_num: int):
+        """Add a direction word with its property number.
+
+        Direction words store their property number in the data bytes
+        so the parser can map directions to object properties.
+
+        Args:
+            word: The direction word (e.g., 'NORTH')
+            prop_num: The property number for this direction
+        """
+        word_lower = word.lower()
+        self.words.add(word_lower)
+        if word_lower not in self.word_types:
+            self.word_types[word_lower] = set()
+        self.word_types[word_lower].add('direction')
+        self.word_objects[word_lower] = prop_num
+
+    def _compute_type_byte(self, word_types: Set[str]) -> int:
+        """Compute the type byte for a set of word types.
+
+        Args:
+            word_types: Set of word types (noun, verb, adjective, etc.)
+
+        Returns:
+            The type byte with all applicable flags set
+        """
+        type_byte = 0
+        first_set = False
+
+        for word_type in word_types:
+            if word_type in ('noun', 'synonym'):
+                type_byte |= 0x80  # Object = 128
+            elif word_type == 'verb':
+                type_byte |= 0x40  # Verb = 64
+                if not first_set:
+                    type_byte |= 0x01  # VerbFirst = 1
+                    first_set = True
+            elif word_type in ('adjective', 'adj'):
+                type_byte |= 0x20  # Adjective = 32
+                if not first_set:
+                    type_byte |= 0x02  # AdjectiveFirst = 2
+                    first_set = True
+            elif word_type in ('direction', 'dir'):
+                type_byte |= 0x10  # Direction = 16
+                if not first_set:
+                    type_byte |= 0x03  # DirectionFirst = 3
+                    first_set = True
+            elif word_type in ('preposition', 'prep'):
+                type_byte |= 0x08  # Preposition = 8
+            elif word_type == 'buzz':
+                type_byte |= 0x04  # Buzzword = 4
+            elif word_type != 'unknown':
+                print(f"[dictionary] Warning: Unrecognized word type '{word_type}' - using no flags",
+                      file=sys.stderr)
+
+        return type_byte
+
     def build(self) -> bytes:
         """Build dictionary bytes."""
         result = bytearray()
+        self.collision_warnings = []  # Reset warnings
 
         # Number of word separators
         result.append(len(self.separators))
@@ -107,63 +171,69 @@ class Dictionary:
         entry_length = text_bytes + data_bytes
         result.append(entry_length)
 
-        # Deduplicate by encoded form (not just string form)
+        # Group words by encoded form (to detect collisions)
         # In V3, "bench" and "bench-pseudo" encode to same 6 z-characters
-        seen_encoded = {}
-        unique_words = []
+        encoded_groups: Dict[tuple, List[str]] = {}
         for word in sorted(self.words):
             encoded = tuple(self.encoder.encode_dictionary_word(word))
-            if encoded not in seen_encoded:
-                seen_encoded[encoded] = word
-                unique_words.append(word)
+            if encoded not in encoded_groups:
+                encoded_groups[encoded] = []
+            encoded_groups[encoded].append(word)
+
+        # Detect collisions and merge types
+        merged_types: Dict[tuple, Set[str]] = {}
+        unique_words = []  # First word of each encoded group
+        for encoded, words in sorted(encoded_groups.items(), key=lambda x: x[1][0]):
+            first_word = words[0]
+            unique_words.append(first_word)
+
+            # Merge types from all colliding words
+            all_types: Set[str] = set()
+            for word in words:
+                word_types = self.word_types.get(word, set())
+                all_types.update(word_types)
+            merged_types[encoded] = all_types
+
+            # Generate collision warnings if multiple words collide
+            if len(words) > 1:
+                colliding = ", ".join(words)
+                self.collision_warnings.append(
+                    ("ZIL0310", f"Words collide (encode to same dictionary entry): {colliding}")
+                )
+                # Check if they have different parts of speech
+                type_sets = [self.word_types.get(w, set()) for w in words]
+                if len(type_sets) > 1 and any(t != type_sets[0] for t in type_sets[1:]):
+                    self.collision_warnings.append(
+                        ("ZIL0311", f"Colliding words have different parts of speech: {colliding}")
+                    )
 
         result.extend(struct.pack('>H', len(unique_words)))
 
         # Encode and add words
         for word in unique_words:
+            encoded_tuple = tuple(self.encoder.encode_dictionary_word(word))
             encoded = self.encoder.encode_dictionary_word(word)
             for w in encoded:
                 result.extend(struct.pack('>H', w))
 
             # Add 3 data bytes for each entry
-            # Byte 1: lexical type flags
+            # Byte 1: lexical type flags (merged from all colliding words)
             # Bytes 2-3: parser info (verb number, etc.)
-            word_type = self.word_types.get(word, 'unknown')
-
-            # Set type flags (ZILF PartOfSpeech format)
-            # Main flags: Object=128, Verb=64, Adjective=32, Direction=16, Preposition=8, Buzzword=4
-            # First flags (bits 0-1): VerbFirst=1, AdjectiveFirst=2, DirectionFirst=3
-            type_byte = 0
-            if word_type == 'noun':
-                type_byte |= 0x80  # Object = 128
-            elif word_type == 'verb':
-                type_byte |= 0x40  # Verb = 64
-                type_byte |= 0x01  # VerbFirst = 1
-            elif word_type in ('adjective', 'adj'):
-                type_byte |= 0x20  # Adjective = 32
-                type_byte |= 0x02  # AdjectiveFirst = 2
-            elif word_type in ('direction', 'dir'):
-                type_byte |= 0x10  # Direction = 16
-                type_byte |= 0x03  # DirectionFirst = 3
-            elif word_type in ('preposition', 'prep'):
-                type_byte |= 0x08  # Preposition = 8
-            elif word_type == 'buzz':
-                type_byte |= 0x04  # Buzzword = 4
-            elif word_type == 'synonym':
-                type_byte |= 0x80  # Synonym words act as nouns (Object)
-            elif word_type != 'unknown':
-                # Warn about unrecognized word types (but not 'unknown' which is the default)
-                print(f"[dictionary] Warning: Unrecognized word type '{word_type}' for word '{word}' - using no flags",
-                      file=sys.stderr)
-
+            word_types = merged_types.get(encoded_tuple, set())
+            type_byte = self._compute_type_byte(word_types)
             result.append(type_byte)
 
-            # Bytes 2-3: additional parser data
-            # For nouns, this could be the object number
-            # For verbs, this could be the verb number
-            # For now, use 0 (parser will rely on SYNTAX tables)
+            # Bytes 5-6 in V3 (after 4-byte encoded word + 1 type byte):
+            # For direction words: byte 5 = property number, byte 6 = 0
+            # For nouns: bytes 5-6 = object number (big-endian)
+            # For verbs: bytes 5-6 = verb number or 0
             obj_num = self.word_objects.get(word, 0)
-            result.extend(struct.pack('>H', obj_num & 0xFFFF))
+            if 'direction' in word_types or 'dir' in word_types:
+                # Direction property number goes in byte 5 directly
+                result.append(obj_num & 0xFF)
+                result.append(0)
+            else:
+                result.extend(struct.pack('>H', obj_num & 0xFFFF))
 
         return bytes(result)
 
@@ -222,7 +292,9 @@ class Dictionary:
         """Get byte offsets for all words in the dictionary.
 
         Returns:
-            Dict mapping word (lowercase) to byte offset within dictionary data
+            Dict mapping word (lowercase) to byte offset within dictionary data.
+            Includes all words added, even those that encode to the same entry
+            (words with the same encoding share the same offset).
         """
         offsets = {}
 
@@ -235,15 +307,25 @@ class Dictionary:
         entry_length = text_bytes + data_bytes
 
         # Get sorted unique words (same as in build())
-        seen_encoded = {}
+        # Track which words encode to the same entry
+        seen_encoded = {}  # encoded tuple -> (first_word, offset_idx)
         unique_words = []
         for w in sorted(self.words):
             encoded = tuple(self.encoder.encode_dictionary_word(w))
             if encoded not in seen_encoded:
-                seen_encoded[encoded] = w
+                seen_encoded[encoded] = (w, len(unique_words))
                 unique_words.append(w)
 
+        # First assign offsets to unique words
         for idx, word in enumerate(unique_words):
             offsets[word] = header_size + idx * entry_length
+
+        # Then add all other words that map to the same encoded form
+        for w in self.words:
+            if w not in offsets:
+                encoded = tuple(self.encoder.encode_dictionary_word(w))
+                if encoded in seen_encoded:
+                    _, offset_idx = seen_encoded[encoded]
+                    offsets[w] = header_size + offset_idx * entry_length
 
         return offsets

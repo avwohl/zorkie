@@ -213,7 +213,6 @@ class TestOldParser:
             .in_v3() \
             .gives_number(str(PartOfSpeech.NONE))
 
-    @pytest.mark.xfail(reason="Word collision merging not implemented")
     def test_colliding_words_should_be_merged(self):
         """Test that colliding words are merged with warnings."""
         AssertGlobals(
@@ -309,7 +308,6 @@ class TestNewParser:
             .in_v3() \
             .gives_number("12")
 
-    @pytest.mark.xfail(reason="NEW-PARSER? verb data not implemented")
     def test_new_parser_p_verbs_should_have_verb_data(self):
         """Test NEW-PARSER? verbs have verb data."""
         AssertGlobals(

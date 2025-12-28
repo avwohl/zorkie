@@ -44,6 +44,9 @@ class ImprovedCodeGenerator:
         self.objects: Dict[str, int] = {}  # Object name -> number
         self.interrupts: Dict[str, int] = {}  # Interrupt name -> structure address
 
+        # DEFINE-GLOBALS entries: name -> (table_global_name, offset, is_byte)
+        self.define_globals_entries: Dict[str, tuple] = {}
+
         # Add pre-scanned symbols (flags, properties, parser constants)
         # Track defined flags for ZIL0211 warning
         self.defined_flags: set = set()
@@ -2420,6 +2423,10 @@ class ImprovedCodeGenerator:
         elif op_name == 'REST':
             return self.gen_rest(form.operands)
 
+        # DEFINE-GLOBALS accessor - check before routine calls
+        elif op_name in self.define_globals_entries:
+            return self.gen_define_globals_access(op_name, form.operands)
+
         # Routine calls - check if it's a routine name
         elif isinstance(form.operator, AtomNode):
             if form.operator.value in self.routines or form.operator.value.isupper():
@@ -3204,9 +3211,17 @@ class ImprovedCodeGenerator:
                         args.append(operands[i])
                     # Expand the token with substituted arguments
                     expanded = self._expand_tell_token(token_def.expansion, args)
-                    # Generate code for the expanded form
-                    token_code = self.generate_form(expanded)
-                    code.extend(token_code)
+                    # Generate code for the expanded form(s)
+                    # Handle SpliceResultNode - generate code for each item
+                    from ..parser.ast_nodes import SpliceResultNode
+                    if isinstance(expanded, SpliceResultNode):
+                        for item in expanded.items:
+                            if isinstance(item, FormNode):
+                                token_code = self.generate_form(item)
+                                code.extend(token_code)
+                    elif isinstance(expanded, FormNode):
+                        token_code = self.generate_form(expanded)
+                        code.extend(token_code)
                     i += 1
 
                 else:
@@ -3329,6 +3344,7 @@ class ImprovedCodeGenerator:
 
     def _substitute_tell_args(self, node: ASTNode, arg_map: Dict[str, ASTNode]) -> ASTNode:
         """Recursively substitute .X, .Y, .Z, .W in a node."""
+        from ..parser.ast_nodes import SpliceResultNode
         if isinstance(node, LocalVarNode):
             # Check if this is one of our arg placeholders
             if node.name.upper() in arg_map:
@@ -3339,6 +3355,10 @@ class ImprovedCodeGenerator:
             new_operands = [self._substitute_tell_args(op, arg_map) for op in node.operands]
             new_form = FormNode(node.operator, new_operands, node.line, node.column)
             return new_form
+        elif isinstance(node, SpliceResultNode):
+            # Recursively substitute in each item of the splice
+            new_items = [self._substitute_tell_args(item, arg_map) for item in node.items]
+            return SpliceResultNode(new_items, node.line, node.column)
         else:
             # Return unchanged
             return node
@@ -7046,7 +7066,7 @@ class ImprovedCodeGenerator:
         """Generate N=? / NEQUAL? (not equal).
 
         <N=? a b> tests if a != b.
-        Implemented as inverted JE (branch on false).
+        Pushes 1 if NOT equal, 0 otherwise.
 
         Args:
             operands[0]: First value
@@ -7056,18 +7076,101 @@ class ImprovedCodeGenerator:
             bytes: Z-machine code
         """
         if len(operands) < 2:
-            return b''
+            return bytes([0x14, 0x00, 0x00, 0x00])  # Push 0 for malformed call
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        # JE with inverted branch (branch on false for !=)
-        opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Branch on false (inverted)
+        # Evaluate first operand
+        first_op = operands[0]
+        if isinstance(first_op, FormNode):
+            expr_code = self.generate_form(first_op)
+            code.extend(expr_code)
+            op1_type = 1  # Variable (stack)
+            op1_val = 0   # Stack
+        elif isinstance(first_op, CondNode):
+            expr_code = self.generate_cond(first_op)
+            code.extend(expr_code)
+            op1_type = 1
+            op1_val = 0
+        else:
+            op1_type, op1_val = self._get_operand_type_and_value(first_op)
+
+        # Evaluate second operand
+        second_op = operands[1]
+        if isinstance(second_op, FormNode):
+            expr_code = self.generate_form(second_op)
+            code.extend(expr_code)
+            op2_type = 1  # Variable (stack)
+            op2_val = 0   # Stack
+        elif isinstance(second_op, CondNode):
+            expr_code = self.generate_cond(second_op)
+            code.extend(expr_code)
+            op2_type = 1
+            op2_val = 0
+        else:
+            op2_type, op2_val = self._get_operand_type_and_value(second_op)
+
+        # Check if we need large constant encoding
+        needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
+        needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
+
+        if needs_large1 or needs_large2:
+            # Use VAR form JE for large constants
+            code.append(0xC1)  # VAR form 2OP, opcode JE (0x01)
+
+            # Build type byte
+            type1 = 0b00 if needs_large1 else (0b01 if op1_type == 0 else 0b10)
+            type2 = 0b00 if needs_large2 else (0b01 if op2_type == 0 else 0b10)
+            types_byte = (type1 << 6) | (type2 << 4) | 0x0F  # 0x0F = omit, omit
+            code.append(types_byte)
+
+            # Operand 1
+            if needs_large1:
+                code.append((op1_val >> 8) & 0xFF)
+                code.append(op1_val & 0xFF)
+            else:
+                code.append(op1_val & 0xFF)
+
+            # Operand 2
+            if needs_large2:
+                code.append((op2_val >> 8) & 0xFF)
+                code.append(op2_val & 0xFF)
+            else:
+                code.append(op2_val & 0xFF)
+
+            # Branch on FALSE (not equal) to true case - offset 9 bytes forward
+            # For N=?, we want: if NOT equal, branch to push 1
+            false_case_size = 4 + 3  # ADD + JUMP
+            true_case_start = false_case_size + 1  # +1 for branch byte
+            # Branch byte: bit 7 = 0 (branch on false), bit 6 = 1 (short form)
+            code.append(0x40 | (true_case_start & 0x3F))  # branch on false, short
+        else:
+            # Standard 2OP long form for small operands
+            # JE op1 op2 ?~true (branch on false = not equal)
+            opcode = 0x01 | (op1_type << 6) | (op2_type << 5)
+            code.append(opcode)
+            code.append(op1_val & 0xFF)
+            code.append(op2_val & 0xFF)
+            # Branch on FALSE (not equal) to true case (offset 9 bytes forward)
+            # Branch byte: bit 7 = 0 (branch on false), bit 6 = 1 (short form)
+            code.append(0x49)  # 0100 1001 = branch on false, short, offset 9
+
+        # FALSE case (values ARE equal): ADD 0 0 -> stack (push 0)
+        code.append(0x14)  # ADD 2OP small small
+        code.append(0x00)
+        code.append(0x00)
+        code.append(0x00)  # Store to stack
+
+        # JUMP past true case (offset 6)
+        code.append(0x8C)  # JUMP
+        code.append(0x00)
+        code.append(0x06)  # offset 6
+
+        # TRUE case (values are NOT equal): ADD 0 1 -> stack (push 1)
+        code.append(0x14)
+        code.append(0x00)
+        code.append(0x01)
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -13614,6 +13717,31 @@ class ImprovedCodeGenerator:
                     code.append(op2_val & 0xFF)
                     # Branch byte will be added below
 
+            # Handle BTST (TEST) - bit test: branches if (value & mask) == mask
+            elif op_name == 'BTST':
+                if len(condition.operands) >= 2:
+                    # First, evaluate operands if they're expressions
+                    value_node = condition.operands[0]
+                    mask_node = condition.operands[1]
+
+                    # If value is a nested expression, evaluate it first
+                    if isinstance(value_node, FormNode):
+                        expr_code = self.generate_form(value_node)
+                        code.extend(expr_code)
+                        op1_type = 1  # Variable (stack)
+                        op1_val = 0   # Stack
+                    else:
+                        op1_type, op1_val = self._get_operand_type_and_value(value_node)
+
+                    op2_type, op2_val = self._get_operand_type_and_value(mask_node)
+
+                    # TEST is 2OP opcode 0x07
+                    opcode = 0x07 | (op1_type << 6) | (op2_type << 5)
+                    code.append(opcode)
+                    code.append(op1_val & 0xFF)
+                    code.append(op2_val & 0xFF)
+                    # Branch byte will be added below
+
             # Handle EQUAL? (JE) - variadic: tests if first equals ANY of the rest
             elif op_name in ('=', 'EQUAL?', '==?', '=?'):
                 if len(condition.operands) >= 2:
@@ -14622,6 +14750,111 @@ class ImprovedCodeGenerator:
                 code.append(op_vals[i] & 0xFF)
             else:  # Small constant or variable - 1 byte
                 code.append(op_vals[i] & 0xFF)
+
+        return bytes(code)
+
+    def gen_define_globals_access(self, name: str, operands: List[ASTNode]) -> bytes:
+        """Generate code for DEFINE-GLOBALS entry access.
+
+        When called with no operands, reads the value: <MY-WORD>
+        When called with one operand, writes the value: <MY-WORD 12345>
+
+        Args:
+            name: The entry name (e.g., 'MY-WORD')
+            operands: Empty for read, one operand for write
+
+        Returns:
+            bytes: Z-machine code for the access
+        """
+        if name not in self.define_globals_entries:
+            self._warn(f"Unknown DEFINE-GLOBALS entry '{name}'")
+            return b''
+
+        table_name, offset, is_byte = self.define_globals_entries[name]
+
+        code = bytearray()
+
+        # Get the table global variable number
+        if table_name not in self.globals:
+            self._warn(f"DEFINE-GLOBALS table '{table_name}' not found")
+            return b''
+
+        table_var = self.globals[table_name]
+
+        if len(operands) == 0:
+            # Read: Generate GETB or GET depending on entry size
+            if is_byte:
+                # LOADB table offset -> stack
+                # LOADB is 2OP opcode 0x10
+                code.append(0x10 | (1 << 6) | (0 << 5))  # var, small const
+                code.append(table_var)  # table global
+                code.append(offset)     # byte offset
+                code.append(0x00)       # store to stack
+            else:
+                # LOADW table word_offset -> stack
+                # LOADW is 2OP opcode 0x0F
+                # Word offset = byte_offset / 2
+                word_offset = offset // 2
+                code.append(0x0F | (1 << 6) | (0 << 5))  # var, small const
+                code.append(table_var)  # table global
+                code.append(word_offset)  # word offset
+                code.append(0x00)       # store to stack
+        elif len(operands) == 1:
+            # Write: Generate PUTB or PUT depending on entry size
+            op = operands[0]
+
+            # Evaluate the operand
+            if isinstance(op, FormNode):
+                inner_code = self.generate_form(op)
+                code.extend(inner_code)
+                op_type = 2  # variable
+                op_val = 0x00  # stack
+            else:
+                op_type, op_val = self._get_operand_type_and_value(op)
+
+            if is_byte:
+                # STOREB table offset value
+                # STOREB is VAR opcode 0xE2
+                code.append(0xE2)  # VAR form
+                # Type bytes: var(table) small(offset) type(value) omit
+                type_byte = (2 << 6) | (1 << 4) | (op_type << 2) | 3
+                code.append(type_byte)
+                code.append(table_var)  # table global
+                code.append(offset)     # byte offset
+                if op_type == 0:  # large constant
+                    code.append((op_val >> 8) & 0xFF)
+                    code.append(op_val & 0xFF)
+                else:
+                    code.append(op_val & 0xFF)
+            else:
+                # STOREW table word_offset value
+                # STOREW is VAR opcode 0xE1
+                word_offset = offset // 2
+                code.append(0xE1)  # VAR form
+                # Type bytes: var(table) small(offset) type(value) omit
+                type_byte = (2 << 6) | (1 << 4) | (op_type << 2) | 3
+                code.append(type_byte)
+                code.append(table_var)  # table global
+                code.append(word_offset)  # word offset
+                if op_type == 0:  # large constant
+                    code.append((op_val >> 8) & 0xFF)
+                    code.append(op_val & 0xFF)
+                else:
+                    code.append(op_val & 0xFF)
+
+            # Return the value that was stored (push to stack for chaining)
+            # ADD 0 value -> stack
+            code.append(0x14)  # ADD 2OP small small
+            if op_type == 0:  # large constant - need to re-push
+                code.append(0x00)
+                code.append(op_val & 0xFF)  # Just push low byte as workaround
+            else:
+                code.append(0x00)
+                code.append(op_val & 0xFF)
+            code.append(0x00)  # Store to stack
+        else:
+            self._warn(f"DEFINE-GLOBALS entry '{name}' called with {len(operands)} operands (expected 0 or 1)")
+            return b''
 
         return bytes(code)
 
