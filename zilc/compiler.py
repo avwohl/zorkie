@@ -1719,7 +1719,9 @@ class ZILCompiler:
                     preactions[preaction_routine] = actions[action_routine]
 
         # Collect prepositions from SYNTAX patterns
-        # Prepositions are words that appear between OBJECT slots
+        # Prepositions are non-verb words that appear in syntax patterns
+        # They can be BEFORE the first OBJECT (e.g., LOOK THROUGH OBJECT)
+        # or BETWEEN OBJECT slots (e.g., PUT OBJECT IN OBJECT)
         prepositions = {}  # word -> PR? number
         prep_num = 1  # Start from 1
 
@@ -1727,17 +1729,21 @@ class ZILCompiler:
             if not syntax_def.pattern:
                 continue
 
-            # Find prepositions: words between OBJECT slots
+            # Find prepositions: all words except the verb (first word) and OBJECT
+            # e.g., ["LOOK", "THROUGH", "OBJECT"] -> "THROUGH" is a preposition
             # e.g., ["PUT", "OBJECT", "IN", "OBJECT"] -> "IN" is a preposition
-            in_object = False
+            # e.g., ["PICK", "UP", "OBJECT", "WITH", "OBJECT"] -> "UP" and "WITH" are prepositions
+            first_word = True
             for word in syntax_def.pattern:
                 if not isinstance(word, str):
                     continue
                 word_upper = word.upper()
-                if word_upper == 'OBJECT':
-                    in_object = True
-                elif in_object and word_upper not in ('=', 'OBJECT'):
-                    # This is a preposition
+                if first_word:
+                    # Skip the verb (first word)
+                    first_word = False
+                    continue
+                if word_upper not in ('=', 'OBJECT'):
+                    # This is a preposition (or particle, treated the same)
                     if word_upper not in prepositions:
                         prepositions[word_upper] = prep_num
                         prep_num += 1

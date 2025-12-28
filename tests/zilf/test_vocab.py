@@ -92,7 +92,6 @@ class TestTCHARS:
 class TestPrepositions:
     """Tests for PREPOSITIONS table format."""
 
-    @pytest.mark.xfail(reason="PREPOSITIONS table format not implemented")
     def test_prepositions_noncompact_should_use_4_byte_entries(self):
         """Test non-compact prepositions use 4-byte entries and don't list synonyms."""
         # Non-compact test format uses 4-byte entries (*204* record length)
