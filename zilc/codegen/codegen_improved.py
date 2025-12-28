@@ -14553,7 +14553,7 @@ class ImprovedCodeGenerator:
             max_allowed = num_required + num_optional
             if num_args > max_allowed:
                 raise ValueError(
-                    f"Call to {routine_name} has {num_args} arguments, "
+                    f"ZIL0112: Call to {routine_name} has {num_args} arguments, "
                     f"but routine only accepts {max_allowed} ({num_required} required, {num_optional} optional)"
                 )
 
