@@ -23,6 +23,10 @@ class Dictionary:
         self.word_types: Dict[str, str] = {}  # word -> type (noun, verb, adj, etc.)
         self.word_objects: Dict[str, int] = {}  # word -> object number (for nouns)
 
+        # Track verb synonyms: synonym_word -> main_verb_word
+        # Verb synonyms share the same data bytes as their main verb
+        self.verb_synonyms: Dict[str, str] = {}
+
     def add_word(self, word: str, word_type: str = 'unknown', obj_num: int = None):
         """Add a word to the dictionary with optional type and object reference.
 
@@ -62,6 +66,27 @@ class Dictionary:
             obj_num: The object number this adjective can describe
         """
         self.add_word(adjective, 'adjective', obj_num)
+
+    def add_verb_synonym(self, synonym: str, main_verb: str):
+        """Add a verb synonym that shares data bytes with its main verb.
+
+        In ZILF, verb synonyms defined in SYNTAX like:
+        <SYNTAX TOSS (CHUCK) OBJECT AT OBJECT = V-TOSS>
+        cause CHUCK to be a synonym of TOSS - both words have identical
+        dictionary data bytes (bytes after the encoded text).
+
+        Args:
+            synonym: The synonym word (e.g., 'CHUCK')
+            main_verb: The main verb word (e.g., 'TOSS')
+        """
+        synonym_lower = synonym.lower()
+        main_lower = main_verb.lower()
+
+        # Add the synonym as a verb
+        self.add_word(synonym_lower, 'verb')
+
+        # Track the synonym relationship
+        self.verb_synonyms[synonym_lower] = main_lower
 
     def build(self) -> bytes:
         """Build dictionary bytes."""

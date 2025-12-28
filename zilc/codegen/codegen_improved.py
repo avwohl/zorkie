@@ -11802,7 +11802,20 @@ class ImprovedCodeGenerator:
 
         # Handle simple 2-operand case specially for efficiency
         if len(operands) == 2:
-            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+            second_op = operands[1]
+            if isinstance(second_op, FormNode):
+                # Evaluate second operand first (it will push to stack)
+                expr_code = self.generate_form(second_op)
+                code.extend(expr_code)
+                op2_type = 1  # Variable (stack)
+                op2_val = 0   # Stack
+            elif isinstance(second_op, CondNode):
+                expr_code = self.generate_cond(second_op)
+                code.extend(expr_code)
+                op2_type = 1
+                op2_val = 0
+            else:
+                op2_type, op2_val = self._get_operand_type_and_value(second_op)
 
             # Check if we need large constant encoding
             needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
@@ -14375,42 +14388,15 @@ class ImprovedCodeGenerator:
         <GETB table index> reads byte from table[index].
         Uses Z-machine LOADB instruction.
 
-        If any operand is a FormNode, generate that form's code first
-        (which puts result on stack) then use stack as the operand.
+        Properly handles large constants (like W?* vocabulary word placeholders)
+        by using variable form when needed.
         """
         if len(operands) != 2:
             raise ValueError("GETB requires exactly 2 operands")
 
-        code = bytearray()
-
-        # Process operands - FormNodes need code generation first
-        op_types = []
-        op_vals = []
-
-        for op in operands:
-            if isinstance(op, FormNode):
-                # Generate code for nested form - result goes to stack
-                inner_code = self.generate_form(op)
-                code.extend(inner_code)
-                # Use stack (variable 0) as the operand
-                op_types.append(1)  # Variable
-                op_vals.append(0)   # Stack
-            else:
-                op_type, op_val = self._get_operand_type_and_value(op)
-                op_types.append(op_type)
-                op_vals.append(op_val)
-
-        op1_type, op1_val = op_types[0], op_vals[0]
-        op2_type, op2_val = op_types[1], op_vals[1]
-
-        # LOADB is 2OP opcode 0x10 (LOADW is 0x0F)
-        opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        code.append(0x00)  # Store to stack
-
-        return bytes(code)
+        # LOADB is 2OP opcode 0x10
+        # Use _gen_2op_store which properly handles large constants
+        return self._gen_2op_store(0x10, operands[0], operands[1], store_var=0)
 
     def gen_putb(self, operands: List[ASTNode]) -> bytes:
         """Generate PUTB (table byte write).

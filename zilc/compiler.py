@@ -2101,6 +2101,13 @@ class ZILCompiler:
                             word_type = 'verb' if syntax_def.pattern.index(word) == 0 else 'prep'
                             dictionary.add_word(word_lower, word_type)
 
+            # Process verb synonyms from SYNTAX like <SYNTAX TOSS (CHUCK) ...>
+            # Verb synonyms are words that share the same dictionary data as the main verb
+            if syntax_def.pattern and syntax_def.verb_synonyms:
+                main_verb = syntax_def.pattern[0]
+                for synonym in syntax_def.verb_synonyms:
+                    dictionary.add_verb_synonym(synonym, main_verb)
+
         # Get word offsets for SYNONYM property fixups
         dict_word_offsets = dictionary.get_word_offsets()
         self.log(f"  Dictionary contains {len(dictionary.words)} words")

@@ -894,10 +894,16 @@ class Parser:
         return properties
 
     def parse_syntax(self, line: int, col: int) -> SyntaxNode:
-        """Parse SYNTAX definition."""
-        # <SYNTAX verb object-type ... = V-ROUTINE>
+        """Parse SYNTAX definition.
+
+        Supports verb synonyms in parentheses after the verb:
+        <SYNTAX TOSS (CHUCK) OBJECT AT OBJECT = V-TOSS>
+        creates synonyms CHUCK -> TOSS
+        """
+        # <SYNTAX verb [(synonym ...)] object-type ... = V-ROUTINE>
 
         pattern = []
+        verb_synonyms = []
 
         # Parse pattern until =
         while self.current_token.type != TokenType.ATOM or self.current_token.value != "=":
@@ -908,19 +914,59 @@ class Parser:
                 pattern.append(self.current_token.value)
                 self.advance()
             elif self.current_token.type == TokenType.LPAREN:
-                # Skip object specification forms like (FIND ACTORBIT) (HAVE)
-                paren_depth = 0
-                while True:
-                    if self.current_token.type == TokenType.LPAREN:
-                        paren_depth += 1
-                    elif self.current_token.type == TokenType.RPAREN:
-                        paren_depth -= 1
-                        if paren_depth == 0:
+                # Check if this is verb synonyms (right after verb, before OBJECT)
+                # Verb synonyms come right after the verb word and contain only atoms
+                # Object specs like (FIND ACTORBIT) contain multiple atoms or come after OBJECT
+                if len(pattern) == 1:
+                    # This might be verb synonyms - check if it contains only atoms
+                    # Peek ahead to determine if it's verb synonyms or object specs
+                    self.advance()  # Skip LPAREN
+                    synonyms = []
+                    is_verb_synonyms = True
+                    while self.current_token.type != TokenType.RPAREN:
+                        if self.current_token.type == TokenType.ATOM:
+                            # Check if this looks like object spec keywords
+                            if self.current_token.value.upper() in ('FIND', 'HAVE', 'MANY', 'TAKE', 'HELD', 'CARRIED', 'ON-GROUND', 'IN-ROOM'):
+                                is_verb_synonyms = False
+                                break
+                            synonyms.append(self.current_token.value)
                             self.advance()
+                        elif self.current_token.type == TokenType.EOF:
+                            self.error("Unclosed parenthesis in SYNTAX")
+                        else:
+                            is_verb_synonyms = False
                             break
-                    elif self.current_token.type == TokenType.EOF:
-                        self.error("Unclosed parenthesis in SYNTAX")
-                    self.advance()
+
+                    if is_verb_synonyms and synonyms:
+                        verb_synonyms = synonyms
+                        # Skip the closing paren
+                        if self.current_token.type == TokenType.RPAREN:
+                            self.advance()
+                    else:
+                        # Not verb synonyms - need to skip rest of paren form
+                        paren_depth = 1  # Already inside the paren
+                        while paren_depth > 0:
+                            if self.current_token.type == TokenType.LPAREN:
+                                paren_depth += 1
+                            elif self.current_token.type == TokenType.RPAREN:
+                                paren_depth -= 1
+                            elif self.current_token.type == TokenType.EOF:
+                                self.error("Unclosed parenthesis in SYNTAX")
+                            self.advance()
+                else:
+                    # Object specification forms like (FIND ACTORBIT) (HAVE)
+                    paren_depth = 0
+                    while True:
+                        if self.current_token.type == TokenType.LPAREN:
+                            paren_depth += 1
+                        elif self.current_token.type == TokenType.RPAREN:
+                            paren_depth -= 1
+                            if paren_depth == 0:
+                                self.advance()
+                                break
+                        elif self.current_token.type == TokenType.EOF:
+                            self.error("Unclosed parenthesis in SYNTAX")
+                        self.advance()
             else:
                 self.error("Expected atom or form in SYNTAX pattern")
 
@@ -971,7 +1017,7 @@ class Parser:
         # Join routine parts with space so compiler can split them
         routine = ' '.join(routine_parts)
 
-        return SyntaxNode(pattern, routine, line, col)
+        return SyntaxNode(pattern, routine, verb_synonyms, line, col)
 
     def parse_global(self, line: int, col: int) -> GlobalNode:
         """Parse GLOBAL definition."""

@@ -63,7 +63,6 @@ class TestPreactions:
 class TestSyntaxVerbSynonyms:
     """Tests for verb synonyms in syntax lines."""
 
-    @pytest.mark.xfail(reason="Syntax verb synonyms not implemented")
     def test_syntax_lines_can_define_verb_synonyms(self):
         """Test syntax lines can define verb synonyms."""
         AssertRoutine(

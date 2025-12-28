@@ -179,15 +179,24 @@ class RoomNode(ASTNode):
 
 
 class SyntaxNode(ASTNode):
-    """SYNTAX definition for parser."""
+    """SYNTAX definition for parser.
+
+    Attributes:
+        pattern: List of words in the syntax pattern (e.g., ['TOSS', 'OBJECT', 'AT', 'OBJECT'])
+        routine: Action routine specification (e.g., 'V-TOSS PRE-TOSS')
+        verb_synonyms: List of verb synonyms (e.g., ['CHUCK'] for <SYNTAX TOSS (CHUCK) ...>)
+    """
     def __init__(self, pattern: List[Any] = None, routine: str = "",
+                 verb_synonyms: List[str] = None,
                  line: int = 0, column: int = 0):
         super().__init__(NodeType.SYNTAX, line, column)
         self.pattern = pattern or []
         self.routine = routine
+        self.verb_synonyms = verb_synonyms or []
 
     def __repr__(self):
-        return f"Syntax({self.pattern} = {self.routine})"
+        syns = f" ({', '.join(self.verb_synonyms)})" if self.verb_synonyms else ""
+        return f"Syntax({self.pattern}{syns} = {self.routine})"
 
 
 class CondNode(ASTNode):
