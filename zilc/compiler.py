@@ -1670,9 +1670,11 @@ class ZILCompiler:
         if not program.syntax:
             return None
 
-        actions = {}  # routine_name -> action_num
+        actions = {}  # routine_name -> action_num (first action for each routine)
         preactions = {}  # routine_name -> action_num
         verb_constants = {}  # V?VERB -> action_num
+        action_num_to_routine = {}  # action_num -> routine_name (all entries including action names)
+        action_num_to_preaction = {}  # action_num -> preaction_routine (can be None for no preaction)
 
         action_num = 1  # Start from 1 (0 is often reserved)
 
@@ -1682,10 +1684,15 @@ class ZILCompiler:
             if not syntax_def.routine:
                 continue
 
-            # Parse routine field: "V-ACTION" or "V-ACTION PRE-ACTION"
+            # Parse routine field: "V-ACTION" or "V-ACTION PRE-ACTION" or "V-ACTION <> ACTION-NAME"
+            # The third part can be an action name that overrides the verb word for V? constant
             parts = syntax_def.routine.split()
             action_routine = parts[0] if parts else None
-            preaction_routine = parts[1] if len(parts) > 1 else None
+            preaction_routine = parts[1] if len(parts) > 1 and parts[1] != '<>' else None
+            action_name = parts[2] if len(parts) > 2 else None
+            # Handle case where preaction is <> and action name is second element
+            if len(parts) > 1 and parts[1] == '<>':
+                action_name = parts[2] if len(parts) > 2 else None
 
             # Track unique verb words (first word in pattern) for limit checking
             if syntax_def.pattern:
@@ -1693,8 +1700,25 @@ class ZILCompiler:
                 if isinstance(verb_word, str):
                     unique_verbs.add(verb_word.upper())
 
+            # If there's an action name override, it creates a NEW action entry
+            # with the same routine but potentially different preaction
+            if action_name:
+                # Action name override creates a new action entry
+                const_name = f'V?{action_name.upper()}'
+                if const_name not in verb_constants:
+                    # Create new action entry for this action name
+                    verb_constants[const_name] = action_num
+                    # Store the routine for this action number (same routine, new action number)
+                    action_num_to_routine[action_num] = action_routine
+                    # The preaction is 0 since action name override uses <> or no preaction
+                    action_num_to_preaction[action_num] = None
+                    action_num += 1
+
             if action_routine and action_routine not in actions:
                 actions[action_routine] = action_num
+                action_num_to_routine[action_num] = action_routine
+                # Store first preaction for this action (may be None)
+                action_num_to_preaction[action_num] = preaction_routine
 
                 # Create V?VERB constant from verb pattern
                 if syntax_def.pattern:
@@ -1774,6 +1798,9 @@ class ZILCompiler:
             'verb_constants': verb_constants,
             'action_to_routine': {v: k for k, v in actions.items()},
             'prepositions': prepositions,  # word -> number mapping
+            # New mappings for action name overrides - maps action_num to routine/preaction
+            'action_num_to_routine': action_num_to_routine,  # action_num -> routine_name
+            'action_num_to_preaction': action_num_to_preaction,  # action_num -> preaction_routine (or None)
         }
 
         return self._action_table

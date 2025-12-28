@@ -929,34 +929,47 @@ class Parser:
 
         # Get routine name(s) - can have main action and optional pre-action
         # Example: = V-PUT PRE-PUT
+        # Or with action name: = V-PUT <> PUT-WITH
         if self.current_token.type != TokenType.ATOM:
             self.error("Expected routine name after =")
-        routine = self.current_token.value
+        routine_parts = [self.current_token.value]
         self.advance()
 
-        # Skip optional additional routines (pre-action handlers, etc.)
+        # Capture additional routines (pre-action handlers, action names)
         # Syntax can have multiple routines: = ACTION PRE1 PRE2 ...
-        # Also handle empty forms <> (used for "no preaction") and action names
-        # For now, we just ignore them
+        # Also handle empty forms <> (used for "no preaction")
         while self.current_token.type != TokenType.RANGLE:
             if self.current_token.type == TokenType.ATOM:
-                self.advance()  # Skip additional routines/action names
+                routine_parts.append(self.current_token.value)
+                self.advance()
             elif self.current_token.type == TokenType.LANGLE:
-                # Skip form like <> or <expr>
+                # Handle form like <> (empty - no preaction) or <expr>
                 depth = 0
+                form_tokens = []
                 while True:
                     if self.current_token.type == TokenType.LANGLE:
                         depth += 1
+                        form_tokens.append('<')
                     elif self.current_token.type == TokenType.RANGLE:
                         depth -= 1
                         if depth == 0:
+                            form_tokens.append('>')
                             self.advance()
                             break
+                        form_tokens.append('>')
                     elif self.current_token.type == TokenType.EOF:
                         self.error("Unclosed form in SYNTAX")
+                    else:
+                        form_tokens.append(str(self.current_token.value) if self.current_token.value else '')
                     self.advance()
+                # Represent <> as empty placeholder
+                if form_tokens == ['<', '>']:
+                    routine_parts.append('<>')
             else:
                 break  # Unexpected token, let caller handle it
+
+        # Join routine parts with space so compiler can split them
+        routine = ' '.join(routine_parts)
 
         return SyntaxNode(pattern, routine, line, col)
 

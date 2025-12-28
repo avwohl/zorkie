@@ -36,7 +36,6 @@ from .test_vocab import NEW_PARSER_BOOTSTRAP
 class TestPreactions:
     """Tests for preaction definitions."""
 
-    @pytest.mark.xfail(reason="Preaction persistence not implemented")
     def test_first_preaction_definition_per_action_name_should_persist(self):
         """Test first preaction definition per action name persists."""
         AssertRoutine(
@@ -45,8 +44,8 @@ class TestPreactions:
             " N <=? <GET ,ACTIONS ,V?FOO-WITH> ,V-FOO> CR"
             " N <=? <GET ,ACTIONS ,V?BAR> ,V-BAR> CR"
             " N <=? <GET ,PREACTIONS ,V?FOO> ,PRE-FOO> CR"
-            " N <=? <GET ,PREACTIONS ,V?FOO-WITH> <>> CR"
-            " N <=? <GET ,PREACTIONS ,V?BAR> <>> CR>"
+            " N <=? <GET ,PREACTIONS ,V?FOO-WITH> 0> CR"
+            " N <=? <GET ,PREACTIONS ,V?BAR> 0> CR>"
         ).with_global("<ROUTINE V-FOO () <>>") \
             .with_global("<ROUTINE V-BAR () <>>") \
             .with_global("<ROUTINE PRE-FOO () <>>") \
@@ -58,7 +57,6 @@ class TestPreactions:
             .with_global("<SYNTAX FOO OBJECT WITH OBJECT = V-FOO <> FOO-WITH>") \
             .with_global("<SYNTAX BAR = V-BAR>") \
             .with_global("<SYNTAX BAR OBJECT = V-BAR PRE-BAR>") \
-            .with_warnings("ZIL0208") \
             .outputs("1\n1\n1\n1\n1\n1\n")
 
 

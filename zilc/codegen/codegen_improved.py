@@ -595,10 +595,16 @@ class ImprovedCodeGenerator:
 
     def _setup_action_table_globals(self):
         """Reserve globals for ACTIONS, PREACTIONS, and PREPOSITIONS tables."""
-        if 'actions' in self.action_table and self.action_table['actions']:
+        # Use action_num_to_routine for ACTIONS table check (includes action name overrides)
+        has_actions = ('action_num_to_routine' in self.action_table and self.action_table['action_num_to_routine']) or \
+                      ('actions' in self.action_table and self.action_table['actions'])
+        if has_actions:
             self.globals['ACTIONS'] = self.next_global
             self.next_global += 1
-        if 'preactions' in self.action_table and self.action_table['preactions']:
+        # Use action_num_to_preaction for PREACTIONS table check (includes action name overrides)
+        has_preactions = ('action_num_to_preaction' in self.action_table and self.action_table['action_num_to_preaction']) or \
+                         ('preactions' in self.action_table and self.action_table['preactions'])
+        if has_preactions:
             self.globals['PREACTIONS'] = self.next_global
             self.next_global += 1
         if 'prepositions' in self.action_table and self.action_table['prepositions']:
@@ -918,17 +924,24 @@ class ImprovedCodeGenerator:
         Creates tables containing routine addresses that will be resolved
         by the assembler using routine fixups.
         """
+        # Use the new action_num_to_routine mapping which includes action name overrides
+        action_num_to_routine = self.action_table.get('action_num_to_routine', {})
+        action_num_to_preaction = self.action_table.get('action_num_to_preaction', {})
+
+        # Fall back to old mapping if new one not available
+        if not action_num_to_routine and 'action_to_routine' in self.action_table:
+            action_num_to_routine = self.action_table['action_to_routine']
+
         # Create ACTIONS table: array of routine addresses indexed by action number
-        if 'action_to_routine' in self.action_table:
-            action_to_routine = self.action_table['action_to_routine']
-            max_action = max(action_to_routine.keys()) if action_to_routine else 0
+        if action_num_to_routine:
+            max_action = max(action_num_to_routine.keys()) if action_num_to_routine else 0
 
             # Build table data with routine address placeholders
             table_data = bytearray()
             table_data.extend([0x00, 0x00])  # Entry 0 is reserved (no action)
 
             for action_num in range(1, max_action + 1):
-                routine_name = action_to_routine.get(action_num)
+                routine_name = action_num_to_routine.get(action_num)
                 if routine_name and routine_name in self.routines:
                     # Get placeholder value (16-bit, reused for same routine)
                     placeholder_val = self._get_routine_placeholder(routine_name)
@@ -951,6 +964,40 @@ class ImprovedCodeGenerator:
             # Link ACTIONS global to the table using placeholder
             if 'ACTIONS' in self.globals:
                 self.global_values['ACTIONS'] = 0xFF00 | table_index
+
+        # Create PREACTIONS table: array of preaction routine addresses indexed by action number
+        # Use action_num_to_preaction mapping which tracks preaction per action number
+        if action_num_to_preaction:
+            max_action = max(action_num_to_preaction.keys()) if action_num_to_preaction else 0
+
+            # Build table data with routine address placeholders
+            table_data = bytearray()
+            table_data.extend([0x00, 0x00])  # Entry 0 is reserved (no action)
+
+            for action_num in range(1, max_action + 1):
+                routine_name = action_num_to_preaction.get(action_num)
+                if routine_name and routine_name in self.routines:
+                    # Get placeholder value (16-bit, reused for same routine)
+                    placeholder_val = self._get_routine_placeholder(routine_name)
+                    table_data.append((placeholder_val >> 8) & 0xFF)  # High byte
+                    table_data.append(placeholder_val & 0xFF)          # Low byte
+                else:
+                    # No preaction for this action
+                    table_data.extend([0x00, 0x00])
+
+            # Track table offset
+            table_index = len(self.tables)
+            self.table_offsets[table_index] = self._table_data_size
+            self._table_data_size += len(table_data)
+
+            # Store table
+            table_name = f'_PREACTIONS_TABLE_{self.table_counter}'
+            self.table_counter += 1
+            self.tables.append((table_name, bytes(table_data), True))
+
+            # Link PREACTIONS global to the table using placeholder
+            if 'PREACTIONS' in self.globals:
+                self.global_values['PREACTIONS'] = 0xFF00 | table_index
 
         # Generate PREPOSITIONS table if we have prepositions
         if 'prepositions' in self.action_table and self.action_table['prepositions']:
@@ -4116,6 +4163,12 @@ class ImprovedCodeGenerator:
                 # Track position for resolution (will be filled in during code generation)
                 # Return large constant placeholder (0xFB00 | index)
                 return (0, 0xFB00 | placeholder_idx)
+            elif hasattr(self, '_routine_names') and node.name in self._routine_names:
+                # Routine address reference (e.g., ,V-FOO)
+                # Get or create placeholder value for this routine
+                placeholder_val = self._get_routine_placeholder(node.name)
+                # Return as large constant (routine addresses are 16-bit)
+                return (0, placeholder_val)
             elif node.name.startswith('ACT?'):
                 # ACT?* action constant - these should be in action_table
                 # For now, emit 0 as placeholder
