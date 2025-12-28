@@ -470,6 +470,36 @@ class ImprovedCodeGenerator:
             for const_name, value in self.action_table['verb_constants'].items():
                 self.constants[const_name] = value
 
+        # Create VTBL (verb table) for parser syntax lookups
+        # VTBL[index] = syntax table address for verb with number (255 - index)
+        if self.action_table and 'verb_numbers' in self.action_table:
+            verb_numbers = self.action_table['verb_numbers']
+            verb_word_order = self.action_table.get('verb_word_order', [])
+
+            if verb_word_order:
+                # Build VTBL entries - one word per verb in order
+                # For now, each entry is the action number (simplified)
+                # In full ZILF, this would be a pointer to the syntax structure
+                vtbl_data = bytearray()
+                for verb_word in verb_word_order:
+                    # Get action number for this verb (use V?VERB constant)
+                    action_num = self.action_table['verb_constants'].get(f'V?{verb_word}', 0)
+                    vtbl_data.append((action_num >> 8) & 0xFF)
+                    vtbl_data.append(action_num & 0xFF)
+
+                # Register VTBL table
+                table_idx = len(self.tables)
+                self.table_offsets[table_idx] = self._table_data_size
+                self._table_data_size += len(vtbl_data)
+                self.table_counter += 1
+                self.tables.append(("_VTBL", bytes(vtbl_data), True))  # is_pure=True
+
+                # Add VTBL as a global so table address gets resolved
+                if 'VTBL' not in self.globals:
+                    self.globals['VTBL'] = self.next_global
+                    self.next_global += 1
+                self.global_values['VTBL'] = 0xFF00 | table_idx  # Table reference marker
+
         # Pre-assign object numbers FIRST so globals can reference them
         # (e.g., <GLOBAL HERE CAT> needs CAT to be assigned number 1)
         # Skip if objects were already pre-assigned from symbol_tables (ZILF reverse ordering)
@@ -13790,8 +13820,19 @@ class ImprovedCodeGenerator:
                         remaining = remaining[3:]
 
                         if len(group) == 1:
-                            # Check for large constants
-                            op2_type, op2_val = self._get_operand_type_and_value(group[0])
+                            # Check if operand needs evaluation first
+                            if isinstance(group[0], FormNode):
+                                expr_code = self.generate_form(group[0])
+                                code.extend(expr_code)
+                                op2_type = 1  # Variable (stack)
+                                op2_val = 0   # Stack
+                            elif isinstance(group[0], CondNode):
+                                expr_code = self.generate_cond(group[0])
+                                code.extend(expr_code)
+                                op2_type = 1
+                                op2_val = 0
+                            else:
+                                op2_type, op2_val = self._get_operand_type_and_value(group[0])
                             needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
                             needs_large2 = (op2_type == 0 and (op2_val < 0 or op2_val > 255))
 

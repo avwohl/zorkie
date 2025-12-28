@@ -1736,6 +1736,8 @@ class ZILCompiler:
         action_num = 1  # Start from 1 (0 is often reserved)
 
         unique_verbs = set()  # Track unique verb words for limit checking
+        verb_word_order = []  # Track verb words in order of appearance
+        verb_numbers = {}  # verb_word -> verb_number (255, 254, ...)
 
         for syntax_def in program.syntax:
             if not syntax_def.routine:
@@ -1752,10 +1754,16 @@ class ZILCompiler:
                 action_name = parts[2] if len(parts) > 2 else None
 
             # Track unique verb words (first word in pattern) for limit checking
+            # Also track order for verb number assignment
             if syntax_def.pattern:
                 verb_word = syntax_def.pattern[0]
                 if isinstance(verb_word, str):
-                    unique_verbs.add(verb_word.upper())
+                    verb_upper = verb_word.upper()
+                    if verb_upper not in unique_verbs:
+                        unique_verbs.add(verb_upper)
+                        verb_word_order.append(verb_upper)
+                        # Assign verb number: 255, 254, 253, ...
+                        verb_numbers[verb_upper] = 255 - len(verb_word_order) + 1
 
             # If there's an action name override, it creates a NEW action entry
             # with the same routine but potentially different preaction
@@ -1848,6 +1856,27 @@ class ZILCompiler:
             if action_count > 255:
                 raise SyntaxError(f"MDL0426: Too many actions ({action_count}) - old parser only allows 255 actions. Use NEW-PARSER? for more.")
 
+        # Handle verb synonyms from SYNONYM declarations
+        # Removed synonyms get their own verb numbers; non-removed share with main verb
+        removed_set = set(w.upper() for w in program.removed_synonyms)
+        for group in program.verb_synonym_groups:
+            if len(group) < 2:
+                continue
+            main_verb = group[0].upper()
+            # If main verb has a verb number, share it with non-removed synonyms
+            if main_verb in verb_numbers:
+                main_verb_num = verb_numbers[main_verb]
+                for synonym in group[1:]:
+                    syn_upper = synonym.upper()
+                    if syn_upper in removed_set:
+                        # Removed synonym gets its own verb number
+                        if syn_upper not in verb_numbers:
+                            verb_word_order.append(syn_upper)
+                            verb_numbers[syn_upper] = 255 - len(verb_word_order) + 1
+                    else:
+                        # Non-removed synonym shares main verb's number
+                        verb_numbers[syn_upper] = main_verb_num
+
         # Store for later use during code generation
         self._action_table = {
             'actions': [(num, name) for name, num in sorted(actions.items(), key=lambda x: x[1])],
@@ -1858,6 +1887,9 @@ class ZILCompiler:
             # New mappings for action name overrides - maps action_num to routine/preaction
             'action_num_to_routine': action_num_to_routine,  # action_num -> routine_name
             'action_num_to_preaction': action_num_to_preaction,  # action_num -> preaction_routine (or None)
+            # Verb number mappings for VTBL lookup
+            'verb_numbers': verb_numbers,  # verb_word -> verb_number (255, 254, ...)
+            'verb_word_order': verb_word_order,  # ordered list of verb words
         }
 
         return self._action_table
@@ -2238,24 +2270,42 @@ class ZILCompiler:
                     dictionary.add_synonym(synonyms.value, obj_num)
             obj_num += 1
 
+        # Get verb numbers from action table (if available)
+        verb_numbers = {}
+        if action_table_info and 'verb_numbers' in action_table_info:
+            verb_numbers = action_table_info['verb_numbers']
+
         # Add words from SYNTAX definitions
+        # SYNTAX keywords that are not vocabulary words (except first word = verb)
+        syntax_keywords = {'OBJECT', 'FIND', 'HAVE', 'HELD', 'ON-GROUND',
+                           'IN-ROOM', 'TAKE', 'MANY', 'SEARCH'}
+
         for syntax_def in program.syntax:
             if syntax_def.pattern:
-                for word in syntax_def.pattern:
-                    if word.upper() not in ('OBJECT', 'FIND', 'HAVE', 'HELD',
-                                             'ON-GROUND', 'IN-ROOM', 'TAKE',
-                                             'MANY', 'SEARCH'):
-                        if not (isinstance(word, str) and
-                                (word.startswith('(') or word.startswith('='))):
-                            word_lower = word.lower()
-                            word_type = 'verb' if syntax_def.pattern.index(word) == 0 else 'prep'
-                            dictionary.add_word(word_lower, word_type)
+                for i, word in enumerate(syntax_def.pattern):
+                    # Skip parenthesized verb synonyms and = assignments
+                    if isinstance(word, str) and (word.startswith('(') or word.startswith('=')):
+                        continue
+
+                    word_lower = word.lower()
+                    word_upper = word.upper()
+
+                    if i == 0:
+                        # First word is ALWAYS the verb - add with verb number
+                        verb_num = verb_numbers.get(word_upper, 0)
+                        dictionary.add_verb(word_lower, verb_num)
+                    elif word_upper not in syntax_keywords:
+                        # Non-verb words that aren't syntax keywords are prepositions
+                        dictionary.add_word(word_lower, 'prep')
 
             # Process verb synonyms from SYNTAX like <SYNTAX TOSS (CHUCK) ...>
             # Verb synonyms are words that share the same dictionary data as the main verb
             if syntax_def.pattern and syntax_def.verb_synonyms:
                 main_verb = syntax_def.pattern[0]
+                main_verb_num = verb_numbers.get(main_verb.upper(), 0)
                 for synonym in syntax_def.verb_synonyms:
+                    # Synonym shares main verb's verb number
+                    dictionary.add_verb(synonym.lower(), main_verb_num)
                     dictionary.add_verb_synonym(synonym, main_verb)
 
         # Process standalone SYNONYM verb groups like <SYNONYM TAKE GET GRAB>
@@ -2269,10 +2319,18 @@ class ZILCompiler:
             if any(w.upper() in direction_set for w in group):
                 continue
             main_verb = group[0]
+            main_verb_num = verb_numbers.get(main_verb.upper(), 0)
             for synonym in group[1:]:
+                syn_upper = synonym.upper()
                 # Skip if this synonym was removed via REMOVE-SYNONYM
-                if synonym.upper() in removed_set:
+                if syn_upper in removed_set:
+                    # Removed synonyms get their own verb number (assigned in action table)
+                    syn_verb_num = verb_numbers.get(syn_upper, 0)
+                    if syn_verb_num > 0:
+                        dictionary.add_verb(synonym.lower(), syn_verb_num)
                     continue
+                # Non-removed synonyms share main verb's verb number
+                dictionary.add_verb(synonym.lower(), main_verb_num)
                 dictionary.add_verb_synonym(synonym, main_verb)
 
         # Get word offsets for SYNONYM property fixups

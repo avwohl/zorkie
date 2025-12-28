@@ -28,6 +28,10 @@ class Dictionary:
         # Verb synonyms share the same data bytes as their main verb
         self.verb_synonyms: Dict[str, str] = {}
 
+        # Track verb numbers: verb_word -> verb_number (255, 254, ...)
+        # Verb number is stored in dictionary byte 5 for parser lookups
+        self.verb_numbers: Dict[str, int] = {}
+
         # Collision warnings generated during build
         self.collision_warnings: List[tuple] = []  # List of (code, message)
 
@@ -73,6 +77,20 @@ class Dictionary:
         """
         self.add_word(adjective, 'adjective', obj_num)
 
+    def add_verb(self, word: str, verb_number: int):
+        """Add a verb word with its verb number.
+
+        The verb number is stored in dictionary byte 5 and is used by the
+        parser to look up syntax entries via VTBL.
+
+        Args:
+            word: The verb word (e.g., 'TAKE')
+            verb_number: The verb number (255, 254, 253, ...)
+        """
+        word_lower = word.lower()
+        self.add_word(word_lower, 'verb')
+        self.verb_numbers[word_lower] = verb_number
+
     def add_verb_synonym(self, synonym: str, main_verb: str):
         """Add a verb synonym that shares data bytes with its main verb.
 
@@ -93,6 +111,10 @@ class Dictionary:
 
         # Track the synonym relationship
         self.verb_synonyms[synonym_lower] = main_lower
+
+        # Share verb number with main verb
+        if main_lower in self.verb_numbers:
+            self.verb_numbers[synonym_lower] = self.verb_numbers[main_lower]
 
     def add_direction(self, word: str, prop_num: int):
         """Add a direction word with its property number.
@@ -225,12 +247,36 @@ class Dictionary:
 
             # Bytes 5-6 in V3 (after 4-byte encoded word + 1 type byte):
             # For direction words: byte 5 = property number, byte 6 = 0
+            # For verbs: byte 5 = verb number (255-based), byte 6 = 0
             # For nouns: bytes 5-6 = object number (big-endian)
-            # For verbs: bytes 5-6 = verb number or 0
+            #
+            # When words collide, we need to pick the right data value:
+            # - Get verb number from any colliding verb word
+            # - Get object number from any colliding noun word
+            # - Get property number from any colliding direction word
+            encoded_words = encoded_groups.get(encoded_tuple, [word])
+
+            # Find verb number from colliding words
+            verb_num = 0
+            for w in encoded_words:
+                if w in self.verb_numbers:
+                    verb_num = self.verb_numbers[w]
+                    break
+
+            # Get object/property number
             obj_num = self.word_objects.get(word, 0)
+            for w in encoded_words:
+                if w in self.word_objects:
+                    obj_num = self.word_objects[w]
+                    break
+
             if 'direction' in word_types or 'dir' in word_types:
                 # Direction property number goes in byte 5 directly
                 result.append(obj_num & 0xFF)
+                result.append(0)
+            elif 'verb' in word_types and verb_num > 0:
+                # Verb number goes in byte 5
+                result.append(verb_num & 0xFF)
                 result.append(0)
             else:
                 result.extend(struct.pack('>H', obj_num & 0xFFFF))

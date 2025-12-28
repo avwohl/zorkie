@@ -258,7 +258,6 @@ class TestRemoveSyntax:
 class TestRemoveSynonym:
     """Tests for REMOVE-SYNONYM."""
 
-    @pytest.mark.xfail(reason="REMOVE-SYNONYM not implemented")
     def test_remove_synonym_should_remove_synonyms(self):
         """Test REMOVE-SYNONYM removes synonyms."""
         AssertGlobals(
