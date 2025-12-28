@@ -58,6 +58,9 @@ class NodeType(Enum):
     # Declarations
     DIRECTIONS = auto()    # <DIRECTIONS north south ...>
     TELL_TOKENS = auto()   # <TELL-TOKENS token1 pattern1 token2 pattern2 ...>
+    ORDER_OBJECTS = auto() # <ORDER-OBJECTS? ROOMS-FIRST>
+    ORDER_TREE = auto()    # <ORDER-TREE? REVERSE-DEFINED>
+    DEFINE_GLOBALS = auto() # <DEFINE-GLOBALS table-name (name val) (name BYTE val) ...>
 
 
 @dataclass
@@ -450,6 +453,73 @@ class DirectionsNode(ASTNode):
         return f"Directions({self.names})"
 
 
+class OrderObjectsNode(ASTNode):
+    """ORDER-OBJECTS? directive: <ORDER-OBJECTS? ROOMS-FIRST>
+
+    Controls how objects are numbered:
+    - ROOMS-FIRST: Rooms are numbered before other objects
+    - DEFINED: Objects numbered in definition order
+    - REVERSE-DEFINED: Objects numbered in reverse definition order
+    """
+    def __init__(self, ordering: str, line: int = 0, column: int = 0):
+        super().__init__(NodeType.ORDER_OBJECTS, line, column)
+        self.ordering = ordering
+
+    def __repr__(self):
+        return f"OrderObjects({self.ordering})"
+
+
+class OrderTreeNode(ASTNode):
+    """ORDER-TREE? directive: <ORDER-TREE? REVERSE-DEFINED>
+
+    Controls how object tree children are ordered:
+    - DEFINED: Children in definition order
+    - REVERSE-DEFINED: Children in reverse definition order (default)
+    """
+    def __init__(self, ordering: str, line: int = 0, column: int = 0):
+        super().__init__(NodeType.ORDER_TREE, line, column)
+        self.ordering = ordering
+
+    def __repr__(self):
+        return f"OrderTree({self.ordering})"
+
+
+@dataclass
+class DefineGlobalEntry:
+    """A single entry in a DEFINE-GLOBALS declaration."""
+    name: str           # Global name (e.g., MY-WORD)
+    value: int          # Initial value
+    is_byte: bool       # True if BYTE, False if WORD (default)
+    adecl: str = None   # Optional ADECL annotation (e.g., :FIX)
+
+
+class DefineGlobalsNode(ASTNode):
+    """DEFINE-GLOBALS declaration: <DEFINE-GLOBALS table-name (name val) ...>
+
+    Creates a table of "soft" globals stored in memory rather than Z-machine
+    global variables. Each entry can be a word (default) or byte.
+
+    Syntax:
+        <DEFINE-GLOBALS TABLE-NAME
+            (NAME1 value1)           ; word-sized, initial value
+            (NAME2 BYTE value2)      ; byte-sized, initial value
+            (NAME3:ADECL value3)     ; word-sized with ADECL annotation
+        >
+
+    Creates:
+        - TABLE-NAME constant pointing to the table
+        - NAME1, NAME2, etc. as accessor routines/macros
+    """
+    def __init__(self, table_name: str, entries: List[DefineGlobalEntry],
+                 line: int = 0, column: int = 0):
+        super().__init__(NodeType.DEFINE_GLOBALS, line, column)
+        self.table_name = table_name
+        self.entries = entries
+
+    def __repr__(self):
+        return f"DefineGlobals({self.table_name}, {len(self.entries)} entries)"
+
+
 @dataclass
 class TellTokenDef:
     """Definition of a single TELL token.
@@ -496,10 +566,14 @@ class Program:
     macros: List[MacroNode] = field(default_factory=list)
     buzz_words: List[str] = field(default_factory=list)
     synonym_words: List[str] = field(default_factory=list)
+    verb_synonym_groups: List[List[str]] = field(default_factory=list)  # Verb synonym groups [[main, syn1, syn2], ...]
     removed_synonyms: List[str] = field(default_factory=list)  # Words removed from synonyms
     directions: List[str] = field(default_factory=list)  # Direction names
     bit_synonyms: List['BitSynonymNode'] = field(default_factory=list)  # Flag aliases
     tell_tokens: Dict[str, 'TellTokenDef'] = field(default_factory=dict)  # Custom TELL tokens
+    order_objects: Optional[str] = None  # ORDER-OBJECTS? setting (e.g., ROOMS-FIRST)
+    order_tree: Optional[str] = None  # ORDER-TREE? setting (e.g., REVERSE-DEFINED)
+    define_globals: List['DefineGlobalsNode'] = field(default_factory=list)  # DEFINE-GLOBALS declarations
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "

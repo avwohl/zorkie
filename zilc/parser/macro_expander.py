@@ -779,6 +779,26 @@ class MacroExpander:
         # Evaluate MDL constructs (MAPF/FUNCTION, etc.) at compile time
         expanded = self._evaluate_mdl(expanded, bindings)
 
+        # Handle list macro bodies (e.g., "(QUOTE <PRINT 'macro'>)")
+        # In MDL, a list (FN arg1 arg2) is evaluated by applying FN to [arg1, arg2]
+        # Common case: (QUOTE X) returns X unevaluated
+        if isinstance(expanded, list) and len(expanded) >= 1:
+            first = expanded[0]
+            if isinstance(first, AtomNode):
+                fn_name = first.value.upper()
+                if fn_name == 'QUOTE' and len(expanded) >= 2:
+                    # (QUOTE X) -> return X
+                    return expanded[1]
+                elif fn_name == 'CHTYPE' and len(expanded) >= 3:
+                    # (CHTYPE value type) - handle SPLICE
+                    value_node = expanded[1]
+                    type_node = expanded[2]
+                    if isinstance(type_node, AtomNode) and type_node.value.upper() == 'SPLICE':
+                        # Return items for splicing
+                        if isinstance(value_node, list):
+                            items = [item for item in value_node if isinstance(item, ASTNode)]
+                            return SpliceResultNode(items, 0, 0)
+
         # Unwrap QUOTE forms - when a macro returns '<FORM>, the result is <FORM>
         # The quote means "return this form unevaluated", not "return a QUOTE form"
         if isinstance(expanded, FormNode):
@@ -793,8 +813,14 @@ class MacroExpander:
                     type_node = expanded.operands[1]
                     if isinstance(type_node, AtomNode) and type_node.value.upper() == 'SPLICE':
                         # Return the contents as a SpliceResultNode for inline expansion
-                        # The value should be a quoted list like '(<A> <B> <C>)
-                        if isinstance(value_node, FormNode):
+                        # Value can be:
+                        # - A quoted list '(<A> <B> <C>) -> QUOTE form
+                        # - A raw list [<A>, <B>, <C>] -> from #SPLICE (...) syntax
+                        if isinstance(value_node, list):
+                            # Raw list from #SPLICE (...) syntax - filter for AST nodes
+                            items = [item for item in value_node if isinstance(item, ASTNode)]
+                            return SpliceResultNode(items, expanded.line, expanded.column)
+                        elif isinstance(value_node, FormNode):
                             if isinstance(value_node.operator, AtomNode) and value_node.operator.value.upper() == 'QUOTE':
                                 # Extract the list contents from the quoted form
                                 if value_node.operands:
@@ -1237,6 +1263,15 @@ class MacroExpander:
         for const in program.constants:
             if const.value:
                 const.value = self._expand_recursive(const.value)
+
+        # Expand macros in TELL-TOKENS expansion bodies
+        # This allows TELL tokens like MAC1 <PRINT-MAC-1> to work
+        # where PRINT-MAC-1 is a macro that expands to <PRINT "macro">
+        for token_name, token_def in program.tell_tokens.items():
+            if token_def.expansion:
+                from .ast_nodes import ASTNode
+                if isinstance(token_def.expansion, ASTNode):
+                    token_def.expansion = self._expand_recursive(token_def.expansion)
 
         return program
 

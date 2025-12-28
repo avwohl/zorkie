@@ -98,7 +98,6 @@ class TestTellTokens:
             .with_global(self.TOKENS_CODE) \
             .outputs("12345\n")
 
-    @pytest.mark.xfail(reason="TELL-TOKENS macro expansion in codegen not implemented")
     def test_tell_builtin_should_support_new_tokens_macros(self):
         """Test TELL supports macro tokens."""
         AssertRoutine("", "<TELL MAC1 MAC2>") \
@@ -136,7 +135,6 @@ class TestTellTokenErrors:
             .with_global('<ROUTINE FOO ("OPT" A B C D) <PRINTN <+ .A .B>>>') \
             .does_not_compile("ZIL0402")
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
     def test_tell_builtin_should_reject_complex_outputs(self):
         """Test TELL rejects complex outputs."""
         AssertRoutine("", "<>") \
@@ -149,7 +147,6 @@ class TestTellTokenErrors:
             .with_global('<CONSTANT SPACE-TEXT "Space. The final frontier.">') \
             .does_not_compile()
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
     def test_tell_builtin_should_reject_mismatched_captures(self):
         """Test TELL rejects mismatched captures."""
         AssertRoutine("", "<>") \
@@ -323,6 +320,7 @@ class TestUnicode:
             .without_warnings() \
             .outputs("the em dash\u2014nature\u2019s most dramatic symbol")
 
+    @pytest.mark.xfail(reason="Glulx requires Glk library for I/O - basic assembler implemented but Glk integration pending")
     def test_unicode_characters_should_work_in_tell_in_glulx(self):
         """Test Unicode characters work in TELL in Glulx."""
         # U+2014: em dash, U+2019: right single quotation mark

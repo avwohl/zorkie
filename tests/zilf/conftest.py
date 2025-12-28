@@ -44,6 +44,7 @@ class ZVersion(IntEnum):
     V6 = 6  # YZIP - graphics
     V7 = 7
     V8 = 8
+    GLULX = 256  # Glulx VM (32-bit, Unicode)
 
 
 @dataclass
@@ -122,6 +123,7 @@ class ZILCompiler:
                 ZVersion.V4: "EZIP",
                 ZVersion.V5: "XZIP",
                 ZVersion.V6: "YZIP",
+                ZVersion.GLULX: "GLULX",
             }
             if self.version in version_names:
                 source_parts.append(f"<VERSION {version_names[self.version]}>")
@@ -169,6 +171,7 @@ class ZILCompiler:
             ZVersion.V4: "EZIP",
             ZVersion.V5: "XZIP",
             ZVersion.V6: "YZIP",
+            ZVersion.GLULX: "GLULX",
         }
         if self.version in version_names:
             source_parts.append(f"<VERSION {version_names[self.version]}>")
@@ -201,6 +204,7 @@ class ZILCompiler:
             ZVersion.V4: "EZIP",
             ZVersion.V5: "XZIP",
             ZVersion.V6: "YZIP",
+            ZVersion.GLULX: "GLULX",
         }
         if self.version in version_names:
             source_parts.append(f"<VERSION {version_names[self.version]}>")
@@ -301,6 +305,17 @@ class ZMachine:
             # User override - assume dfrotz-compatible flags
             return (override, ["-q", "-m", "-p"], "custom")
 
+        # Glulx: Use glulxe
+        if self.version == ZVersion.GLULX:
+            glulxe_paths = [
+                "/usr/games/glulxe",
+                "/usr/local/bin/glulxe",
+            ]
+            for path in glulxe_paths:
+                if os.path.exists(path):
+                    return (path, [], "glulxe")
+            return (None, [], None)
+
         # Try bocfel first for V5+ (better spec compliance, supports V8)
         # Note: bocfel has a bug with V7 (treats it as V5 incorrectly)
         bocfel_path = "/tmp/bocfel-2.4/bocfel"
@@ -344,7 +359,8 @@ class ZMachine:
 
         try:
             # Write story file to temp file
-            with tempfile.NamedTemporaryFile(suffix=f".z{self.version}", delete=False) as f:
+            suffix = ".ulx" if self.version == ZVersion.GLULX else f".z{self.version}"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
                 f.write(self.story_file)
                 story_path = f.name
 
@@ -607,9 +623,8 @@ class RoutineAssertion:
         return self
 
     def in_glulx(self) -> 'RoutineAssertion':
-        """Mark test as Glulx - will skip since Glulx not supported."""
-        import pytest
-        pytest.skip("Glulx not supported")
+        """Set target to Glulx."""
+        self.version = ZVersion.GLULX
         return self
 
     def with_global(self, code: str) -> 'RoutineAssertion':
@@ -882,6 +897,7 @@ class GlobalsAssertion:
             ZVersion.V4: "EZIP",
             ZVersion.V5: "XZIP",
             ZVersion.V6: "YZIP",
+            ZVersion.GLULX: "GLULX",
         }
         if self.version in version_names:
             source_parts.append(f"<VERSION {version_names[self.version]}>")

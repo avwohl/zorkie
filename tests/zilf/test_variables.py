@@ -133,7 +133,6 @@ class TestFunnyGlobals:
 class TestDefineGlobals:
     """Tests for DEFINE-GLOBALS construct."""
 
-    @pytest.mark.xfail(reason="DEFINE-GLOBALS not implemented")
     def test_define_globals_works(self):
         """Test that DEFINE-GLOBALS works correctly."""
         AssertRoutine(

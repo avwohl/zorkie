@@ -106,6 +106,9 @@ class Parser:
         elif isinstance(node, SynonymNode):
             # Add all synonym words to program's synonym_words list
             program.synonym_words.extend(node.words)
+            # Also track as a verb synonym group for VTBL linkage
+            if len(node.words) >= 2:
+                program.verb_synonym_groups.append(node.words)
         elif isinstance(node, DirectionsNode):
             # Add all direction names to program's directions list
             program.directions.extend(node.names)
@@ -119,6 +122,15 @@ class Parser:
             # Add all tell tokens to program's tell_tokens dict
             for token_def in node.tokens:
                 program.tell_tokens[token_def.name] = token_def
+        elif isinstance(node, OrderObjectsNode):
+            # Set object ordering mode
+            program.order_objects = node.ordering
+        elif isinstance(node, OrderTreeNode):
+            # Set tree ordering mode
+            program.order_tree = node.ordering
+        elif isinstance(node, DefineGlobalsNode):
+            # Add DEFINE-GLOBALS declaration to program
+            program.define_globals.append(node)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -269,12 +281,14 @@ class Parser:
                         version_value = 5
                     elif version_num.value.upper() == "YZIP":
                         version_value = 6
+                    elif version_num.value.upper() == "GLULX":
+                        version_value = 256  # Glulx VM
                     else:
                         self.error(f"Unknown version name: {version_num.value}")
                 elif isinstance(version_num, NumberNode):
                     version_value = version_num.value
                 else:
-                    self.error("VERSION requires a number or version name (ZIP/EZIP/XZIP/YZIP)")
+                    self.error("VERSION requires a number or version name (ZIP/EZIP/XZIP/YZIP/GLULX)")
                 # Skip any additional arguments (e.g., TIME in <VERSION ZIP TIME>)
                 while self.current_token.type != TokenType.RANGLE:
                     self.advance()
@@ -433,6 +447,34 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return DirectionsNode(names, line, col)
 
+            elif op_name == "ORDER-OBJECTS?":
+                # <ORDER-OBJECTS? ROOMS-FIRST>
+                # Directive for object ordering
+                if self.current_token.type == TokenType.ATOM:
+                    ordering = self.current_token.value.upper()
+                    self.advance()
+                else:
+                    self.error("Expected ordering mode for ORDER-OBJECTS?")
+                self.expect(TokenType.RANGLE)
+                return OrderObjectsNode(ordering, line, col)
+
+            elif op_name == "ORDER-TREE?":
+                # <ORDER-TREE? REVERSE-DEFINED>
+                # Directive for object tree ordering
+                if self.current_token.type == TokenType.ATOM:
+                    ordering = self.current_token.value.upper()
+                    self.advance()
+                else:
+                    self.error("Expected ordering mode for ORDER-TREE?")
+                self.expect(TokenType.RANGLE)
+                return OrderTreeNode(ordering, line, col)
+
+            elif op_name == "DEFINE-GLOBALS":
+                # <DEFINE-GLOBALS table-name (name val) (name BYTE val) ...>
+                node = self.parse_define_globals(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
             elif op_name == "SYNONYM":
                 # Standalone SYNONYM declaration (not in an object)
                 node = self.parse_synonym_declaration(line, col)
@@ -560,6 +602,22 @@ class Parser:
 
         elif token.type == TokenType.ATOM:
             self.advance()
+            # Handle MDL #TYPE syntax: #SPLICE (x) -> <CHTYPE (x) SPLICE>
+            # This is a reader shorthand for changing the type of a value
+            # BUT: #BYTE and #WORD are table element markers, not type conversions
+            if token.value.startswith('#') and len(token.value) > 1:
+                type_name = token.value[1:].upper()  # Remove the # prefix
+                # Skip #BYTE and #WORD - these are table element markers
+                if type_name not in ('BYTE', 'WORD'):
+                    # Check if there's a following expression to type-convert
+                    if self.current_token.type in (TokenType.LPAREN, TokenType.LBRACKET,
+                                                    TokenType.LANGLE, TokenType.NUMBER,
+                                                    TokenType.STRING, TokenType.ATOM):
+                        value_expr = self.parse_expression()
+                        # Create <CHTYPE value TYPE> form
+                        chtype_atom = AtomNode("CHTYPE", line, col)
+                        type_atom = AtomNode(type_name, line, col)
+                        return FormNode(chtype_atom, [value_expr, type_atom], line, col)
             return AtomNode(token.value, line, col)
 
         elif token.type == TokenType.NUMBER:
@@ -1447,6 +1505,73 @@ class Parser:
 
         return SynonymNode(words, line, col)
 
+    def parse_define_globals(self, line: int, col: int):
+        """Parse DEFINE-GLOBALS declaration.
+
+        Syntax: <DEFINE-GLOBALS table-name (name val) (name BYTE val) (name:ADECL val) ...>
+
+        Example:
+            <DEFINE-GLOBALS TEST-GLOBALS
+                (MY-WORD 32767)           ; word-sized, initial value 32767
+                (MY-BYTE BYTE 255)        ; byte-sized, initial value 255
+                (HAS-ADECL:FIX 0)         ; word-sized with :FIX annotation
+            >
+
+        Creates soft globals stored in a table rather than Z-machine global variables.
+        """
+        from .ast_nodes import DefineGlobalsNode, DefineGlobalEntry
+
+        # Parse table name
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected table name in DEFINE-GLOBALS")
+        table_name = self.current_token.value.upper()
+        self.advance()
+
+        entries = []
+
+        # Parse each entry: (name [BYTE] value) or (name:ADECL [BYTE] value)
+        while self.current_token.type == TokenType.LPAREN:
+            self.advance()  # consume (
+
+            if self.current_token.type != TokenType.ATOM:
+                self.error("Expected global name in DEFINE-GLOBALS entry")
+
+            # Parse name, possibly with ADECL annotation (NAME:ADECL)
+            name_token = self.current_token.value
+            adecl = None
+            if ':' in name_token:
+                parts = name_token.split(':', 1)
+                name = parts[0].upper()
+                adecl = parts[1].upper() if len(parts) > 1 else None
+            else:
+                name = name_token.upper()
+            self.advance()
+
+            # Check for BYTE keyword
+            is_byte = False
+            if self.current_token.type == TokenType.ATOM and self.current_token.value.upper() == 'BYTE':
+                is_byte = True
+                self.advance()
+
+            # Parse value
+            if self.current_token.type == TokenType.NUMBER:
+                value = self.current_token.value
+                self.advance()
+            elif self.current_token.type == TokenType.ATOM:
+                # Could be a constant reference - for now, default to 0
+                # TODO: Handle constant references
+                value = 0
+                self.advance()
+            else:
+                self.error(f"Expected value in DEFINE-GLOBALS entry, got {self.current_token.type}")
+                value = 0
+
+            self.expect(TokenType.RPAREN)
+
+            entries.append(DefineGlobalEntry(name=name, value=value, is_byte=is_byte, adecl=adecl))
+
+        return DefineGlobalsNode(table_name, entries, line, col)
+
     def parse_bit_synonym(self, line: int, col: int):
         """Parse BIT-SYNONYM flag alias declaration.
 
@@ -1534,6 +1659,9 @@ class Parser:
             # Parse the expansion form
             expansion = self.parse_form()
 
+            # Validate the expansion form
+            self._validate_tell_token_expansion(token_names, arg_count, expansion)
+
             # Create token definitions for each token name
             for token_name in token_names:
                 # For overloaded tokens (same name, different type), use name:type as key
@@ -1541,6 +1669,107 @@ class Parser:
                 tokens.append(TellTokenDef(name=effective_name, arg_count=arg_count, expansion=expansion))
 
         return TellTokensNode(tokens, line, col)
+
+    def _validate_tell_token_expansion(self, token_names: List[str], arg_count: int, expansion) -> None:
+        """Validate a TELL-TOKENS expansion form.
+
+        Validates:
+        1. Expansion must be a simple call (not a complex nested expression)
+        2. Capture variables (.X, .Y, .Z, .W) must match arg_count
+        """
+        from .ast_nodes import FormNode, AtomNode, LocalVarNode
+
+        if not isinstance(expansion, FormNode):
+            return  # Non-form expansions are allowed
+
+        # Check for complex outputs - the expansion should be a simple call
+        # Complex outputs are things like <PRINTN <* 2 .X>> where the call contains
+        # a nested computation. Only simple calls like <PRINT-DBL .X> are allowed.
+        self._check_for_complex_tell_expansion(token_names, expansion)
+
+        # Check for mismatched captures - the .X, .Y, .Z, .W used should match arg_count
+        used_captures = self._find_capture_vars_in_expansion(expansion)
+        expected_captures = ['X', 'Y', 'Z', 'W'][:arg_count]
+
+        # Check that all used captures are within the expected range
+        for var_name in used_captures:
+            var_idx = {'X': 0, 'Y': 1, 'Z': 2, 'W': 3}.get(var_name.upper(), -1)
+            if var_idx >= arg_count:
+                self.error(
+                    f"TELL-TOKENS {token_names}: capture variable .{var_name} used but only "
+                    f"{arg_count} argument(s) captured"
+                )
+
+        # Check that all expected captures are used (if there are any captures)
+        if arg_count > 0:
+            expected_set = set(expected_captures)
+            if not used_captures:
+                self.error(
+                    f"TELL-TOKENS {token_names}: {arg_count} argument(s) captured but none used "
+                    f"in expansion"
+                )
+            # Note: It's okay to use fewer captures than expected (e.g., only use .X when 2 are captured)
+            # What's NOT okay is using captures that don't exist (checked above)
+
+    def _check_for_complex_tell_expansion(self, token_names: List[str], form) -> None:
+        """Check if a TELL expansion contains complex (nested computation) operands."""
+        from .ast_nodes import FormNode, AtomNode, LocalVarNode, GlobalVarNode, NumberNode, StringNode
+
+        if not isinstance(form, FormNode):
+            return
+
+        # Get the operator - should be a simple atom (routine name or builtin)
+        operator = form.operator
+        if isinstance(operator, AtomNode):
+            op_name = operator.value.upper()
+            # Certain builtins are allowed to have nested forms
+            if op_name in ('PRINT', 'PRINTI', 'PRINTN', 'PRINTD', 'PRINTC', 'PRINTB',
+                           'PRINT-DBL', 'CRLF'):
+                pass  # These are simple output calls
+        elif isinstance(operator, FormNode):
+            # The operator itself is a form - this is definitely complex
+            self.error(
+                f"TELL-TOKENS {token_names}: expansion has complex operator (nested form)"
+            )
+            return
+
+        # Check each operand - they should be simple values, not nested computations
+        for operand in form.operands:
+            if isinstance(operand, FormNode):
+                # Nested form in operand - check if it's a simple reference or a computation
+                nested_op = operand.operator
+                # Empty form <> is okay (evaluates to FALSE)
+                if nested_op is None:
+                    continue
+                if isinstance(nested_op, AtomNode):
+                    nested_name = nested_op.value.upper()
+                    # GVAL (, syntax), LVAL (. syntax) are okay - they're just variable references
+                    # Empty forms <> are okay
+                    if nested_name in ('GVAL', 'LVAL', 'GASSIGNED?', 'ASSIGNED?', '<>'):
+                        continue
+                    # Empty form check (empty operator name or '<>')
+                    if not operand.operands and nested_name in ('', '<>'):
+                        continue
+                    # This is a nested computation like <* 2 .X> - not allowed
+                    self.error(
+                        f"TELL-TOKENS {token_names}: expansion contains nested computation "
+                        f"<{nested_name} ...> - only simple calls are allowed"
+                    )
+
+    def _find_capture_vars_in_expansion(self, node) -> set:
+        """Find all capture variable names (.X, .Y, .Z, .W) used in an expansion."""
+        from .ast_nodes import FormNode, LocalVarNode
+
+        captures = set()
+
+        if isinstance(node, LocalVarNode):
+            if node.name.upper() in ('X', 'Y', 'Z', 'W'):
+                captures.add(node.name.upper())
+        elif isinstance(node, FormNode):
+            for operand in node.operands:
+                captures.update(self._find_capture_vars_in_expansion(operand))
+
+        return captures
 
     def parse_remove_synonym(self, line: int, col: int):
         """Parse REMOVE-SYNONYM declaration.

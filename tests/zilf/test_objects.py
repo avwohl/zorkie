@@ -122,7 +122,6 @@ class TestObjectNumberingAndOrdering:
             ["LOCAL-GLOBALS", "FLOOR", "CEILING"]
         ))
 
-    @pytest.mark.xfail(reason="ORDER-TREE? not implemented")
     def test_contents_tree_reverse_defined(self):
         """Test tree ordering with REVERSE-DEFINED."""
         AssertGlobals(
@@ -334,7 +333,6 @@ class TestObjectProperties:
             "<OBJECT BAR (NORTH TO FOO IF NO-SUCH-GLOBAL)>"
         ).does_not_compile("ZIL0207")
 
-    @pytest.mark.xfail(reason="Direction synonym property matching not implemented")
     def test_direction_synonyms_work_identically(self):
         """Test that direction synonyms work identically."""
         AssertGlobals(
@@ -348,7 +346,6 @@ class TestObjectProperties:
                 "<=? <GETB ,W?SOUTHWEST 5> ,P?SOUTHWEST>"
             )
 
-    @pytest.mark.xfail(reason="Direction property word merging not implemented")
     def test_direction_properties_not_merged_with_words(self):
         """Test that direction properties aren't merged with words."""
         AssertGlobals(
