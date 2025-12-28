@@ -568,6 +568,17 @@ class ImprovedCodeGenerator:
                         if form_op in ('TABLE', 'LTABLE', 'ITABLE', 'PTABLE'):
                             # Compile the table and get placeholder
                             self._compile_global_table(global_node.name, global_node.initial_value, form_op)
+                elif isinstance(global_node.initial_value, GlobalVarNode):
+                    # Reference to another global - copy its initial value
+                    # (could be scalar or table reference marker like 0xFF00 | idx)
+                    ref_name = global_node.initial_value.name
+                    if ref_name in self.global_values:
+                        self.global_values[global_node.name] = self.global_values[ref_name]
+                    else:
+                        # Fall back to global number (for runtime globals)
+                        init_val = self.get_operand_value(global_node.initial_value)
+                        if isinstance(init_val, int):
+                            self.global_values[global_node.name] = init_val
                 else:
                     # Simple value (number, atom, etc.)
                     init_val = self.get_operand_value(global_node.initial_value)

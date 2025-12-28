@@ -131,6 +131,22 @@ class Parser:
         elif isinstance(node, DefineGlobalsNode):
             # Add DEFINE-GLOBALS declaration to program
             program.define_globals.append(node)
+        elif isinstance(node, FormNode):
+            # Handle top-level forms like SETG
+            if isinstance(node.operator, AtomNode):
+                op_name = node.operator.value.upper()
+                if op_name == 'SETG' and len(node.operands) >= 2:
+                    # SETG creates/updates a global variable
+                    # Treat as GlobalNode for compilation
+                    name_node = node.operands[0]
+                    if isinstance(name_node, AtomNode):
+                        global_node = GlobalNode(
+                            name_node.value,
+                            node.operands[1],
+                            node.line,
+                            node.column
+                        )
+                        program.globals.append(global_node)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
