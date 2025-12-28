@@ -7113,12 +7113,23 @@ class ImprovedCodeGenerator:
         # Evaluate first operand
         first_op = operands[0]
         if isinstance(first_op, FormNode):
+            placeholder_count_before = len(self._current_stmt_routine_offsets)
+            insert_pos = len(code)
             expr_code = self.generate_form(first_op)
+            # Adjust placeholders for code being inserted
+            for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
             code.extend(expr_code)
             op1_type = 1  # Variable (stack)
             op1_val = 0   # Stack
         elif isinstance(first_op, CondNode):
+            placeholder_count_before = len(self._current_stmt_routine_offsets)
+            insert_pos = len(code)
             expr_code = self.generate_cond(first_op)
+            for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
             code.extend(expr_code)
             op1_type = 1
             op1_val = 0
@@ -7128,12 +7139,23 @@ class ImprovedCodeGenerator:
         # Evaluate second operand
         second_op = operands[1]
         if isinstance(second_op, FormNode):
+            placeholder_count_before = len(self._current_stmt_routine_offsets)
+            insert_pos = len(code)
             expr_code = self.generate_form(second_op)
+            # Adjust placeholders for code being inserted
+            for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
             code.extend(expr_code)
             op2_type = 1  # Variable (stack)
             op2_val = 0   # Stack
         elif isinstance(second_op, CondNode):
+            placeholder_count_before = len(self._current_stmt_routine_offsets)
+            insert_pos = len(code)
             expr_code = self.generate_cond(second_op)
+            for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
             code.extend(expr_code)
             op2_type = 1
             op2_val = 0
@@ -12105,12 +12127,23 @@ class ImprovedCodeGenerator:
         # If first operand is a nested expression, evaluate it first
         first_op = operands[0]
         if isinstance(first_op, FormNode):
+            placeholder_count_before = len(self._current_stmt_routine_offsets)
+            insert_pos = len(code)
             expr_code = self.generate_form(first_op)
+            # Adjust placeholders for code being inserted
+            for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
             code.extend(expr_code)
             op1_type = 1  # Variable (stack)
             op1_val = 0   # Stack
         elif isinstance(first_op, CondNode):
+            placeholder_count_before = len(self._current_stmt_routine_offsets)
+            insert_pos = len(code)
             expr_code = self.generate_cond(first_op)
+            for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
             code.extend(expr_code)
             op1_type = 1
             op1_val = 0
@@ -12121,13 +12154,23 @@ class ImprovedCodeGenerator:
         if len(operands) == 2:
             second_op = operands[1]
             if isinstance(second_op, FormNode):
-                # Evaluate second operand first (it will push to stack)
+                placeholder_count_before = len(self._current_stmt_routine_offsets)
+                insert_pos = len(code)
                 expr_code = self.generate_form(second_op)
+                # Adjust placeholders for code being inserted
+                for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                    rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
                 code.extend(expr_code)
                 op2_type = 1  # Variable (stack)
                 op2_val = 0   # Stack
             elif isinstance(second_op, CondNode):
+                placeholder_count_before = len(self._current_stmt_routine_offsets)
+                insert_pos = len(code)
                 expr_code = self.generate_cond(second_op)
+                for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                    rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
                 code.extend(expr_code)
                 op2_type = 1
                 op2_val = 0
@@ -13781,7 +13824,13 @@ class ImprovedCodeGenerator:
 
                     # If first operand is a nested expression, evaluate it first
                     if isinstance(first_op, FormNode):
+                        placeholder_count_before = len(self._current_stmt_routine_offsets)
+                        insert_pos = len(code)
                         expr_code = self.generate_form(first_op)
+                        # Adjust placeholders for code being inserted
+                        for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                            rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                            self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
                         code.extend(expr_code)
                         op1_type = 1  # Variable (stack)
                         op1_val = 0   # Stack
@@ -13797,7 +13846,12 @@ class ImprovedCodeGenerator:
                             code.append(temp_global)  # store to temp global
                             op1_val = temp_global
                     elif isinstance(first_op, CondNode):
+                        placeholder_count_before = len(self._current_stmt_routine_offsets)
+                        insert_pos = len(code)
                         expr_code = self.generate_cond(first_op)
+                        for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                            rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                            self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
                         code.extend(expr_code)
                         op1_type = 1
                         op1_val = 0
@@ -13822,12 +13876,23 @@ class ImprovedCodeGenerator:
                         if len(group) == 1:
                             # Check if operand needs evaluation first
                             if isinstance(group[0], FormNode):
+                                placeholder_count_before = len(self._current_stmt_routine_offsets)
+                                insert_pos = len(code)
                                 expr_code = self.generate_form(group[0])
+                                # Adjust placeholders for code being inserted
+                                for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                                    rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                                    self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
                                 code.extend(expr_code)
                                 op2_type = 1  # Variable (stack)
                                 op2_val = 0   # Stack
                             elif isinstance(group[0], CondNode):
+                                placeholder_count_before = len(self._current_stmt_routine_offsets)
+                                insert_pos = len(code)
                                 expr_code = self.generate_cond(group[0])
+                                for k in range(placeholder_count_before, len(self._current_stmt_routine_offsets)):
+                                    rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
+                                    self._current_stmt_routine_offsets[k] = (insert_pos + rel_offset, placeholder_val)
                                 code.extend(expr_code)
                                 op2_type = 1
                                 op2_val = 0
