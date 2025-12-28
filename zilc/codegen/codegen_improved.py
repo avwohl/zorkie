@@ -1120,12 +1120,15 @@ class ImprovedCodeGenerator:
         # Handle TableNode values (ITABLE, TABLE, LTABLE)
         if isinstance(const_node.value, TableNode):
             # Check for redefinition with different table
-            if hasattr(self, 'table_addresses') and const_node.name in self.table_addresses:
+            if const_node.name in self.constants:
                 raise ValueError(
                     f"Constant '{const_node.name}' is already defined as a table"
                 )
             # Compile the table and store reference
             self._compile_global_table_node(const_node.name, const_node.value)
+            # Store placeholder in constants so it can be looked up
+            # The actual address is in global_values, which gets resolved by assembler
+            self.constants[const_node.name] = self.global_values[const_node.name]
             return
 
         value = self.eval_expression(const_node.value)
