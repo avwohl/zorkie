@@ -86,21 +86,19 @@ class TestTellTokens:
             .with_global(self.TOKENS_CODE) \
             .outputs("0")
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
     def test_tell_builtin_should_support_new_tokens_wuteva_string(self):
         """Test TELL supports custom WUTEVA token with string."""
         AssertRoutine("", '<TELL WUTEVA "hello">') \
             .with_global(self.TOKENS_CODE) \
             .outputs("hello")
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
     def test_tell_builtin_should_support_new_tokens_glob_and_wuteva_fix(self):
         """Test TELL supports GLOB and WUTEVA with fix."""
         AssertRoutine("", "<TELL GLOB WUTEVA 45 CR>") \
             .with_global(self.TOKENS_CODE) \
             .outputs("12345\n")
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
+    @pytest.mark.xfail(reason="TELL-TOKENS macro expansion in codegen not implemented")
     def test_tell_builtin_should_support_new_tokens_macros(self):
         """Test TELL supports macro tokens."""
         AssertRoutine("", "<TELL MAC1 MAC2>") \

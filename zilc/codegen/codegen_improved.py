@@ -3152,9 +3152,11 @@ class ImprovedCodeGenerator:
                     code.append(char_val & 0xFF)
                     i += 1
 
-                elif self._is_tell_token(atom_name):
+                elif self._is_tell_token(atom_name, operands[i + 1] if i + 1 < len(operands) else None):
                     # Custom TELL token from TELL-TOKENS
-                    token_def = self._get_tell_token(atom_name)
+                    # Peek at next arg for type-based dispatch
+                    next_arg = operands[i + 1] if i + 1 < len(operands) else None
+                    token_def = self._get_tell_token(atom_name, next_arg)
                     # Consume the required number of arguments
                     args = []
                     for _ in range(token_def.arg_count):
@@ -3204,18 +3206,72 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
-    def _is_tell_token(self, name: str) -> bool:
-        """Check if a name is a custom TELL token."""
+    def _is_tell_token(self, name: str, next_arg: ASTNode = None) -> bool:
+        """Check if a name is a custom TELL token.
+
+        Args:
+            name: Token name to check
+            next_arg: Optional next argument for type-based dispatch
+        """
         if not self.compiler:
             return False
         program = getattr(self.compiler, 'program', None)
         if not program:
             return False
-        return name.upper() in program.tell_tokens
+        name_upper = name.upper()
+        # Check exact match first
+        if name_upper in program.tell_tokens:
+            return True
+        # Check for type-qualified versions
+        for key in program.tell_tokens:
+            if key.startswith(name_upper + ':'):
+                return True
+        return False
 
-    def _get_tell_token(self, name: str) -> 'TellTokenDef':
-        """Get a custom TELL token definition."""
-        return self.compiler.program.tell_tokens[name.upper()]
+    def _get_tell_token(self, name: str, next_arg: ASTNode = None) -> 'TellTokenDef':
+        """Get a custom TELL token definition.
+
+        Args:
+            name: Token name
+            next_arg: Optional next argument for type-based dispatch
+
+        Returns:
+            TellTokenDef for the token
+        """
+        name_upper = name.upper()
+        tell_tokens = self.compiler.program.tell_tokens
+
+        # Check exact match first
+        if name_upper in tell_tokens:
+            return tell_tokens[name_upper]
+
+        # Check for type-qualified versions and dispatch based on argument type
+        arg_type = self._get_tell_arg_type(next_arg)
+        type_key = f"{name_upper}:{arg_type}"
+        if type_key in tell_tokens:
+            return tell_tokens[type_key]
+
+        # If no type match, try any type-qualified version as fallback
+        for key in tell_tokens:
+            if key.startswith(name_upper + ':'):
+                return tell_tokens[key]
+
+        raise KeyError(f"No TELL token found for '{name}'")
+
+    def _get_tell_arg_type(self, arg: ASTNode) -> str:
+        """Determine the type of a TELL token argument.
+
+        Returns:
+            Type string: 'STRING', 'FIX', or 'ANY'
+        """
+        if arg is None:
+            return 'ANY'
+        if isinstance(arg, StringNode):
+            return 'STRING'
+        if isinstance(arg, NumberNode):
+            return 'FIX'
+        # For other types (variables, forms), default to FIX
+        return 'FIX'
 
     def _expand_tell_token(self, expansion: ASTNode, args: List[ASTNode]) -> ASTNode:
         """Expand a TELL token by substituting .X, .Y, .Z, .W with actual arguments.
