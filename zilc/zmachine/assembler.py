@@ -347,6 +347,47 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_table_vocab_placeholders(self, table_data: bytes,
+                                           vocab_fixups: list,
+                                           dict_addr: int) -> bytes:
+        """
+        Resolve vocabulary word placeholders in table data.
+
+        Scans table data for 0xFB00 | index values and replaces them with
+        actual dictionary word addresses.
+
+        Args:
+            table_data: Table data with vocab placeholders
+            vocab_fixups: List of (placeholder_idx, word_offset) tuples
+            dict_addr: Base address of dictionary in story file
+
+        Returns:
+            Patched table data
+        """
+        if not vocab_fixups or not table_data:
+            return table_data
+
+        result = bytearray(table_data)
+
+        # Build a map from placeholder_idx to word address
+        fixup_map = {}
+        for placeholder_idx, word_offset in vocab_fixups:
+            word_addr = dict_addr + word_offset
+            fixup_map[placeholder_idx] = word_addr
+
+        # Scan for 0xFB00 | index patterns (16-bit values, word-aligned)
+        i = 0
+        while i < len(result) - 1:
+            if result[i] == 0xFB:
+                placeholder_idx = result[i + 1]
+                if placeholder_idx in fixup_map:
+                    word_addr = fixup_map[placeholder_idx]
+                    result[i] = (word_addr >> 8) & 0xFF
+                    result[i + 1] = word_addr & 0xFF
+            i += 1
+
+        return bytes(result)
+
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
                                      prop_defaults_size: int,
                                      vocab_fixups: list = None) -> bytes:
@@ -665,6 +706,22 @@ class ZAssembler:
         table_base_addr = current_addr
 
         if table_data:
+            # Calculate dictionary address for resolving vocab placeholders in tables
+            dict_addr_for_tables = current_addr + len(table_data)
+            if dict_addr_for_tables % 2 != 0:
+                dict_addr_for_tables += 1  # Account for alignment
+            # Add extension table size (V5+)
+            if extension_table and self.version >= 5:
+                dict_addr_for_tables += len(extension_table)
+                if dict_addr_for_tables % 2 != 0:
+                    dict_addr_for_tables += 1
+
+            # Resolve vocabulary word placeholders in table data
+            if vocab_fixups:
+                table_data = self._resolve_table_vocab_placeholders(
+                    table_data, vocab_fixups, dict_addr_for_tables
+                )
+
             story.extend(table_data)
             current_addr += len(table_data)
 

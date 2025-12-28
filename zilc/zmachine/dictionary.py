@@ -105,22 +105,27 @@ class Dictionary:
             # Bytes 2-3: parser info (verb number, etc.)
             word_type = self.word_types.get(word, 'unknown')
 
-            # Set type flags (bit positions match Infocom convention)
+            # Set type flags (ZILF PartOfSpeech format)
+            # Main flags: Object=128, Verb=64, Adjective=32, Direction=16, Preposition=8, Buzzword=4
+            # First flags (bits 0-1): VerbFirst=1, AdjectiveFirst=2, DirectionFirst=3
             type_byte = 0
             if word_type == 'noun':
-                type_byte |= 0x80  # Bit 7: noun
+                type_byte |= 0x80  # Object = 128
             elif word_type == 'verb':
-                type_byte |= 0x40  # Bit 6: verb
+                type_byte |= 0x40  # Verb = 64
+                type_byte |= 0x01  # VerbFirst = 1
             elif word_type in ('adjective', 'adj'):
-                type_byte |= 0x20  # Bit 5: adjective
+                type_byte |= 0x20  # Adjective = 32
+                type_byte |= 0x02  # AdjectiveFirst = 2
             elif word_type in ('direction', 'dir'):
-                type_byte |= 0x10  # Bit 4: direction
+                type_byte |= 0x10  # Direction = 16
+                type_byte |= 0x03  # DirectionFirst = 3
             elif word_type in ('preposition', 'prep'):
-                type_byte |= 0x08  # Bit 3: preposition
+                type_byte |= 0x08  # Preposition = 8
             elif word_type == 'buzz':
-                type_byte |= 0x04  # Bit 2: buzz word (noise word)
+                type_byte |= 0x04  # Buzzword = 4
             elif word_type == 'synonym':
-                type_byte |= 0x80  # Synonym words act as nouns
+                type_byte |= 0x80  # Synonym words act as nouns (Object)
             elif word_type != 'unknown':
                 # Warn about unrecognized word types (but not 'unknown' which is the default)
                 print(f"[dictionary] Warning: Unrecognized word type '{word_type}' for word '{word}' - using no flags",

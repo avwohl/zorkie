@@ -1981,9 +1981,13 @@ class ZILCompiler:
         if program.buzz_words:
             dictionary.add_words(program.buzz_words, 'buzz')
 
-        # Add standalone SYNONYM words
+        # Add standalone SYNONYM words (excluding removed ones)
         if program.synonym_words:
-            dictionary.add_words(program.synonym_words, 'synonym')
+            # Filter out words that were removed via REMOVE-SYNONYM
+            removed = set(w.upper() for w in program.removed_synonyms)
+            filtered_synonyms = [w for w in program.synonym_words if w.upper() not in removed]
+            if filtered_synonyms:
+                dictionary.add_words(filtered_synonyms, 'synonym')
 
         # Extract SYNONYM and ADJECTIVE words from objects/rooms
         obj_num = 1
@@ -2070,6 +2074,34 @@ class ZILCompiler:
 
         # Get initial vocab placeholders from codegen (will be updated during object table build)
         vocab_placeholders = codegen.get_vocab_placeholders()
+
+        # Add VOC words with their part-of-speech to dictionary
+        voc_words = codegen.get_voc_words()
+        for word, pos_type in voc_words.items():
+            # Map VOC part-of-speech to dictionary word type
+            if pos_type == 'ADJ':
+                # Adjective - set adjective flags
+                dictionary.add_word(word, 'adjective')
+            elif pos_type == 'VERB':
+                dictionary.add_word(word, 'verb')
+            elif pos_type == 'NOUN':
+                dictionary.add_word(word, 'noun')
+            elif pos_type == 'PREP':
+                dictionary.add_word(word, 'preposition')
+            elif pos_type == 'DIR':
+                dictionary.add_word(word, 'direction')
+            elif pos_type == 'BUZZ':
+                dictionary.add_word(word, 'buzz')
+            elif pos_type is None:
+                # No part-of-speech specified - add with no flags
+                dictionary.add_word(word, 'unknown')
+            else:
+                # Unknown part-of-speech - add with no flags
+                dictionary.add_word(word, 'unknown')
+
+        # Rebuild word offsets after adding VOC words
+        dict_word_offsets = dictionary.get_word_offsets()
+        self.log(f"  Dictionary contains {len(dictionary.words)} words (after VOC)")
 
         # Build object table with proper properties
         self.log("Building object table...")

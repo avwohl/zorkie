@@ -1104,6 +1104,17 @@ class ImprovedCodeGenerator:
         """
         return self._vocab_placeholders.copy()
 
+    def get_voc_words(self) -> Dict[str, Optional[str]]:
+        """Get VOC words with their part-of-speech types.
+
+        Returns a mapping of word (lowercase) to part-of-speech type.
+        Part-of-speech can be: 'ADJ', 'VERB', 'NOUN', 'PREP', 'DIR', etc.
+        or None if no part-of-speech was specified (e.g., <VOC "word" <>>).
+        """
+        if hasattr(self, '_voc_words'):
+            return self._voc_words.copy()
+        return {}
+
     def eval_constant(self, const_node: ConstantNode):
         """Evaluate and store a constant."""
         # Handle TableNode values (ITABLE, TABLE, LTABLE)
@@ -1282,9 +1293,9 @@ class ImprovedCodeGenerator:
         for local_name in local_names:
             if local_name in routine.local_defaults:
                 default_node = routine.local_defaults[local_name]
+                local_num = self.locals[local_name]
                 if isinstance(default_node, NumberNode):
                     init_val = default_node.value
-                    local_num = self.locals[local_name]
                     # Generate STORE instruction: store local init_val
                     if 0 <= init_val <= 255:
                         # Small constant: long form 0 0 0D = 0x0D
@@ -1298,6 +1309,28 @@ class ImprovedCodeGenerator:
                         routine_code.append(local_num & 0xFF)
                         routine_code.append((init_val >> 8) & 0xFF)
                         routine_code.append(init_val & 0xFF)
+                elif isinstance(default_node, FormNode):
+                    # Complex expression - generate code to evaluate and store
+                    # Generate the expression code (result ends up on stack)
+                    expr_code = self.generate_form(default_node)
+                    # Track any routine placeholders from the expression
+                    for i in range(len(expr_code) - 1):
+                        high_byte = expr_code[i]
+                        low_byte = expr_code[i + 1]
+                        if high_byte >= 0xFD:
+                            placeholder_val = (high_byte << 8) | low_byte
+                            if placeholder_val in self._routine_placeholders:
+                                # Offset is relative to routine_code start
+                                self._pending_placeholders.append(
+                                    (len(routine_code) + i, placeholder_val)
+                                )
+                    routine_code.extend(expr_code)
+                    # Store stack to local variable: STORE local_num, stack
+                    # 2OP long form: bit7=0, bit6=first_type, bit5=second_type, bits4-0=opcode
+                    # STORE (0x0D) with first=small (0), second=variable (1) = 0x2D
+                    routine_code.append(0x2D)  # STORE small,var
+                    routine_code.append(local_num & 0xFF)  # destination variable number
+                    routine_code.append(0x00)  # source: stack (var 0)
 
         # Push routine-level loop context for AGAIN support
         # AGAIN at routine level should jump to routine_init_start to reset locals
@@ -2372,6 +2405,9 @@ class ImprovedCodeGenerator:
             # Check if it's just a parenthesized number
             if not val.operands and isinstance(val.operator, NumberNode):
                 return val.operator.value
+            # Check for VOC form: <VOC "word" pos>
+            if isinstance(val.operator, AtomNode) and val.operator.value.upper() == 'VOC':
+                return self._handle_voc_form(val)
             # Otherwise try to get operand value
             return self.get_operand_value(val) or 0
 
@@ -2395,6 +2431,63 @@ class ImprovedCodeGenerator:
             return 0  # Placeholder for string
         else:
             return 0
+
+    def _handle_voc_form(self, form: FormNode) -> int:
+        """Handle <VOC "word" pos> form - returns vocabulary word placeholder.
+
+        The VOC form creates a reference to a dictionary word with optional
+        part-of-speech specification.
+
+        Syntax:
+            <VOC "word">       - word with no explicit part-of-speech
+            <VOC "word" ADJ>   - word with adjective part-of-speech
+            <VOC "word" <>>    - word with no part-of-speech (FALSE)
+
+        Args:
+            form: The VOC FormNode
+
+        Returns:
+            int: Vocabulary placeholder value (0xFB00 | idx)
+        """
+        if not form.operands:
+            self._warn("VOC requires at least one argument (word)")
+            return 0
+
+        # Extract the word (first operand should be a string)
+        word_node = form.operands[0]
+        if isinstance(word_node, StringNode):
+            word = word_node.value.lower()
+        elif isinstance(word_node, AtomNode):
+            word = word_node.value.lower()
+        else:
+            self._warn(f"VOC first argument must be a string or atom, got {type(word_node)}")
+            return 0
+
+        # Extract optional part-of-speech (second operand)
+        pos_type = None
+        if len(form.operands) >= 2:
+            pos_node = form.operands[1]
+            if isinstance(pos_node, AtomNode):
+                pos_type = pos_node.value.upper()
+            elif isinstance(pos_node, FormNode):
+                # <> means no part-of-speech (FALSE)
+                if isinstance(pos_node.operator, AtomNode) and pos_node.operator.value == '<>':
+                    pos_type = None
+                elif not pos_node.operands and isinstance(pos_node.operator, AtomNode) and pos_node.operator.value.upper() == '<>':
+                    pos_type = None
+
+        # Track the word and part-of-speech for dictionary building
+        if not hasattr(self, '_voc_words'):
+            self._voc_words = {}  # word -> part-of-speech type
+        self._voc_words[word] = pos_type
+
+        # Create vocabulary placeholder
+        placeholder_idx = self._next_vocab_placeholder_index
+        self._vocab_placeholders[placeholder_idx] = word
+        self._next_vocab_placeholder_index += 1
+
+        # Return placeholder value (0xFB00 | idx)
+        return 0xFB00 | placeholder_idx
 
     def _add_table(self, node: TableNode) -> int:
         """Add a table from a TableNode and return its index.

@@ -32,11 +32,19 @@ import pytest
 from .conftest import AssertRoutine, AssertGlobals
 
 
-# Part of speech constants from ZILF
+# Part of speech constants from ZILF (see Zilf/ZModel/Vocab/PartOfSpeech.cs)
 class PartOfSpeech:
     NONE = 0
-    ADJECTIVE = 8
-    ADJECTIVE_FIRST = 128
+    FIRST_MASK = 3
+    VERB_FIRST = 1
+    ADJECTIVE_FIRST = 2
+    DIRECTION_FIRST = 3
+    BUZZWORD = 4
+    PREPOSITION = 8
+    DIRECTION = 16
+    ADJECTIVE = 32
+    VERB = 64
+    OBJECT = 128
 
 
 class TestSIBREAKS:
@@ -179,7 +187,6 @@ class TestPunctuationWords:
 class TestOldParser:
     """Tests for old parser vocabulary format."""
 
-    @pytest.mark.xfail(reason="VOC part-of-speech handling not implemented")
     def test_voc_with_2nd_arg_atom_should_set_part_of_speech(self):
         """Test VOC with 2nd arg atom sets part of speech."""
         expected = str(PartOfSpeech.ADJECTIVE | PartOfSpeech.ADJECTIVE_FIRST)
@@ -190,7 +197,6 @@ class TestOldParser:
             .in_v3() \
             .gives_number(expected)
 
-    @pytest.mark.xfail(reason="VOC part-of-speech handling not implemented")
     def test_voc_with_2nd_arg_false_should_not_set_part_of_speech(self):
         """Test VOC with 2nd arg FALSE doesn't set part of speech."""
         AssertRoutine(
@@ -200,7 +206,6 @@ class TestOldParser:
             .in_v3() \
             .gives_number(str(PartOfSpeech.NONE))
 
-    @pytest.mark.xfail(reason="VOC part-of-speech handling not implemented")
     def test_voc_with_2nd_arg_missing_should_not_set_part_of_speech(self):
         """Test VOC with missing 2nd arg doesn't set part of speech."""
         AssertRoutine(

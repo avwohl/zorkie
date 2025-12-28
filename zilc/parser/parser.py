@@ -112,6 +112,9 @@ class Parser:
         elif isinstance(node, BitSynonymNode):
             # Add bit synonym to program's bit_synonyms list
             program.bit_synonyms.append(node)
+        elif isinstance(node, RemoveSynonymNode):
+            # Add to removed synonyms list
+            program.removed_synonyms.append(node.word)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -435,6 +438,12 @@ class Parser:
             elif op_name == "BIT-SYNONYM":
                 # BIT-SYNONYM flag alias declaration
                 node = self.parse_bit_synonym(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "REMOVE-SYNONYM":
+                # REMOVE-SYNONYM word declaration
+                node = self.parse_remove_synonym(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 
@@ -1390,6 +1399,23 @@ class Parser:
         self.advance()
 
         return BitSynonymNode(original, alias, line, col)
+
+    def parse_remove_synonym(self, line: int, col: int):
+        """Parse REMOVE-SYNONYM declaration.
+
+        Syntax: <REMOVE-SYNONYM word>
+
+        Example: <REMOVE-SYNONYM GET>
+        This removes GET from being a synonym so it can be used independently.
+        """
+        from .ast_nodes import RemoveSynonymNode
+
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected word in REMOVE-SYNONYM")
+        word = self.current_token.value
+        self.advance()
+
+        return RemoveSynonymNode(word, line, col)
 
     def parse_table(self, table_type: str, line: int, col: int) -> TableNode:
         """Parse TABLE/ITABLE/LTABLE definition."""

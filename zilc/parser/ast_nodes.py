@@ -31,6 +31,7 @@ class NodeType(Enum):
     BUZZ = auto()          # <BUZZ word1 word2 ...>
     SYNONYM = auto()       # <SYNONYM word1 word2 ...> (standalone)
     BIT_SYNONYM = auto()   # <BIT-SYNONYM flag1 flag2> (flag alias)
+    REMOVE_SYNONYM = auto() # <REMOVE-SYNONYM word> (remove from synonyms)
 
     # Table/Array
     TABLE = auto()         # <TABLE ...>
@@ -349,6 +350,20 @@ class BitSynonymNode(ASTNode):
         return f"BitSynonym({self.original} -> {self.alias})"
 
 
+class RemoveSynonymNode(ASTNode):
+    """REMOVE-SYNONYM declaration.
+
+    Removes a word from being a synonym, allowing it to be used independently.
+    Syntax: <REMOVE-SYNONYM word>
+    """
+    def __init__(self, word: str, line: int = 0, column: int = 0):
+        super().__init__(NodeType.REMOVE_SYNONYM, line, column)
+        self.word = word  # The word to remove from synonyms
+
+    def __repr__(self):
+        return f"RemoveSynonym({self.word})"
+
+
 class QuasiquoteNode(ASTNode):
     """Quasiquote (backtick) expression.
 
@@ -440,6 +455,7 @@ class Program:
     macros: List[MacroNode] = field(default_factory=list)
     buzz_words: List[str] = field(default_factory=list)
     synonym_words: List[str] = field(default_factory=list)
+    removed_synonyms: List[str] = field(default_factory=list)  # Words removed from synonyms
     directions: List[str] = field(default_factory=list)  # Direction names
     bit_synonyms: List['BitSynonymNode'] = field(default_factory=list)  # Flag aliases
 
