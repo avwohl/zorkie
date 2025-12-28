@@ -2908,6 +2908,9 @@ class ZILCompiler:
         tell_string_placeholders = codegen.get_tell_string_placeholders()  # For TELL format (0x8D)
         tell_placeholder_positions = codegen.get_tell_placeholder_positions()  # Exact byte offsets
 
+        # Get special header table indices
+        tchars_table_idx = codegen.get_tchars_table_idx()
+
         # Assemble story file
         self.log("Assembling story file...")
         assembler = ZAssembler(self.version)
@@ -2926,7 +2929,8 @@ class ZILCompiler:
             string_placeholders=string_placeholders,
             tell_string_placeholders=tell_string_placeholders,
             tell_placeholder_positions=tell_placeholder_positions,
-            vocab_fixups=vocab_fixups
+            vocab_fixups=vocab_fixups,
+            tchars_table_idx=tchars_table_idx
         )
 
         return story

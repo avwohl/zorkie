@@ -874,7 +874,19 @@ class GlobalsAssertion:
         compiler = self._get_compiler()
 
         # Build source with globals and a test routine
-        source_parts = list(self.globals_code)
+        source_parts = []
+
+        # Add version directive based on self.version
+        version_names = {
+            ZVersion.V3: "ZIP",
+            ZVersion.V4: "EZIP",
+            ZVersion.V5: "XZIP",
+            ZVersion.V6: "YZIP",
+        }
+        if self.version in version_names:
+            source_parts.append(f"<VERSION {version_names[self.version]}>")
+
+        source_parts.extend(self.globals_code)
         source_parts.extend(self.additional_globals)
 
         checks = " ".join(f"<COND (<NOT {c}> <RFALSE>)>" for c in conditions)

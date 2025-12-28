@@ -219,7 +219,6 @@ class TestParserTables:
             "<L? ,PARSER-TBL ,PURE-TBL>"
         )
 
-    @pytest.mark.xfail(reason="PARSER-TABLE / PRSTBL not implemented")
     def test_parser_tables_start_at_prstbl(self):
         """Test that PARSER-TABLEs start at PRSTBL."""
         AssertGlobals("<CONSTANT PARSER-TBL <TABLE (PARSER-TABLE) 1 2 3>>") \

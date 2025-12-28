@@ -515,7 +515,8 @@ class ZAssembler:
                         string_placeholders: dict = None,
                         tell_string_placeholders: dict = None,
                         tell_placeholder_positions: list = None,
-                        vocab_fixups: list = None) -> bytes:
+                        vocab_fixups: list = None,
+                        tchars_table_idx: int = None) -> bytes:
         """
         Build complete story file.
 
@@ -535,6 +536,7 @@ class ZAssembler:
             tell_string_placeholders: Dict mapping placeholder index to string text for TELL resolution (0x8D format)
             tell_placeholder_positions: List of (byte_offset, placeholder_idx) for position-based TELL resolution
             vocab_fixups: List of (placeholder_idx, word_offset) for W?* vocabulary word resolution
+            tchars_table_idx: Table index for TCHARS constant (terminating characters, header 0x2E)
 
         Returns:
             Complete story file as bytes
@@ -943,6 +945,11 @@ class ZAssembler:
         # V5+ extension table address
         if extension_table_addr > 0:
             struct.pack_into('>H', story, 0x36, extension_table_addr)  # Extension table address
+
+        # V5+ TCHARS (terminating characters table) address at 0x2E
+        if self.version >= 5 and tchars_table_idx is not None and tchars_table_idx in table_offsets:
+            tchars_addr = table_base_addr + table_offsets[tchars_table_idx]
+            struct.pack_into('>H', story, 0x2E, tchars_addr)
 
         # V6-7 specific header fields (V8 doesn't use these)
         if self.version in (6, 7):

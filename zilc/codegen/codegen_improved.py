@@ -107,6 +107,10 @@ class ImprovedCodeGenerator:
         self.table_offsets: Dict[int, int] = {}  # table_index -> offset within table data
         self._table_data_size = 0  # Running total of table data size
 
+        # Special header tables - track their table indices for header field population
+        # TCHARS (terminating characters table) - header offset 0x2E in V5+
+        self._tchars_table_idx: Optional[int] = None
+
         # Extension table tracking (V5+)
         # Track the maximum extension word index used (e.g., MSLOCY=2, MSETBL=3)
         # If > 0, an extension table needs to be created
@@ -740,6 +744,10 @@ class ImprovedCodeGenerator:
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = 0xFF00 | table_idx
 
+        # Track special header tables
+        if global_name.upper() == 'TCHARS':
+            self._tchars_table_idx = table_idx
+
     def _compile_global_table(self, global_name: str, form_node: 'FormNode', table_type: str):
         """Compile a TABLE/LTABLE/ITABLE/PTABLE initial value for a global (legacy FormNode).
 
@@ -917,6 +925,10 @@ class ImprovedCodeGenerator:
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = 0xFF00 | table_idx
+
+        # Track special header tables
+        if global_name.upper() == 'TCHARS':
+            self._tchars_table_idx = table_idx
 
     def _generate_action_tables(self):
         """Generate ACTIONS and PREACTIONS table data.
@@ -1198,10 +1210,33 @@ class ImprovedCodeGenerator:
                 )
             # Compile the table and store reference
             self._compile_global_table_node(const_node.name, const_node.value)
-            # Store placeholder in constants so it can be looked up
-            # The actual address is in global_values, which gets resolved by assembler
-            self.constants[const_node.name] = self.global_values[const_node.name]
+            # Allocate a global variable slot for this table constant
+            # This allows the assembler to resolve the placeholder address
+            if const_node.name not in self.globals:
+                self.globals[const_node.name] = self.next_global
+                self.next_global += 1
+            # Don't store in constants - treat it as a global with table address
             return
+
+        # Handle FormNode values that are TABLE/LTABLE/ITABLE/PTABLE forms
+        if isinstance(const_node.value, FormNode):
+            if isinstance(const_node.value.operator, AtomNode):
+                form_op = const_node.value.operator.value.upper()
+                if form_op in ('TABLE', 'LTABLE', 'ITABLE', 'PTABLE'):
+                    # Check for redefinition
+                    if const_node.name in self.constants:
+                        raise ValueError(
+                            f"Constant '{const_node.name}' is already defined as a table"
+                        )
+                    # Compile the table using legacy FormNode path
+                    self._compile_global_table(const_node.name, const_node.value, form_op)
+                    # Allocate a global variable slot for this table constant
+                    # This allows the assembler to resolve the placeholder address
+                    if const_node.name not in self.globals:
+                        self.globals[const_node.name] = self.next_global
+                        self.next_global += 1
+                    # Don't store in constants - treat it as a global with table address
+                    return
 
         value = self.eval_expression(const_node.value)
         if value is not None:
@@ -17484,3 +17519,14 @@ class ImprovedCodeGenerator:
             Dict mapping table index to offset within table data block
         """
         return self.table_offsets.copy()
+
+    def get_tchars_table_idx(self) -> Optional[int]:
+        """Get the table index for TCHARS constant, if defined.
+
+        TCHARS is a special constant that points to a table of terminating
+        characters. Its address should be written to header offset 0x2E in V5+.
+
+        Returns:
+            Table index for TCHARS, or None if not defined
+        """
+        return self._tchars_table_idx

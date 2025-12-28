@@ -76,7 +76,6 @@ class TestSIBREAKS:
 class TestTCHARS:
     """Tests for TCHARS (terminating characters)."""
 
-    @pytest.mark.xfail(reason="TCHARS header support not implemented")
     def test_tchars_should_affect_header(self):
         """Test that TCHARS setting affects header."""
         AssertGlobals(
