@@ -7779,6 +7779,7 @@ class ImprovedCodeGenerator:
         'OBJECT': 0x0A,      # Object table address (word)
         'GLOBAL': 0x0C,      # Global variables table address (word)
         'IMPURE': 0x0E,      # Static memory base (word)
+        'PURBOT': 0x0E,      # Static memory base (alias for IMPURE)
         'FLAGS2': 0x10,      # Flags 2 (word)
         'SERIAL': 0x12,      # Serial number (6 bytes)
         'WORDS': 0x18,       # Abbreviations table address (word)
@@ -7788,6 +7789,7 @@ class ImprovedCodeGenerator:
         'INTVERS': 0x1F,     # Interpreter version (byte)
         'SCRV': 0x20,        # Screen height (byte)
         'SCRH': 0x21,        # Screen width (byte)
+        'TCHARS': 0x2E,      # Terminating characters table address (word, V5+)
         'EXTAB': 0x36,       # Extension table address (word, V5+)
     }
 
