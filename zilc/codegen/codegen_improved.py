@@ -968,22 +968,47 @@ class ImprovedCodeGenerator:
         # Create PREACTIONS table: array of preaction routine addresses indexed by action number
         # Use action_num_to_preaction mapping which tracks preaction per action number
         if action_num_to_preaction:
-            max_action = max(action_num_to_preaction.keys()) if action_num_to_preaction else 0
+            # Check if COMPACT-PREACTIONS? is enabled
+            compact_preactions = False
+            if self.compiler and hasattr(self.compiler, 'compile_globals'):
+                compact_preactions = self.compiler.compile_globals.get('COMPACT-PREACTIONS?', False)
 
-            # Build table data with routine address placeholders
             table_data = bytearray()
-            table_data.extend([0x00, 0x00])  # Entry 0 is reserved (no action)
 
-            for action_num in range(1, max_action + 1):
-                routine_name = action_num_to_preaction.get(action_num)
-                if routine_name and routine_name in self.routines:
-                    # Get placeholder value (16-bit, reused for same routine)
-                    placeholder_val = self._get_routine_placeholder(routine_name)
-                    table_data.append((placeholder_val >> 8) & 0xFF)  # High byte
-                    table_data.append(placeholder_val & 0xFF)          # Low byte
-                else:
-                    # No preaction for this action
-                    table_data.extend([0x00, 0x00])
+            if compact_preactions:
+                # Compact format: [action_num, preaction, action_num, preaction, ..., -1, 0]
+                # Only include entries that have preactions
+                for action_num in sorted(action_num_to_preaction.keys()):
+                    routine_name = action_num_to_preaction.get(action_num)
+                    if routine_name and routine_name in self.routines:
+                        # Action number (V?FOO constant value)
+                        table_data.append((action_num >> 8) & 0xFF)
+                        table_data.append(action_num & 0xFF)
+                        # Preaction routine address placeholder
+                        placeholder_val = self._get_routine_placeholder(routine_name)
+                        table_data.append((placeholder_val >> 8) & 0xFF)
+                        table_data.append(placeholder_val & 0xFF)
+
+                # Terminator: -1, 0
+                table_data.append(0xFF)  # -1 high byte
+                table_data.append(0xFF)  # -1 low byte
+                table_data.append(0x00)  # 0 high byte
+                table_data.append(0x00)  # 0 low byte
+            else:
+                # Standard format: array indexed by action number
+                max_action = max(action_num_to_preaction.keys()) if action_num_to_preaction else 0
+                table_data.extend([0x00, 0x00])  # Entry 0 is reserved (no action)
+
+                for action_num in range(1, max_action + 1):
+                    routine_name = action_num_to_preaction.get(action_num)
+                    if routine_name and routine_name in self.routines:
+                        # Get placeholder value (16-bit, reused for same routine)
+                        placeholder_val = self._get_routine_placeholder(routine_name)
+                        table_data.append((placeholder_val >> 8) & 0xFF)  # High byte
+                        table_data.append(placeholder_val & 0xFF)          # Low byte
+                    else:
+                        # No preaction for this action
+                        table_data.extend([0x00, 0x00])
 
             # Track table offset
             table_index = len(self.tables)
@@ -3127,6 +3152,26 @@ class ImprovedCodeGenerator:
                     code.append(char_val & 0xFF)
                     i += 1
 
+                elif self._is_tell_token(atom_name):
+                    # Custom TELL token from TELL-TOKENS
+                    token_def = self._get_tell_token(atom_name)
+                    # Consume the required number of arguments
+                    args = []
+                    for _ in range(token_def.arg_count):
+                        i += 1
+                        if i >= len(operands):
+                            raise ValueError(
+                                f"TELL token '{atom_name}' requires {token_def.arg_count} "
+                                f"argument(s), but not enough operands provided"
+                            )
+                        args.append(operands[i])
+                    # Expand the token with substituted arguments
+                    expanded = self._expand_tell_token(token_def.expansion, args)
+                    # Generate code for the expanded form
+                    token_code = self.generate_form(expanded)
+                    code.extend(token_code)
+                    i += 1
+
                 else:
                     # Unknown atom - error
                     # Bare atom references in TELL are not allowed
@@ -3158,6 +3203,54 @@ class ImprovedCodeGenerator:
                 i += 1
 
         return bytes(code)
+
+    def _is_tell_token(self, name: str) -> bool:
+        """Check if a name is a custom TELL token."""
+        if not self.compiler:
+            return False
+        program = getattr(self.compiler, 'program', None)
+        if not program:
+            return False
+        return name.upper() in program.tell_tokens
+
+    def _get_tell_token(self, name: str) -> 'TellTokenDef':
+        """Get a custom TELL token definition."""
+        return self.compiler.program.tell_tokens[name.upper()]
+
+    def _expand_tell_token(self, expansion: ASTNode, args: List[ASTNode]) -> ASTNode:
+        """Expand a TELL token by substituting .X, .Y, .Z, .W with actual arguments.
+
+        Args:
+            expansion: The expansion form (e.g., <PRINT-DBL .X>)
+            args: The actual arguments to substitute
+
+        Returns:
+            A new AST node with substitutions applied
+        """
+        # Argument names in order: X, Y, Z, W (for up to 4 args)
+        arg_names = ['X', 'Y', 'Z', 'W']
+        arg_map = {}
+        for i, arg in enumerate(args):
+            if i < len(arg_names):
+                arg_map[arg_names[i]] = arg
+
+        return self._substitute_tell_args(expansion, arg_map)
+
+    def _substitute_tell_args(self, node: ASTNode, arg_map: Dict[str, ASTNode]) -> ASTNode:
+        """Recursively substitute .X, .Y, .Z, .W in a node."""
+        if isinstance(node, LocalVarNode):
+            # Check if this is one of our arg placeholders
+            if node.name.upper() in arg_map:
+                return arg_map[node.name.upper()]
+            return node
+        elif isinstance(node, FormNode):
+            # Recursively substitute in operands
+            new_operands = [self._substitute_tell_args(op, arg_map) for op in node.operands]
+            new_form = FormNode(node.operator, new_operands, node.line, node.column)
+            return new_form
+        else:
+            # Return unchanged
+            return node
 
     def _gen_tell_operand_code(self, operand: ASTNode, opcode_1op: int) -> bytes:
         """Generate 1OP instruction for TELL operand.

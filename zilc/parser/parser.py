@@ -115,6 +115,10 @@ class Parser:
         elif isinstance(node, RemoveSynonymNode):
             # Add to removed synonyms list
             program.removed_synonyms.append(node.word)
+        elif isinstance(node, TellTokensNode):
+            # Add all tell tokens to program's tell_tokens dict
+            for token_def in node.tokens:
+                program.tell_tokens[token_def.name] = token_def
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -444,6 +448,12 @@ class Parser:
             elif op_name == "REMOVE-SYNONYM":
                 # REMOVE-SYNONYM word declaration
                 node = self.parse_remove_synonym(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "TELL-TOKENS":
+                # TELL-TOKENS declaration
+                node = self.parse_tell_tokens(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 
@@ -1458,6 +1468,79 @@ class Parser:
         self.advance()
 
         return BitSynonymNode(original, alias, line, col)
+
+    def parse_tell_tokens(self, line: int, col: int):
+        """Parse TELL-TOKENS declaration.
+
+        Syntax: <TELL-TOKENS token1 [* [* ...]] <expansion1> token2 ...>
+
+        Extended syntax:
+        - (TOKEN1 TOKEN2 ...) <expansion> - Multiple tokens with same expansion
+        - *:TYPE - Typed argument (e.g., *:STRING, *:FIX)
+
+        Example:
+        <TELL-TOKENS
+            (CR CRLF)        <CRLF>
+            DBL *            <PRINT-DBL .X>
+            DBL0             <PRINT-DBL <>>
+            WUTEVA *:STRING  <PRINTI .X>
+            WUTEVA *:FIX     <PRINTN .X>
+            GLOB             <PRINTN ,GLOB>>
+
+        Each token definition is:
+        - TOKEN (atom) or (TOKEN1 TOKEN2 ...): Name(s) of the custom token(s)
+        - * or *:TYPE (zero or more): Each * indicates an argument capture
+        - <EXPANSION> (form): Code to expand to, using .X, .Y, .Z, .W for args
+        """
+        from .ast_nodes import TellTokensNode, TellTokenDef
+
+        tokens = []
+
+        while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            # Token name(s) can be a single atom or a group (TOKEN1 TOKEN2 ...)
+            token_names = []
+
+            if self.current_token.type == TokenType.LPAREN:
+                # Group of tokens with same expansion: (CR CRLF)
+                self.advance()  # Skip (
+                while self.current_token.type == TokenType.ATOM:
+                    token_names.append(self.current_token.value.upper())
+                    self.advance()
+                if self.current_token.type != TokenType.RPAREN:
+                    self.error(f"Expected ) in TELL-TOKENS token group")
+                self.advance()  # Skip )
+            elif self.current_token.type == TokenType.ATOM:
+                token_names.append(self.current_token.value.upper())
+                self.advance()
+            else:
+                self.error(f"Expected token name in TELL-TOKENS, got {self.current_token.type}")
+
+            # Count argument markers (* or *:TYPE)
+            arg_count = 0
+            arg_type = None  # Type constraint if any
+            while self.current_token.type == TokenType.ATOM and self.current_token.value.startswith('*'):
+                arg_spec = self.current_token.value
+                if ':' in arg_spec:
+                    # *:TYPE format - extract type
+                    parts = arg_spec.split(':', 1)
+                    arg_type = parts[1].upper() if len(parts) > 1 else None
+                arg_count += 1
+                self.advance()
+
+            # Expect expansion form <...>
+            if self.current_token.type != TokenType.LANGLE:
+                self.error(f"Expected expansion form in TELL-TOKENS for {token_names}, got {self.current_token.type}")
+
+            # Parse the expansion form
+            expansion = self.parse_form()
+
+            # Create token definitions for each token name
+            for token_name in token_names:
+                # For overloaded tokens (same name, different type), use name:type as key
+                effective_name = f"{token_name}:{arg_type}" if arg_type else token_name
+                tokens.append(TellTokenDef(name=effective_name, arg_count=arg_count, expansion=expansion))
+
+        return TellTokensNode(tokens, line, col)
 
     def parse_remove_synonym(self, line: int, col: int):
         """Parse REMOVE-SYNONYM declaration.

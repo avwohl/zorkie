@@ -143,7 +143,6 @@ class TestVerbLimits:
 class TestCompactPreactions:
     """Tests for COMPACT-PREACTIONS? feature."""
 
-    @pytest.mark.xfail(reason="COMPACT-PREACTIONS? not implemented")
     def test_compact_preactions_p_should_affect_preaction_table_format(self):
         """Test COMPACT-PREACTIONS? affects preaction table format."""
         AssertGlobals(

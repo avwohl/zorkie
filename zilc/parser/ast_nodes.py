@@ -57,6 +57,7 @@ class NodeType(Enum):
 
     # Declarations
     DIRECTIONS = auto()    # <DIRECTIONS north south ...>
+    TELL_TOKENS = auto()   # <TELL-TOKENS token1 pattern1 token2 pattern2 ...>
 
 
 @dataclass
@@ -450,6 +451,37 @@ class DirectionsNode(ASTNode):
 
 
 @dataclass
+class TellTokenDef:
+    """Definition of a single TELL token.
+
+    A token can be:
+    - No arguments: <TELL-TOKENS FOO <SOME-ROUTINE>>
+    - With arguments: <TELL-TOKENS DBL * <PRINT-DBL .X>>
+                      <TELL-TOKENS PAIR * * <PRINT-PAIR .X .Y>>
+    """
+    name: str                        # Token name (e.g., "DBL")
+    arg_count: int                   # Number of * arguments (0, 1, 2, etc.)
+    expansion: Any                   # The form to expand to (e.g., <PRINT-DBL .X>)
+
+
+class TellTokensNode(ASTNode):
+    """TELL-TOKENS declaration: <TELL-TOKENS token1 pattern1 token2 pattern2 ...>
+
+    Defines custom tokens for use in TELL statements.
+    Format: TOKEN [* [* ...]] <EXPANSION>
+    - TOKEN: Name of the custom token
+    - *: Each * indicates an argument capture
+    - EXPANSION: A form using .X, .Y, .Z, .W for captured args
+    """
+    def __init__(self, tokens: List[TellTokenDef], line: int = 0, column: int = 0):
+        super().__init__(NodeType.TELL_TOKENS, line, column)
+        self.tokens = tokens  # List of TellTokenDef
+
+    def __repr__(self):
+        return f"TellTokens({[t.name for t in self.tokens]})"
+
+
+@dataclass
 class Program:
     """Top-level program node containing all definitions."""
     version: int = 3
@@ -467,6 +499,7 @@ class Program:
     removed_synonyms: List[str] = field(default_factory=list)  # Words removed from synonyms
     directions: List[str] = field(default_factory=list)  # Direction names
     bit_synonyms: List['BitSynonymNode'] = field(default_factory=list)  # Flag aliases
+    tell_tokens: Dict[str, 'TellTokenDef'] = field(default_factory=dict)  # Custom TELL tokens
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "

@@ -1856,6 +1856,9 @@ class ZILCompiler:
             program = expander.expand_all(program)
             self.log(f"  Macros expanded")
 
+        # Store program for access by codegen (e.g., for TELL-TOKENS)
+        self.program = program
+
         # Use program version if specified
         if program.version:
             self.version = program.version

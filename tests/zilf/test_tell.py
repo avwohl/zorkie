@@ -74,14 +74,12 @@ class TestTellTokens:
 <DEFMAC PRINT-MAC-1 () '<PRINT "macro">>
 <DEFMAC PRINT-MAC-2 () #SPLICE (<PRINT "mac"> <PRINT "ro">)>"""
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
     def test_tell_builtin_should_support_new_tokens_dbl(self):
         """Test TELL supports custom DBL token."""
         AssertRoutine("", "<TELL DBL 21 CRLF>") \
             .with_global(self.TOKENS_CODE) \
             .outputs("42\n")
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
     def test_tell_builtin_should_support_new_tokens_dbl0(self):
         """Test TELL supports custom DBL0 token."""
         AssertRoutine("", "<TELL DBL0>") \
