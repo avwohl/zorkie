@@ -15665,6 +15665,16 @@ class ImprovedCodeGenerator:
                     f"but routine only accepts {max_allowed} ({num_required} required, {num_optional} optional)"
                 )
 
+        # Check version-specific call argument limits
+        # V1-3: max 3 arguments per call
+        # V4+: max 7 arguments per call
+        max_version_args = 3 if self.version <= 3 else 7
+        if num_args > max_version_args:
+            raise ValueError(
+                f"ZIL0402: Call to {routine_name} has {num_args} arguments, "
+                f"but V{self.version} only supports up to {max_version_args} call arguments"
+            )
+
         code = bytearray()
 
         # CALL is VAR opcode 0x00 (V1-4) / CALL_VS (V4+)

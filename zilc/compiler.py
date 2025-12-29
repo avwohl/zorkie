@@ -86,8 +86,13 @@ class ZILCompiler:
             self.log(f"Compilation successful: {len(story_data)} bytes")
             return True
 
-        except FileNotFoundError:
-            print(f"Error: File not found: {input_path}", file=sys.stderr)
+        except FileNotFoundError as e:
+            # Show the actual missing file, not the input path
+            missing_file = str(e.filename) if e.filename else str(e)
+            print(f"Error: File not found: {missing_file}", file=sys.stderr)
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
             return False
         except SyntaxError as e:
             print(f"Syntax error: {e}", file=sys.stderr)
@@ -266,11 +271,13 @@ class ZILCompiler:
             return match.group(0)  # Keep the SET/SETG in source
 
         # Handle SETG
-        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?]+)\s+(\d+|T|<>|!\\.)?\s*>'
+        # Variable names can include MDL special suffixes like !- (unbind)
+        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.)?\s*>'
         source = re.sub(setg_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
         # Handle SET (compile-time settings like REDEFINE)
-        set_pattern = r'<\s*SET\s+([A-Z0-9\-?]+)\s+(\d+|T|<>|!\\.)?\s*>'
+        # Variable names can include MDL special suffixes like !- (unbind)
+        set_pattern = r'<\s*SET\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.)?\s*>'
         source = re.sub(set_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
         # Handle shorthand flag forms like <FUNNY-GLOBALS?> (sets flag to T)

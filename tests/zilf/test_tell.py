@@ -108,7 +108,6 @@ class TestTellTokens:
 class TestTellTokenErrors:
     """Tests for TELL token error handling."""
 
-    @pytest.mark.xfail(reason="TELL-TOKENS not implemented")
     def test_tell_token_resulting_in_bad_call_should_not_compile(self):
         """Test TELL tokens with bad calls don't compile."""
         # Too many args for the routine
