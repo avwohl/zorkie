@@ -367,16 +367,21 @@ class TestObjectProperties:
                 "<=? <GETP ,FOO ,P?NORTHNORTHWEST> ,BAR>"
             )
 
-    def test_duplicate_property_definitions_not_allowed(self):
-        """Test that duplicate property definitions are rejected."""
-        # user-defined property
+    def test_duplicate_property_definitions_allowed(self):
+        """Test that duplicate property definitions are allowed (ZILCH behavior).
+
+        ZILCH allows duplicate properties - the later value overwrites.
+        This is used in some Infocom games (e.g., suspended).
+        """
+        # user-defined property - second value wins
         AssertGlobals("<OBJECT FOO (MYPROP 1) (MYPROP 2)>") \
-            .does_not_compile()
+            .compiles()
 
-        # standard pseudo-properties
+        # standard pseudo-properties - second value wins
         AssertGlobals('<OBJECT FOO (DESC "foo") (DESC "bar")>') \
-            .does_not_compile()
+            .compiles()
 
+        # But IN + LOC (location property conflicts) should still error
         AssertGlobals(
             "<OBJECT ROOM1>",
             "<OBJECT ROOM2>",

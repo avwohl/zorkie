@@ -924,7 +924,8 @@ class Parser:
                                          'DEXIT', 'DOOR', 'SETG', 'NONE', 'IF'):
                             is_direction_exit = True
                     if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string and not is_direction_exit:
-                        self.error(f"Duplicate property '{prop_name}' in object definition")
+                        # ZILCH allows duplicate properties - later value overwrites
+                        pass  # Let it overwrite silently
                     # Check for location property conflicts (IN and LOC are the same)
                     # Only check when the value is not a NEXIT string and not a direction exit
                     if prop_name in location_props and not is_nexit_string and not is_direction_exit:
@@ -994,7 +995,8 @@ class Parser:
                                      'DEXIT', 'DOOR', 'SETG', 'NONE', 'IF'):
                         is_direction_exit = True
                 if prop_name in properties and prop_name != 'FLAGS' and not is_nexit_string and not is_direction_exit:
-                    self.error(f"Duplicate property '{prop_name}' in object definition")
+                    # ZILCH allows duplicate properties - later value overwrites
+                    pass  # Let it overwrite silently
                 # Check for location property conflicts (IN and LOC are the same)
                 # Only check when the value is not a NEXIT string and not a direction exit
                 if prop_name in location_props and not is_nexit_string and not is_direction_exit:
