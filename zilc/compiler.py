@@ -1151,17 +1151,26 @@ class ZILCompiler:
             # Add text before match
             result.append(source[pos:match_pos])
 
-            # Figure out if we're inside a form by scanning backwards from match_pos
+            # Figure out if we're inside a form by scanning from start
             # We need to properly handle strings when counting brackets
             at_top_level = True
 
-            # Check if we're inside a form by counting brackets
-            # Use a simple approach: count unmatched < and >
-            # This works because we're called after COND processing which handles
-            # quoted forms, so remaining %<> forms should be at top level or
-            # inside regular code
+            # Check if we're inside a form by counting brackets with string awareness
+            # Brackets inside strings don't affect nesting depth
             text_before = source[:match_pos]
-            depth = text_before.count('<') - text_before.count('>')
+            depth = 0
+            in_string = False
+            i = 0
+            while i < len(text_before):
+                char = text_before[i]
+                if char == '"' and (i == 0 or text_before[i-1] != '\\'):
+                    in_string = not in_string
+                elif not in_string:
+                    if char == '<':
+                        depth += 1
+                    elif char == '>':
+                        depth -= 1
+                i += 1
 
             if depth > 0:
                 at_top_level = False
