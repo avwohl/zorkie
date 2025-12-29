@@ -1478,9 +1478,77 @@ class ZILCompiler:
                         elif isinstance(f, str):
                             all_flags.add(f)
 
+        # Also scan routines for FSET/FCLEAR/FSET? usage to find flags
+        from .parser.ast_nodes import FormNode, GlobalVarNode
+        def extract_flag_name(node):
+            """Extract flag name from various AST forms."""
+            if isinstance(node, AtomNode):
+                return node.value
+            elif isinstance(node, GlobalVarNode):
+                # ,FLAGNAME
+                return node.name
+            elif isinstance(node, FormNode):
+                # Check for QUOTE form: 'FLAGNAME -> <QUOTE FLAGNAME>
+                if isinstance(node.operator, AtomNode) and node.operator.value.upper() == 'QUOTE':
+                    if node.operands and isinstance(node.operands[0], AtomNode):
+                        return node.operands[0].value
+                # Check for GVAL form: ,FLAGNAME -> <GVAL FLAGNAME>
+                elif isinstance(node.operator, AtomNode) and node.operator.value.upper() == 'GVAL':
+                    if node.operands and isinstance(node.operands[0], AtomNode):
+                        return node.operands[0].value
+            return None
+
+        def scan_for_flags(node):
+            """Recursively scan AST node for flag references in FSET/FCLEAR/FSET?."""
+            if node is None:
+                return
+            if isinstance(node, FormNode):
+                op_name = None
+                if isinstance(node.operator, AtomNode):
+                    op_name = node.operator.value.upper()
+                if op_name in ('FSET', 'FCLEAR', 'FSET?', 'FSET?-OPTIONAL'):
+                    # Second operand is the flag name
+                    if len(node.operands) >= 2:
+                        flag_name = extract_flag_name(node.operands[1])
+                        if flag_name:
+                            all_flags.add(flag_name)
+                # Recurse into operands
+                for operand in node.operands:
+                    scan_for_flags(operand)
+            elif isinstance(node, (list, tuple)):
+                for item in node:
+                    scan_for_flags(item)
+            elif hasattr(node, 'body'):
+                # RoutineNode, RepeatNode, etc.
+                if isinstance(node.body, list):
+                    for stmt in node.body:
+                        scan_for_flags(stmt)
+            elif hasattr(node, 'clauses'):
+                # CondNode
+                for clause in node.clauses:
+                    if isinstance(clause, (list, tuple)):
+                        for item in clause:
+                            scan_for_flags(item)
+                    else:
+                        scan_for_flags(clause)
+
+        for routine in program.routines:
+            scan_for_flags(routine)
+
+        # Exclude globals from being treated as flags
+        # (e.g., P-GWIMBIT is a global holding a flag number, not a flag itself)
+        global_names = {g.name for g in program.globals}
+        all_flags -= global_names
+
         # Check if flags are already defined as constants
-        defined_constants = {c.name: c.value for c in program.constants
-                           if hasattr(c, 'value') and isinstance(c.value, int)}
+        from .parser.ast_nodes import NumberNode
+        defined_constants = {}
+        for c in program.constants:
+            if hasattr(c, 'value'):
+                if isinstance(c.value, int):
+                    defined_constants[c.name] = c.value
+                elif isinstance(c.value, NumberNode):
+                    defined_constants[c.name] = c.value.value
 
         # Assign bit numbers to flags
         for flag in sorted(all_flags):
