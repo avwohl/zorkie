@@ -3949,6 +3949,35 @@ class ImprovedCodeGenerator:
                     code.extend(obj_code)
                     i += 1
 
+                elif atom_name == 'T' and i + 1 < len(operands):
+                    # T ,object - print " the" followed by object short name
+                    # First print " the "
+                    if self.string_table is not None:
+                        self.string_table.add_string(" the ")
+                        if " the " in self._tell_string_to_placeholder:
+                            placeholder_idx = self._tell_string_to_placeholder[" the "]
+                        else:
+                            placeholder_idx = self._next_tell_string_index
+                            if placeholder_idx > self._max_tell_string_index:
+                                raise ValueError(f"Too many unique TELL strings (>{self._max_tell_string_index})")
+                            self._tell_string_placeholders[placeholder_idx] = " the "
+                            self._tell_string_to_placeholder[" the "] = placeholder_idx
+                            self._next_tell_string_index += 1
+                        placeholder_val = self._tell_string_base + placeholder_idx
+                        self._current_stmt_tell_offsets.append((len(code), placeholder_idx))
+                        code.append(0x8D)  # PRINT_PADDR short form
+                        code.append((placeholder_val >> 8) & 0xFF)
+                        code.append(placeholder_val & 0xFF)
+                    else:
+                        code.append(0xB2)  # PRINT opcode
+                        encoded_words = self.encoder.encode_string(" the ")
+                        code.extend(words_to_bytes(encoded_words))
+                    # Then print object name
+                    i += 1
+                    obj_code = self._gen_tell_operand_code(operands[i], 0x0A)  # PRINT_OBJ
+                    code.extend(obj_code)
+                    i += 1
+
                 elif atom_name == 'N' and i + 1 < len(operands):
                     # N ,value - print number
                     i += 1

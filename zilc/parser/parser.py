@@ -1623,22 +1623,37 @@ class Parser:
     def parse_bit_synonym(self, line: int, col: int):
         """Parse BIT-SYNONYM flag alias declaration.
 
-        Syntax: <BIT-SYNONYM original-flag alias-flag>
+        Syntax variants:
+        1. <BIT-SYNONYM original-flag alias-flag>
+        2. <BIT-SYNONYM group-name flag1 flag2 ...>  (Infocom style)
 
-        Example: <BIT-SYNONYM TOUCHBIT TOUCHEDBIT>
+        Example 1: <BIT-SYNONYM TOUCHBIT TOUCHEDBIT>
         This makes TOUCHEDBIT an alias for TOUCHBIT.
+
+        Example 2: <BIT-SYNONYM EVERYBIT OPENBIT CONTBIT>
+        This defines all flags under the EVERYBIT group.
         """
         from .ast_nodes import BitSynonymNode
 
         if self.current_token.type != TokenType.ATOM:
-            self.error("Expected original flag name in BIT-SYNONYM")
-        original = self.current_token.value
+            self.error("Expected flag name in BIT-SYNONYM")
+        first_flag = self.current_token.value
         self.advance()
 
-        if self.current_token.type != TokenType.ATOM:
-            self.error("Expected alias flag name in BIT-SYNONYM")
-        alias = self.current_token.value
-        self.advance()
+        # Collect all remaining flags
+        flags = []
+        while self.current_token.type == TokenType.ATOM:
+            flags.append(self.current_token.value)
+            self.advance()
+
+        if not flags:
+            self.error("Expected at least one alias flag in BIT-SYNONYM")
+
+        # For now, treat first_flag as group name and others as member flags
+        # Return a node for each pair (for backwards compatibility)
+        # But we need to handle this in the main parse loop
+        original = first_flag
+        alias = flags[0] if len(flags) == 1 else flags
 
         return BitSynonymNode(original, alias, line, col)
 

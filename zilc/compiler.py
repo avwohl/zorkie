@@ -139,14 +139,41 @@ class ZILCompiler:
         """
         import re
 
+        # First, remove LINK directives which are for interactive development only
+        # LINK contains quoted INSERT-FILE forms that should not be processed
+        # We need to handle nested angle brackets properly
+        def remove_link_directives(src):
+            result = []
+            i = 0
+            while i < len(src):
+                # Check for <LINK
+                if src[i:i+5].upper() == '<LINK':
+                    # Find the matching closing >
+                    depth = 1
+                    j = i + 5
+                    while j < len(src) and depth > 0:
+                        if src[j] == '<':
+                            depth += 1
+                        elif src[j] == '>':
+                            depth -= 1
+                        j += 1
+                    # Skip this LINK directive
+                    i = j
+                else:
+                    result.append(src[i])
+                    i += 1
+            return ''.join(result)
+
+        source = remove_link_directives(source)
+
         # Pattern to match <IFILE "filename"> or <INSERT-FILE "filename" T>
         # Second parameter (T or other) is optional and ignored
         ifile_pattern = r'<\s*(?:IFILE|INSERT-FILE)\s+"([^"]+)"(?:\s+[^>]*)?\s*>'
 
         def replace_ifile(match):
             filename = match.group(1)
-            # Try adding .zil extension if not present
-            if not filename.endswith('.zil'):
+            # Try adding .zil extension if not present (case-insensitive check)
+            if not filename.lower().endswith('.zil'):
                 filename += '.zil'
 
             # Search for file in base_path and include_paths
@@ -1473,8 +1500,15 @@ class ZILCompiler:
         # Build BIT-SYNONYM alias map: alias -> original
         bit_synonym_map = {}
         for bs in program.bit_synonyms:
-            bit_synonym_map[bs.alias] = bs.original
-            self.log(f"  BIT-SYNONYM: {bs.alias} -> {bs.original}")
+            # Handle both single alias and list of aliases
+            if isinstance(bs.alias, list):
+                # Infocom style: group name + multiple flags
+                # These are defining new flags (no alias mapping needed)
+                for flag in bs.alias:
+                    self.log(f"  BIT-SYNONYM flag: {flag} (group: {bs.original})")
+            else:
+                bit_synonym_map[bs.alias] = bs.original
+                self.log(f"  BIT-SYNONYM: {bs.alias} -> {bs.original}")
 
         # Collect all flags from objects and rooms
         all_flags = set()
@@ -2519,7 +2553,12 @@ class ZILCompiler:
         # Build BIT-SYNONYM alias map: alias -> original
         bit_synonym_map = {}
         for bs in program.bit_synonyms:
-            bit_synonym_map[bs.alias] = bs.original
+            # Handle both single alias and list of aliases
+            if isinstance(bs.alias, list):
+                # Infocom style: group name + multiple flags (no mapping needed)
+                pass
+            else:
+                bit_synonym_map[bs.alias] = bs.original
 
         # Helper to convert FLAGS to attribute bitmask
         def flags_to_attributes(flags):
