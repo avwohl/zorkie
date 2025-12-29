@@ -38,6 +38,7 @@ class ImprovedCodeGenerator:
         # Symbol tables
         self.globals: Dict[str, int] = {}
         self.global_values: Dict[str, int] = {}  # Global name -> initial value
+        self.zrest_references: Dict[str, tuple] = {}  # Global name -> (base_table_name, byte_offset)
         self.constants: Dict[str, int] = {}
         self.routines: Dict[str, int] = {}
         self.locals: Dict[str, int] = {}
@@ -606,6 +607,9 @@ class ImprovedCodeGenerator:
                             val = self._eval_compile_time_zget(global_node.initial_value.operands)
                             if val is not None:
                                 self.global_values[global_node.name] = val
+                        elif form_op == 'ZREST':
+                            # Compile-time ZREST - store reference to table at offset
+                            self._store_zrest_reference(global_node.name, global_node.initial_value.operands)
                 elif isinstance(global_node.initial_value, GlobalVarNode):
                     # Reference to another global - copy its initial value
                     # (could be scalar or table reference marker like 0xFF00 | idx)
@@ -1275,6 +1279,27 @@ class ImprovedCodeGenerator:
         else:
             return
 
+        # Check if this is a ZREST reference
+        if table_name in self.zrest_references:
+            table_idx, table_data, base_offset = self._get_table_for_zrest_ref(table_name)
+            if table_idx is None:
+                return
+            # Get index
+            index = self._eval_compile_time_value(operands[1])
+            if index is None:
+                return
+            # Get value
+            value = self._eval_compile_time_value(operands[2])
+            if value is None:
+                return
+            # Set word at byte offset = base_offset + index * 2
+            byte_offset = base_offset + index * 2
+            if byte_offset + 1 < len(table_data):
+                table_data[byte_offset] = (value >> 8) & 0xFF
+                table_data[byte_offset + 1] = value & 0xFF
+                self._update_table_data(table_idx, table_data)
+            return
+
         table_idx, table_data = self._get_table_for_global(table_name)
         if table_idx is None:
             return
@@ -1398,6 +1423,53 @@ class ImprovedCodeGenerator:
         # when used in a SETG or CONSTANT context
         pass
 
+    def _store_zrest_reference(self, name: str, operands):
+        """Store a ZREST reference for compile-time table access.
+
+        <SETG name <ZREST ,TABLE-VAR offset>>
+        Stores (base_table_name, byte_offset) for later ZGET/ZPUT access.
+        """
+        if len(operands) < 2:
+            return
+
+        # Get base table name
+        table_ref = operands[0]
+        if isinstance(table_ref, GlobalVarNode):
+            base_table = table_ref.name
+        elif isinstance(table_ref, FormNode) and isinstance(table_ref.operator, AtomNode):
+            if table_ref.operator.value.upper() in ('GVAL', ',') and table_ref.operands:
+                if isinstance(table_ref.operands[0], AtomNode):
+                    base_table = table_ref.operands[0].value
+                else:
+                    return
+            else:
+                return
+        else:
+            return
+
+        # Get offset
+        offset = self._eval_compile_time_value(operands[1])
+        if offset is None:
+            return
+
+        # Store the ZREST reference
+        self.zrest_references[name] = (base_table, offset)
+
+    def _get_table_for_zrest_ref(self, name: str):
+        """Get table info for a ZREST reference.
+
+        Returns (table_idx, table_data as bytearray, byte_offset) or (None, None, None).
+        """
+        if name not in self.zrest_references:
+            return None, None, None
+
+        base_table, byte_offset = self.zrest_references[name]
+        table_idx, table_data = self._get_table_for_global(base_table)
+        if table_idx is None:
+            return None, None, None
+
+        return table_idx, table_data, byte_offset
+
     def _eval_compile_time_value(self, node):
         """Evaluate a compile-time constant value.
 
@@ -1463,6 +1535,21 @@ class ImprovedCodeGenerator:
             else:
                 return None
         else:
+            return None
+
+        # Check if this is a ZREST reference
+        if table_name in self.zrest_references:
+            table_idx, table_data, base_offset = self._get_table_for_zrest_ref(table_name)
+            if table_idx is None or table_data is None:
+                return None
+            # Get index
+            index = self._eval_compile_time_value(operands[1])
+            if index is None:
+                return None
+            # Get word at byte offset = base_offset + index * 2
+            byte_offset = base_offset + index * 2
+            if byte_offset + 1 < len(table_data):
+                return (table_data[byte_offset] << 8) | table_data[byte_offset + 1]
             return None
 
         table_idx, table_data = self._get_table_for_global(table_name)
@@ -1860,6 +1947,9 @@ class ImprovedCodeGenerator:
             # Handle <> (FALSE) form
             if isinstance(node.operator, AtomNode) and node.operator.value == '<>' and not node.operands:
                 return 0
+            # Handle ZGET for compile-time table access
+            if isinstance(node.operator, AtomNode) and node.operator.value.upper() == 'ZGET':
+                return self._eval_compile_time_zget(node.operands)
         return None
 
     def generate_routine(self, routine: RoutineNode) -> bytes:

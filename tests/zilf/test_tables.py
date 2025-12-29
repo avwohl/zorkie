@@ -224,7 +224,6 @@ class TestParserTables:
 class TestZREST:
     """Tests for ZREST (compile-time table offset)."""
 
-    @pytest.mark.xfail(reason="ZREST compile-time offset tables not implemented")
     def test_zrest_creates_compile_time_offset_table(self):
         """Test that ZREST creates compile-time offset table."""
         AssertGlobals(
