@@ -1737,20 +1737,41 @@ class Parser:
             else:
                 self.error(f"Expected token name in TELL-TOKENS, got {self.current_token.type}")
 
-            # Count argument markers (* or *:TYPE)
+            # Parse argument patterns: can be:
+            # - * or *:TYPE - wildcard pattern (captures argument)
+            # - ,GLOBAL - specific global var pattern (no capture)
+            # - <expansion> directly (no arguments)
             arg_count = 0
             arg_type = None  # Type constraint if any
-            while self.current_token.type == TokenType.ATOM and self.current_token.value.startswith('*'):
-                arg_spec = self.current_token.value
-                if ':' in arg_spec:
-                    # *:TYPE format - extract type
-                    parts = arg_spec.split(':', 1)
-                    arg_type = parts[1].upper() if len(parts) > 1 else None
-                arg_count += 1
-                self.advance()
+            pattern = None   # Specific pattern to match (e.g., ,PRSO)
+
+            while self.current_token.type != TokenType.LANGLE:
+                if self.current_token.type == TokenType.ATOM and self.current_token.value.startswith('*'):
+                    # Wildcard pattern: * or *:TYPE
+                    arg_spec = self.current_token.value
+                    if ':' in arg_spec:
+                        # *:TYPE format - extract type
+                        parts = arg_spec.split(':', 1)
+                        arg_type = parts[1].upper() if len(parts) > 1 else None
+                    arg_count += 1
+                    self.advance()
+                elif self.current_token.type == TokenType.GLOBAL_VAR:
+                    # Specific global var pattern: ,PRSO, ,PRSI, etc.
+                    pattern = ('GLOBAL', self.current_token.value)
+                    arg_count = 0  # Pattern match consumes the slot but doesn't capture
+                    self.advance()
+                elif self.current_token.type == TokenType.RANGLE:
+                    # End of TELL-TOKENS
+                    break
+                elif self.current_token.type == TokenType.EOF:
+                    break
+                else:
+                    self.error(f"Expected expansion form in TELL-TOKENS for {token_names}, got {self.current_token.type}")
 
             # Expect expansion form <...>
             if self.current_token.type != TokenType.LANGLE:
+                if self.current_token.type in (TokenType.RANGLE, TokenType.EOF):
+                    break  # End of TELL-TOKENS
                 self.error(f"Expected expansion form in TELL-TOKENS for {token_names}, got {self.current_token.type}")
 
             # Parse the expansion form
@@ -1763,7 +1784,7 @@ class Parser:
             for token_name in token_names:
                 # For overloaded tokens (same name, different type), use name:type as key
                 effective_name = f"{token_name}:{arg_type}" if arg_type else token_name
-                tokens.append(TellTokenDef(name=effective_name, arg_count=arg_count, expansion=expansion))
+                tokens.append(TellTokenDef(name=effective_name, arg_count=arg_count, expansion=expansion, pattern=pattern))
 
         return TellTokensNode(tokens, line, col)
 

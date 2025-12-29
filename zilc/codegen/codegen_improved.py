@@ -572,19 +572,16 @@ class ImprovedCodeGenerator:
                 if global_node.name not in self.globals:
                     # Check if we've exceeded hard global slots (16-255 = 240 slots)
                     if self.next_global > 0xFF:
-                        if self.funny_globals_enabled:
-                            # Put this global in the FUNNY-GLOBALS table
-                            table_idx = len(self.funny_globals_table)
-                            self.funny_globals_table[global_node.name] = table_idx
-                            # Use a marker value to indicate it's a funny global
-                            # We'll use 0x1XX where XX is the table index
-                            self.globals[global_node.name] = 0x100 + table_idx
-                        else:
-                            raise ValueError(
-                                f"Too many globals: '{global_node.name}' would be global #{self.next_global}. "
-                                f"Z-machine only supports 240 globals (16-255). "
-                                f"Use <FUNNY-GLOBALS?> to enable soft globals."
-                            )
+                        # Auto-enable FUNNY-GLOBALS when we exceed the limit
+                        if not self.funny_globals_enabled:
+                            self.funny_globals_enabled = True
+                            print(f"Note: Auto-enabling FUNNY-GLOBALS (>240 globals)", file=sys.stderr)
+                        # Put this global in the FUNNY-GLOBALS table
+                        table_idx = len(self.funny_globals_table)
+                        self.funny_globals_table[global_node.name] = table_idx
+                        # Use a marker value to indicate it's a funny global
+                        # We'll use 0x1XX where XX is the table index
+                        self.globals[global_node.name] = 0x100 + table_idx
                     else:
                         self.globals[global_node.name] = self.next_global
                         self.next_global += 1
@@ -3949,8 +3946,8 @@ class ImprovedCodeGenerator:
                     code.extend(obj_code)
                     i += 1
 
-                elif atom_name == 'T' and i + 1 < len(operands):
-                    # T ,object - print " the" followed by object short name
+                elif atom_name in ('T', 'THE') and i + 1 < len(operands):
+                    # T/THE ,object - print " the" followed by object short name
                     # First print " the "
                     if self.string_table is not None:
                         self.string_table.add_string(" the ")
@@ -11524,10 +11521,10 @@ class ImprovedCodeGenerator:
                 code.append(0xA0)  # JZ 1OP short form with variable type
                 code.append(0x00)  # Stack
                 # Branch with polarity=false to exit when NOT zero
+                # Use long branch format (2 bytes) to handle large bodies
                 exit_branch_pos = len(code)
-                code.append(0x40)  # Short branch on false, placeholder offset
-                # Note: We handle form-based ends differently - no long branch placeholder needed
-                # Skip the normal termination branch setup below
+                code.append(0x00)  # Long branch byte 1 (polarity=false, bit 6=0)
+                code.append(0x00)  # Long branch byte 2
 
                 # Push block context for RETURN support
                 block_ctx = {
@@ -11602,16 +11599,15 @@ class ImprovedCodeGenerator:
                     code.append((jump_offset_unsigned >> 8) & 0xFF)
                     code.append(jump_offset_unsigned & 0xFF)
 
-                    # Patch exit branch
-                    # Z-machine branch: target = address_after_branch + offset - 2
-                    # So offset = target - branch_pos + 1 for single-byte short branch
+                    # Patch exit branch (long format)
+                    # Long branch: offset = target - branch_pos
                     exit_point = len(code)
-                    short_offset = exit_point - exit_branch_pos + 1
-                    if 2 <= short_offset <= 63:
-                        # Short branch on false (polarity=0, short=1)
-                        code[exit_branch_pos] = 0x40 | (short_offset & 0x3F)
-                    else:
-                        raise ValueError(f"DO loop body too large for short branch: {short_offset}")
+                    long_offset = exit_point - exit_branch_pos
+                    if long_offset < 0 or long_offset > 0x3FFF:
+                        raise ValueError(f"DO loop body too large even for long branch: {long_offset}")
+                    # Polarity = false, so bit 7 = 0
+                    code[exit_branch_pos] = (long_offset >> 8) & 0x3F
+                    code[exit_branch_pos + 1] = long_offset & 0xFF
 
                     # Patch RETURN placeholders
                     i = 0
@@ -11660,8 +11656,10 @@ class ImprovedCodeGenerator:
                 code.append(0xA0)  # JZ 1OP short form with variable type
                 code.append(0x00)  # Stack
                 # Branch with polarity=false to exit when NOT zero
+                # Use long branch format (2 bytes) to handle large bodies
                 exit_branch_pos = len(code)
-                code.append(0x40)  # Short branch on false, placeholder offset
+                code.append(0x00)  # Long branch byte 1 (polarity=false, bit 6=0)
+                code.append(0x00)  # Long branch byte 2
 
                 # Push block context for RETURN support
                 block_ctx = {
@@ -11717,15 +11715,15 @@ class ImprovedCodeGenerator:
                     code.append((jump_offset_unsigned >> 8) & 0xFF)
                     code.append(jump_offset_unsigned & 0xFF)
 
-                    # Patch exit branch
-                    # Z-machine branch: target = address_after_branch + offset - 2
-                    # So offset = target - branch_pos + 1 for single-byte short branch
+                    # Patch exit branch (long format)
+                    # Long branch: offset = target - branch_pos
                     exit_point = len(code)
-                    short_offset = exit_point - exit_branch_pos + 1
-                    if 2 <= short_offset <= 63:
-                        code[exit_branch_pos] = 0x40 | (short_offset & 0x3F)
-                    else:
-                        raise ValueError(f"DO loop body too large for short branch: {short_offset}")
+                    long_offset = exit_point - exit_branch_pos
+                    if long_offset < 0 or long_offset > 0x3FFF:
+                        raise ValueError(f"DO loop body too large even for long branch: {long_offset}")
+                    # Polarity = false, so bit 7 = 0
+                    code[exit_branch_pos] = (long_offset >> 8) & 0x3F
+                    code[exit_branch_pos + 1] = long_offset & 0xFF
 
                     # Patch RETURN placeholders
                     i = 0
@@ -12127,8 +12125,10 @@ class ImprovedCodeGenerator:
 
         # Branch if no child (jump to end/exit)
         # Branch on false (child exists) would continue, branch on true (no child) would exit
+        # Use long branch format (2 bytes) to handle large bodies
         no_child_branch_pos = len(code)
-        code.append(0x40)  # Placeholder: branch on false (polarity=0), short form
+        code.append(0x00)  # Placeholder: long branch byte 1 (bit 6=0 means long, polarity in bit 7)
+        code.append(0x00)  # Placeholder: long branch byte 2
 
         # Loop start position (for AGAIN)
         loop_start = len(code)
@@ -12150,9 +12150,7 @@ class ImprovedCodeGenerator:
         code.append(temp_var_num & 0xFF)  # Store result
         # Branch: we don't care about the branch result here, but we need a branch byte
         # Use short branch with offset 2 (skip nothing, just continue)
-        code.append(0x40)  # Branch on false, offset 0 (continue regardless)
-        # Actually offset 0 = RFALSE, offset 1 = RTRUE, so we need offset 2 to skip nothing
-        code[-1] = 0x42  # Branch on false, offset 2 (continue)
+        code.append(0x42)  # Branch on false, offset 2 (continue)
 
         # Push block context for RETURN support
         block_ctx = {
@@ -12194,8 +12192,10 @@ class ImprovedCodeGenerator:
             code.append(0xA0)  # JZ 1OP short form with variable
             code.append(var_num & 0xFF)
             # Branch on true (value is zero) -> exit loop
+            # Use long branch format (2 bytes) to handle large bodies
             exit_branch_pos = len(code)
-            code.append(0xC0)  # Placeholder: branch on true
+            code.append(0x80)  # Placeholder: long branch byte 1 (bit 7=polarity true)
+            code.append(0x00)  # Placeholder: long branch byte 2
 
             # Jump back to loop start
             jump_pos = len(code)
@@ -12211,22 +12211,25 @@ class ImprovedCodeGenerator:
             # Exit point
             exit_point = len(code)
 
-            # Patch the "no child" branch to jump to end clause or exit
-            # Z-machine branch: target = PC + offset - 2, where PC is after branch byte
-            # So offset = target - branch_pos + 1 for single-byte branch
-            short_offset = exit_point - no_child_branch_pos + 1
-            if 2 <= short_offset <= 63:
-                code[no_child_branch_pos] = 0x40 | (short_offset & 0x3F)
-            else:
-                # Need long branch - this is more complex
-                raise ValueError(f"MAP-CONTENTS body too large for short branch: {short_offset}")
+            # Patch the "no child" branch (long format) to jump to end clause or exit
+            # Long branch format: byte1 = 0bpoooooo (p=polarity, oooooo=offset high 6 bits)
+            #                     byte2 = offset low 8 bits
+            # Z-machine branch: target = PC + offset - 2, where PC is after branch bytes
+            # For 2-byte branch: offset = target - branch_pos
+            long_offset = exit_point - no_child_branch_pos
+            if long_offset < 0 or long_offset > 0x3FFF:
+                raise ValueError(f"MAP-CONTENTS body too large even for long branch: {long_offset}")
+            # Polarity = false (branch if no child), so bit 7 = 0
+            code[no_child_branch_pos] = (long_offset >> 8) & 0x3F
+            code[no_child_branch_pos + 1] = long_offset & 0xFF
 
-            # Patch the "zero check" exit branch
-            short_offset2 = exit_point - exit_branch_pos + 1
-            if 2 <= short_offset2 <= 63:
-                code[exit_branch_pos] = 0xC0 | (short_offset2 & 0x3F)
-            else:
-                raise ValueError(f"MAP-CONTENTS body too large for short branch: {short_offset2}")
+            # Patch the "zero check" exit branch (long format)
+            long_offset2 = exit_point - exit_branch_pos
+            if long_offset2 < 0 or long_offset2 > 0x3FFF:
+                raise ValueError(f"MAP-CONTENTS exit branch too large: {long_offset2}")
+            # Polarity = true (branch if zero), so bit 7 = 1
+            code[exit_branch_pos] = 0x80 | ((long_offset2 >> 8) & 0x3F)
+            code[exit_branch_pos + 1] = long_offset2 & 0xFF
 
             # Generate END clause if present
             # Use _generate_nested_and_adjust to properly track placeholder offsets

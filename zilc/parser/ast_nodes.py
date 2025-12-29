@@ -528,10 +528,13 @@ class TellTokenDef:
     - No arguments: <TELL-TOKENS FOO <SOME-ROUTINE>>
     - With arguments: <TELL-TOKENS DBL * <PRINT-DBL .X>>
                       <TELL-TOKENS PAIR * * <PRINT-PAIR .X .Y>>
+    - Pattern match: <TELL-TOKENS D ,PRSO <DPRINT-PRSO>>  ; specific arg pattern
+                     <TELL-TOKENS D * <DPRINT .X>>        ; wildcard fallback
     """
     name: str                        # Token name (e.g., "DBL")
     arg_count: int                   # Number of * arguments (0, 1, 2, etc.)
     expansion: Any                   # The form to expand to (e.g., <PRINT-DBL .X>)
+    pattern: Any = None              # Optional specific pattern to match (e.g., ,PRSO)
 
 
 class TellTokensNode(ASTNode):
