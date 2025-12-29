@@ -832,7 +832,9 @@ class TestVariables:
         AssertExpr("<SET>").does_not_compile()
         AssertRoutine("X", "<SET X>").does_not_compile()
         AssertExpr("<SET 1 2>").does_not_compile()
-        AssertRoutine("X", "<SET Y 1>").does_not_compile()
+        # Note: SET with undeclared variable auto-declares it as a local
+        # (Infocom ZILCH behavior, needed for games like abyss)
+        AssertRoutine("X", "<SET Y 1> .Y").gives_number("1")
 
     def test_value(self):
         """Test VALUE opcode."""

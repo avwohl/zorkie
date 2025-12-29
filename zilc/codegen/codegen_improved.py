@@ -2039,9 +2039,57 @@ class ImprovedCodeGenerator:
                             return (values[0] >> (-shift)) & 0xFFFF
         return None
 
+    def _find_undeclared_set_vars(self, node, declared: set, found: set):
+        """Recursively find variables used in SET that aren't declared."""
+        from zilc.parser.ast_nodes import FormNode, AtomNode, LocalVarNode, CondNode, RepeatNode
+
+        if isinstance(node, FormNode):
+            if isinstance(node.operator, AtomNode):
+                op_name = node.operator.value.upper()
+                if op_name == 'SET' and len(node.operands) >= 1:
+                    # First operand is the variable name
+                    var_node = node.operands[0]
+                    if isinstance(var_node, AtomNode):
+                        var_name = var_node.value
+                        if var_name not in declared and var_name not in self.globals:
+                            found.add(var_name)
+            # Recurse into operands
+            for operand in node.operands:
+                self._find_undeclared_set_vars(operand, declared, found)
+        elif isinstance(node, CondNode):
+            # COND node has clauses as (condition, actions) tuples
+            for clause in node.clauses:
+                condition, actions = clause
+                self._find_undeclared_set_vars(condition, declared, found)
+                for item in actions:
+                    self._find_undeclared_set_vars(item, declared, found)
+        elif isinstance(node, RepeatNode):
+            # REPEAT/PROG node has body
+            for item in node.body:
+                self._find_undeclared_set_vars(item, declared, found)
+        elif hasattr(node, 'body') and isinstance(node.body, list):
+            # Generic fallback for any node with body (PROG, BIND, etc.)
+            for item in node.body:
+                self._find_undeclared_set_vars(item, declared, found)
+        elif isinstance(node, list):
+            for item in node:
+                self._find_undeclared_set_vars(item, declared, found)
+
     def generate_routine(self, routine: RoutineNode) -> bytes:
         """Generate bytecode for a routine."""
         self._current_routine = routine.name  # Track for warnings
+
+        # Pre-scan for undeclared SET variables and auto-add them as locals
+        declared_vars = set(routine.params) | set(routine.aux_vars)
+        undeclared_vars = set()
+        for stmt in routine.body:
+            self._find_undeclared_set_vars(stmt, declared_vars, undeclared_vars)
+
+        if undeclared_vars:
+            # Add undeclared vars to aux_vars (they'll become local slots)
+            for var_name in sorted(undeclared_vars):  # Sort for deterministic order
+                routine.aux_vars.append(var_name)
+                declared_vars.add(var_name)
 
         # Validate GO routine constraints
         if routine.name == "GO":
@@ -4563,7 +4611,8 @@ class ImprovedCodeGenerator:
                     # Found as global - use it
                     var_num = self.globals[var_name]
                 else:
-                    raise ValueError(f"{op_name}: Variable '{var_name}' not declared")
+                    routine_name = getattr(self, '_current_routine', '<unknown>')
+                    raise ValueError(f"{op_name}: Variable '{var_name}' not declared in routine {routine_name}")
         elif isinstance(var_node, NumberNode):
             # Numeric variable reference (e.g., <SET 1 value> to set local variable 1)
             var_num = var_node.value
