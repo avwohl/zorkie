@@ -2890,8 +2890,10 @@ class ZILCompiler:
                     prop_num = prop_map[key]
                     # Check if this is a direction property (e.g., NORTH, SOUTH, etc.)
                     if key in program.directions:
+                        # Check if PROPSPEC was cleared for DIRECTIONS
+                        propspec_cleared = 'DIRECTIONS' in program.cleared_propspecs
                         # Check if there's a PROPDEF DIRECTIONS pattern to use
-                        if 'DIRECTIONS' in propdef_patterns and isinstance(value, list):
+                        if not propspec_cleared and 'DIRECTIONS' in propdef_patterns and isinstance(value, list):
                             # Apply DIRECTIONS PROPDEF pattern to this direction property
                             encoded, constants = apply_propdef('DIRECTIONS', value, obj_name_to_num)
                             if encoded is not None:
@@ -2903,6 +2905,17 @@ class ZILCompiler:
                                 exit_value = self._extract_direction_exit(value, obj_name_to_num)
                                 if exit_value is not None:
                                     props[prop_num] = ByteValue(exit_value)
+                        elif propspec_cleared:
+                            # PROPSPEC was cleared - special direction syntax not allowed
+                            # The value should be treated as a regular property value
+                            if isinstance(value, list):
+                                # If it's a list like (DIR TO DEST), this is an error
+                                # since PROPSPEC was cleared
+                                raise ValueError(
+                                    f"Direction property '{key}' uses special syntax but PROPSPEC was cleared for DIRECTIONS"
+                                )
+                            else:
+                                props[prop_num] = value
                         else:
                             # Default: extract destination from (DIR TO DEST) or (DIR PER ROUTINE)
                             exit_value = self._extract_direction_exit(value, obj_name_to_num)

@@ -5,7 +5,7 @@ Each node represents a ZIL construct.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Set
 from enum import Enum, auto
 
 
@@ -575,6 +575,7 @@ class Program:
     order_tree: Optional[str] = None  # ORDER-TREE? setting (e.g., REVERSE-DEFINED)
     define_globals: List['DefineGlobalsNode'] = field(default_factory=list)  # DEFINE-GLOBALS declarations
     compile_time_ops: List['FormNode'] = field(default_factory=list)  # Compile-time ops: ZPUT, PUTB, ZGET, ZREST
+    cleared_propspecs: Set[str] = field(default_factory=set)  # PROPSPEC cleared for atoms (e.g., DIRECTIONS)
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "

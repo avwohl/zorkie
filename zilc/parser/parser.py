@@ -150,6 +150,17 @@ class Parser:
                 elif op_name in ('ZPUT', 'PUTB', 'ZGET', 'ZREST'):
                     # Compile-time table manipulation operations
                     program.compile_time_ops.append(node)
+                elif op_name == 'PUTPROP':
+                    # PUTPROP atom indicator [value]
+                    # Handle PROPSPEC clearing: <PUTPROP DIRECTIONS PROPSPEC>
+                    if len(node.operands) >= 2:
+                        item_node = node.operands[0]
+                        indicator_node = node.operands[1]
+                        has_value = len(node.operands) >= 3
+                        if isinstance(item_node, AtomNode) and isinstance(indicator_node, AtomNode):
+                            if indicator_node.value.upper() == 'PROPSPEC' and not has_value:
+                                # Clear PROPSPEC for this atom
+                                program.cleared_propspecs.add(item_node.value.upper())
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -511,6 +522,13 @@ class Parser:
             elif op_name == "REMOVE-SYNONYM":
                 # REMOVE-SYNONYM word declaration
                 node = self.parse_remove_synonym(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "PUTPROP":
+                # PUTPROP atom indicator [value]
+                # With no value, clears the property
+                node = self.parse_putprop(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 
@@ -1614,6 +1632,40 @@ class Parser:
         self.advance()
 
         return BitSynonymNode(original, alias, line, col)
+
+    def parse_putprop(self, line: int, col: int):
+        """Parse PUTPROP directive.
+
+        Syntax: <PUTPROP atom indicator [value]>
+
+        Examples:
+        - <PUTPROP DIRECTIONS PROPSPEC>  ; Clear PROPSPEC for DIRECTIONS
+        - <PUTPROP FOO BAR 123>          ; Set FOO's BAR property to 123
+
+        When no value is given, clears the property.
+        We currently only support PROPSPEC clearing for DIRECTIONS.
+        """
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected atom in PUTPROP")
+        item = self.current_token.value
+        self.advance()
+
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected indicator in PUTPROP")
+        indicator = self.current_token.value
+        self.advance()
+
+        # Check if there's a value (if not, this is a clear operation)
+        value = None
+        if self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+            value = self.parse_expression()
+
+        # Return a FormNode for PUTPROP - compiler will handle it
+        from .ast_nodes import FormNode, AtomNode
+        operands = [AtomNode(item, line, col), AtomNode(indicator, line, col)]
+        if value is not None:
+            operands.append(value)
+        return FormNode(AtomNode('PUTPROP', line, col), operands, line, col)
 
     def parse_tell_tokens(self, line: int, col: int):
         """Parse TELL-TOKENS declaration.

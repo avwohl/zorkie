@@ -290,7 +290,6 @@ class TestPropdef:
             "<=? <GETB <GETPT ,HOUSE ,P?SOUTH> ,MY-REXIT> ,WOODS>"
         )
 
-    @pytest.mark.xfail(reason="PROPSPEC clearing not implemented")
     def test_clearing_propspec_for_directions_overrides_default(self):
         """Test that clearing PROPSPEC overrides default patterns."""
         AssertGlobals(
