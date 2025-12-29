@@ -1870,6 +1870,11 @@ class ZILCompiler:
                         const_name = f'V?{verb_word.upper()}'
                         if const_name not in verb_constants:
                             verb_constants[const_name] = action_num
+                        # Also create ACT?VERB from the verb word
+                        # This allows code like <EQUAL? .ACT ,ACT?FLY> when FLY maps to V-WALK
+                        act_const_name = f'ACT?{verb_word.upper()}'
+                        if act_const_name not in verb_constants:
+                            verb_constants[act_const_name] = action_num
 
                 # Create ACT?ACTION constant from action routine name
                 # E.g., V-WALK -> ACT?WALK, V-FIND -> ACT?FIND
