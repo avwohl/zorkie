@@ -13868,10 +13868,19 @@ class ImprovedCodeGenerator:
         This is logical NOT, not bitwise complement.
         For bitwise complement, use BCOM.
 
+        <NOT a b c> is treated as <NOT <OR a b c>> which equals
+        <AND <NOT a> <NOT b> <NOT c>>. Returns 1 only if all are 0.
+
         Implementation: use JZ to branch, push 1 or 0 to stack.
         """
+        if len(operands) > 1:
+            # Multiple operands: <NOT a b c> = <AND <NOT a> <NOT b> <NOT c>>
+            # Build an OR node and negate it
+            or_node = FormNode(AtomNode('OR'), operands)
+            return self.gen_not([or_node])
+
         if len(operands) != 1:
-            raise ValueError("NOT requires exactly 1 operand")
+            raise ValueError("NOT requires at least 1 operand")
 
         code = bytearray()
 
@@ -15049,14 +15058,49 @@ class ImprovedCodeGenerator:
 
             # Handle NOT
             elif op_name == 'NOT':
-                if len(condition.operands) != 1:
-                    raise ValueError("NOT requires exactly 1 operand")
-                # Generate the inner condition and flip the branch sense
-                inner_code = self.generate_condition_test(
-                    condition.operands[0],
-                    branch_on_false=not branch_on_false
-                )
-                return inner_code
+                if len(condition.operands) == 1:
+                    # Standard NOT: flip the branch sense
+                    inner_code = self.generate_condition_test(
+                        condition.operands[0],
+                        branch_on_false=not branch_on_false
+                    )
+                    return inner_code
+                elif len(condition.operands) > 1:
+                    # Multiple operands: <NOT a b c> = <NOT <OR a b c>>
+                    # This is equivalent to <AND <NOT a> <NOT b> <NOT c>>
+                    # We can implement this by testing each operand and
+                    # branching if ANY is true (for branch_on_false case)
+                    # or ALL are false (for branch_on_true case)
+                    code = bytearray()
+                    if branch_on_false:
+                        # Branch if any operand is true
+                        for operand in condition.operands:
+                            inner_code = self.generate_condition_test(
+                                operand, branch_on_false=False  # branch if true
+                            )
+                            code.extend(inner_code)
+                    else:
+                        # Branch only if all operands are false
+                        # Use a skip-over pattern for all-but-last
+                        end_label = self._allocate_label()
+                        for i, operand in enumerate(condition.operands):
+                            if i < len(condition.operands) - 1:
+                                # If true, skip to end (don't branch)
+                                skip_label = self._allocate_label()
+                                inner_code = self.generate_condition_test(
+                                    operand, branch_on_false=False
+                                )
+                                code.extend(inner_code)
+                                # After this test, if we didn't branch, continue
+                            else:
+                                # Last operand: if false, branch to target
+                                inner_code = self.generate_condition_test(
+                                    operand, branch_on_false=True
+                                )
+                                code.extend(inner_code)
+                    return bytes(code)
+                else:
+                    raise ValueError("NOT requires at least 1 operand")
 
             # Handle G=? (greater or equal) - implemented as NOT(a < b)
             # branch_on_false: branch when a < b (so JL with branch on true)

@@ -1235,10 +1235,12 @@ class TestNot:
     def test_not_error(self):
         """Test NOT error cases."""
         AssertExpr("<NOT>").does_not_compile()
-        AssertExpr("<NOT 0 0>").does_not_compile()
+        # <NOT 0 0> is valid - treated as <NOT <OR 0 0>> (Infocom compatibility)
+        AssertExpr("<NOT 0 0>").compiles()
 
         AssertExpr("<COND (<NOT>)>").does_not_compile()
-        AssertExpr("<COND (<NOT 0 0>)>").does_not_compile()
+        # Multi-operand NOT in COND is valid - <NOT a b> = <NOT <OR a b>>
+        AssertExpr("<COND (<NOT 0 0>)>").compiles()
 
 
 class TestIntbl:
