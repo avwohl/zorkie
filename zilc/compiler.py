@@ -1876,12 +1876,17 @@ class ZILCompiler:
                         if act_const_name not in verb_constants:
                             verb_constants[act_const_name] = action_num
 
-                # Create ACT?ACTION constant from action routine name
-                # E.g., V-WALK -> ACT?WALK, V-FIND -> ACT?FIND
+                # Create ACT?ACTION and V?ACTION constants from action routine name
+                # E.g., V-WALK -> ACT?WALK and V?WALK, V-ALARM -> ACT?ALARM and V?ALARM
                 if action_routine.startswith('V-'):
-                    act_const_name = f'ACT?{action_routine[2:].upper()}'
+                    action_suffix = action_routine[2:].upper()
+                    act_const_name = f'ACT?{action_suffix}'
                     if act_const_name not in verb_constants:
                         verb_constants[act_const_name] = action_num
+                    # Also create V?ACTION for PERFORM calls like <PERFORM ,V?ALARM>
+                    v_const_name = f'V?{action_suffix}'
+                    if v_const_name not in verb_constants:
+                        verb_constants[v_const_name] = action_num
 
                 action_num += 1
 
