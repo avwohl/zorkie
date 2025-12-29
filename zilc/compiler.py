@@ -1151,19 +1151,29 @@ class ZILCompiler:
             # Add text before match
             result.append(source[pos:match_pos])
 
-            # Figure out if we're inside a form by checking for unclosed < before this position
-            # Count angle brackets in what we've collected so far
-            collected = ''.join(result)
-            angle_depth = collected.count('<') - collected.count('>')
+            # Figure out if we're inside a form by scanning backwards from match_pos
+            # We need to properly handle strings when counting brackets
+            at_top_level = True
+
+            # Check if we're inside a form by counting brackets
+            # Use a simple approach: count unmatched < and >
+            # This works because we're called after COND processing which handles
+            # quoted forms, so remaining %<> forms should be at top level or
+            # inside regular code
+            text_before = source[:match_pos]
+            depth = text_before.count('<') - text_before.count('>')
+
+            if depth > 0:
+                at_top_level = False
 
             # Skip the % and start from <
             start = match_pos + 1  # +1 to skip %
             content, end = self._extract_balanced_content(source, start)
 
             if content:
-                # Strip the form - if at top level (angle_depth == 0), remove entirely
-                # If inside a form (angle_depth > 0), replace with 0 placeholder
-                if angle_depth > 0:
+                # Strip the form - if at top level, remove entirely
+                # If inside a form, replace with 0 placeholder
+                if not at_top_level:
                     result.append('0')
                 # else: discard entirely
                 pos = end
@@ -1337,6 +1347,23 @@ class ZILCompiler:
 
         if test.upper() == '<>':
             return False
+
+        # Match <NOT expr>
+        not_match = re.match(r'<\s*NOT\s+(.+)\s*>', test, re.DOTALL | re.IGNORECASE)
+        if not_match:
+            inner_expr = not_match.group(1).strip()
+            # Find balanced inner expression
+            if inner_expr.startswith('<'):
+                depth = 1
+                end = 1
+                while end < len(inner_expr) and depth > 0:
+                    if inner_expr[end] == '<':
+                        depth += 1
+                    elif inner_expr[end] == '>':
+                        depth -= 1
+                    end += 1
+                inner_expr = inner_expr[:end]
+            return not self._evaluate_compile_test(inner_expr)
 
         # Match <GASSIGNED? VAR>
         gassigned_match = re.match(r'<\s*GASSIGNED\?\s+([A-Z0-9\-?]+)\s*>', test, re.IGNORECASE)
