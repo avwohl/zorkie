@@ -76,7 +76,6 @@ class TestMacroArgumentValidation:
 class TestMacrosDefiningGlobals:
     """Tests for macros defining globals."""
 
-    @pytest.mark.xfail(reason="EVAL in macros not fully implemented")
     def test_macros_can_define_globals_inside_routines(self):
         """Test macros can define globals inside routines."""
         AssertRoutine("", "<PRINTN <MAKE-GLOBAL 123>>") \

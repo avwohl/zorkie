@@ -342,11 +342,13 @@ class Parser:
                 return node
 
             elif op_name == "EVAL":
-                # EVAL is compile-time evaluation - parse but don't generate code
-                expr = self.parse_expression()
+                # EVAL is compile-time evaluation
+                # Parse as a regular form - MDL evaluator will handle it during macro expansion
+                operands = []
+                while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
+                    operands.append(self.parse_expression())
                 self.expect(TokenType.RANGLE)
-                # Return None to skip this at top level
-                return None
+                return FormNode(AtomNode(op_name, line, col), operands, line, col)
 
             elif op_name == "DEFAULT-DEFINITION":
                 # DEFAULT-DEFINITION contains default macro definitions

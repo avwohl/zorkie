@@ -165,6 +165,8 @@ class MDLEvaluator:
             return None
         elif op_name == 'ASSIGNED?':
             return self._eval_assigned(operands, env)
+        elif op_name == 'EVAL':
+            return self._eval_eval(operands, env)
 
         # Unknown form - return as-is (will be processed at runtime)
         return form
@@ -664,6 +666,67 @@ class MDLEvaluator:
             return env[name] is not None
         return False
 
+    def _eval_eval(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate EVAL (compile-time evaluation).
+
+        EVAL evaluates its argument at compile time. This is used in macros
+        to create side effects like defining globals or constants.
+
+        Example: <EVAL <FORM GLOBAL NEW-GLOBAL 123>>
+        This creates a new global variable NEW-GLOBAL with value 123.
+        """
+        if not operands:
+            return None
+
+        # First, evaluate the argument to get the form to execute
+        arg = self.evaluate(operands[0], env)
+
+        # If the result is a FormNode, check if it's a definition form
+        if isinstance(arg, FormNode) and isinstance(arg.operator, AtomNode):
+            op_name = arg.operator.value.upper()
+
+            if op_name == 'GLOBAL':
+                # Create a global variable
+                # <GLOBAL name value>
+                if len(arg.operands) >= 1:
+                    name_node = arg.operands[0]
+                    if isinstance(name_node, AtomNode):
+                        name = name_node.value.upper()
+                        value = arg.operands[1] if len(arg.operands) > 1 else None
+                        # Evaluate the value if it's an expression
+                        if value is not None:
+                            eval_value = self.evaluate(value, env)
+                            if isinstance(eval_value, int):
+                                value = NumberNode(eval_value)
+                            elif isinstance(eval_value, ASTNode):
+                                value = eval_value
+                        # Create GlobalNode and add to pending list
+                        global_node = GlobalNode(name, value)
+                        self.macro_expander.pending_globals.append(global_node)
+                        return None  # EVAL returns no value, side effect only
+
+            elif op_name == 'CONSTANT':
+                # Create a constant
+                # <CONSTANT name value>
+                if len(arg.operands) >= 2:
+                    name_node = arg.operands[0]
+                    if isinstance(name_node, AtomNode):
+                        name = name_node.value.upper()
+                        value = arg.operands[1]
+                        # Evaluate the value
+                        eval_value = self.evaluate(value, env)
+                        if isinstance(eval_value, int):
+                            value = NumberNode(eval_value)
+                        elif isinstance(eval_value, ASTNode):
+                            value = eval_value
+                        # Create ConstantNode and add to pending list
+                        const_node = ConstantNode(name, value)
+                        self.macro_expander.pending_constants.append(const_node)
+                        return None
+
+        # For other forms, just evaluate and return result
+        return arg
+
     def _expand_quasiquote(self, node: ASTNode, env: Dict[str, Any]) -> Any:
         """Expand quasiquoted expression."""
         if isinstance(node, UnquoteNode):
@@ -712,6 +775,10 @@ class MacroExpander:
     def __init__(self):
         self.macros: Dict[str, MacroNode] = {}
         self.mdl_evaluator = MDLEvaluator(self)
+        # Globals created by EVAL during macro expansion
+        self.pending_globals: List[GlobalNode] = []
+        # Constants created by EVAL during macro expansion
+        self.pending_constants: List[ConstantNode] = []
 
     def define_macro(self, macro: MacroNode):
         """Store a macro definition."""
@@ -720,6 +787,17 @@ class MacroExpander:
     def is_macro(self, name: str) -> bool:
         """Check if a name is a defined macro."""
         return name.upper() in self.macros
+
+    def _unwrap_quote(self, node: ASTNode) -> ASTNode:
+        """Unwrap QUOTE forms - when a macro returns '<FORM>, the result is <FORM>.
+
+        The quote means "return this form unevaluated", not "return a QUOTE form".
+        """
+        if isinstance(node, FormNode):
+            if isinstance(node.operator, AtomNode) and node.operator.value.upper() == 'QUOTE':
+                if node.operands:
+                    return node.operands[0]
+        return node
 
     def expand(self, form: FormNode) -> Optional[ASTNode]:
         """
@@ -798,6 +876,17 @@ class MacroExpander:
                         if isinstance(value_node, list):
                             items = [item for item in value_node if isinstance(item, ASTNode)]
                             return SpliceResultNode(items, 0, 0)
+            # If first element is None or not a function, return last non-None value
+            # This handles macro bodies with multiple expressions like:
+            # <EVAL <FORM GLOBAL ...>> ',NEW-GLOBAL
+            # where EVAL returns None and the quasiquote returns the value
+            elif first is None or not isinstance(first, AtomNode):
+                # Find last non-None expression value
+                for item in reversed(expanded):
+                    if item is not None:
+                        # Unwrap QUOTE if needed
+                        return self._unwrap_quote(item)
+                return None
 
         # Unwrap QUOTE forms - when a macro returns '<FORM>, the result is <FORM>
         # The quote means "return this form unevaluated", not "return a QUOTE form"
@@ -915,6 +1004,10 @@ class MacroExpander:
                 return self._evaluate_mdl(result, bindings)
             return self._convert_to_ast(result)
 
+        # Handle list of expressions (macro body with multiple statements)
+        if isinstance(node, list):
+            return [self._evaluate_mdl(item, bindings) for item in node]
+
         if not isinstance(node, FormNode):
             return node
 
@@ -927,6 +1020,17 @@ class MacroExpander:
         if op_name == 'COND':
             # Evaluate COND at compile time using MDL evaluator
             result = self.mdl_evaluator.evaluate(node, bindings)
+            if isinstance(result, ASTNode):
+                return self._evaluate_mdl(result, bindings)
+            return self._convert_to_ast(result)
+
+        # Check for EVAL that needs compile-time evaluation
+        if op_name == 'EVAL':
+            # Evaluate EVAL at compile time using MDL evaluator
+            result = self.mdl_evaluator.evaluate(node, bindings)
+            if result is None:
+                # EVAL returned None (side effect only, like defining a global)
+                return None
             if isinstance(result, ASTNode):
                 return self._evaluate_mdl(result, bindings)
             return self._convert_to_ast(result)
@@ -1272,6 +1376,23 @@ class MacroExpander:
                 from .ast_nodes import ASTNode
                 if isinstance(token_def.expansion, ASTNode):
                     token_def.expansion = self._expand_recursive(token_def.expansion)
+
+        # Merge globals created by EVAL during macro expansion
+        if self.pending_globals:
+            # Check for duplicates and add new globals
+            existing_names = {g.name for g in program.globals}
+            for global_node in self.pending_globals:
+                if global_node.name not in existing_names:
+                    program.globals.append(global_node)
+                    existing_names.add(global_node.name)
+
+        # Merge constants created by EVAL during macro expansion
+        if self.pending_constants:
+            existing_names = {c.name for c in program.constants}
+            for const_node in self.pending_constants:
+                if const_node.name not in existing_names:
+                    program.constants.append(const_node)
+                    existing_names.add(const_node.name)
 
         return program
 
