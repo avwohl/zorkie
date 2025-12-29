@@ -116,7 +116,23 @@ class Lexer:
         while self.peek(pos) and self.peek(pos) in ' \t':
             pos += 1
 
-        if self.peek(pos) == '"':
+        if self.peek(pos) == '%':
+            # MDL conditional compilation: ;%<COND ...> - skip entire form
+            # This is used for compile-time vs load-time conditional evaluation
+            self.advance()  # ;
+            self.advance()  # %
+            # Skip whitespace
+            while self.peek() and self.peek() in ' \t':
+                self.advance()
+            # Skip the following form
+            if self.peek() == '<':
+                self.skip_angle_form_comment()
+            elif self.peek() == '(':
+                self.skip_paren_form_comment()
+            elif self.peek() == '[':
+                self.skip_bracket_form_comment()
+            # else: single token was already skipped
+        elif self.peek(pos) == '"':
             # Block comment: ; "comment"
             self.advance()  # ;
             # Skip whitespace
