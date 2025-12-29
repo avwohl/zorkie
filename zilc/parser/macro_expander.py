@@ -1442,7 +1442,7 @@ class MacroExpander:
         # where PRINT-MAC-1 is a macro that expands to <PRINT "macro">
         for token_name, token_def in program.tell_tokens.items():
             if token_def.expansion:
-                from .ast_nodes import ASTNode
+                # ASTNode is already imported at module level
                 if isinstance(token_def.expansion, ASTNode):
                     token_def.expansion = self._expand_recursive(token_def.expansion)
 
