@@ -5415,6 +5415,17 @@ class ImprovedCodeGenerator:
             # Return large constant with placeholder marker
             # Format: 0xFC00 | index (will be resolved by assembler)
             return (0, 0xFC00 | placeholder_idx)
+        elif isinstance(node, list):
+            # Handle Python lists (may occur from macro expansion or splice)
+            if len(node) == 1:
+                # Single-element list: unwrap and recurse
+                return self._get_operand_type_and_value(node[0])
+            elif len(node) == 0:
+                return (0, 0)  # Empty list = 0
+            else:
+                # Multi-element list - use first element (best effort)
+                self._warn(f"Multi-element list as operand ({len(node)} elements) - using first element")
+                return self._get_operand_type_and_value(node[0])
         else:
             self._warn(f"Cannot determine operand type for {type(node).__name__} - using 0")
             return (0, 0)
