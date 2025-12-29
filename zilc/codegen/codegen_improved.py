@@ -6659,18 +6659,16 @@ class ImprovedCodeGenerator:
         """Generate USL (set status line update - V3 only).
 
         <USL> enables status line updates in V3.
-        V3 only, no operands.
+        V3 only, no operands. In V4+, silently ignored.
 
         Returns:
             bytes: Z-machine code
         """
-        if self.version >= 4:
-            raise ValueError("USL is only available in V3")
         if operands:
             raise ValueError("USL takes no operands")
 
         # USL is effectively a no-op in compiled code
-        # It's a hint to the interpreter
+        # It's a hint to the interpreter. In V4+, just ignore it.
         return b''
 
     def gen_dirout(self, operands: List[ASTNode]) -> bytes:

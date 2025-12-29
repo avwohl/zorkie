@@ -1155,13 +1155,14 @@ class TestMisc:
         AssertExpr("<SOUND 0 0 0 0 0>").in_v5().does_not_compile()
 
     def test_usl(self):
-        """Test USL opcode - V3 only."""
+        """Test USL opcode - V3 only, silently ignored in V4+."""
         AssertExpr("<USL>").in_v3().compiles()
+        # USL is silently ignored in V4+ (allows V3 code to compile for higher versions)
+        AssertExpr("<USL>").in_v4().compiles()
 
     def test_usl_error(self):
         """Test USL error cases."""
         AssertExpr("<USL 0>").in_v3().does_not_compile()
-        AssertExpr("<USL>").in_v4().does_not_compile()
 
 
 class TestInput:
