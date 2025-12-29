@@ -570,12 +570,17 @@ class ImprovedCodeGenerator:
                         f"Use <SET REDEFINE T> to allow redefinition."
                     )
                 if global_node.name not in self.globals:
-                    # Check if we've exceeded hard global slots (16-255 = 240 slots)
+                    # Check if we're about to run out of hard global slots (16-255 = 240 slots)
+                    # Reserve slot 255 for SOFT-GLOBALS table if we need it
+                    if self.next_global == 0xFF and not self.funny_globals_enabled:
+                        # Auto-enable FUNNY-GLOBALS and reserve slot 255 for SOFT-GLOBALS
+                        self.funny_globals_enabled = True
+                        self.funny_globals_table_global = 'SOFT-GLOBALS'
+                        self.globals[self.funny_globals_table_global] = 0xFF
+                        self.next_global = 0x100  # Mark as exhausted
+                        print(f"Note: Auto-enabling FUNNY-GLOBALS (>240 globals)", file=sys.stderr)
+
                     if self.next_global > 0xFF:
-                        # Auto-enable FUNNY-GLOBALS when we exceed the limit
-                        if not self.funny_globals_enabled:
-                            self.funny_globals_enabled = True
-                            print(f"Note: Auto-enabling FUNNY-GLOBALS (>240 globals)", file=sys.stderr)
                         # Put this global in the FUNNY-GLOBALS table
                         table_idx = len(self.funny_globals_table)
                         self.funny_globals_table[global_node.name] = table_idx
