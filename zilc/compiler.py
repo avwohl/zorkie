@@ -20,13 +20,15 @@ class ZILCompiler:
     """Main ZIL compiler class."""
 
     def __init__(self, version: int = 3, verbose: bool = False, enable_string_dedup: bool = False,
-                 include_paths: Optional[list] = None, lax_brackets: bool = False):
+                 include_paths: Optional[list] = None, lax_brackets: bool = False,
+                 override_version: bool = False):
         self.version = version
         self.verbose = verbose
         self.enable_string_dedup = enable_string_dedup
         self.compilation_flags = {}  # ZILF compilation flags
         self.include_paths = include_paths or []  # Additional paths to search for includes
         self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
+        self.override_version = override_version  # If True, ignore source VERSION directive
         self.warnings: List[str] = []  # Compilation warnings
 
     def log(self, message: str):
@@ -2212,9 +2214,17 @@ class ZILCompiler:
         # Store program for access by codegen (e.g., for TELL-TOKENS)
         self.program = program
 
-        # Use program version only if explicitly specified via VERSION directive
-        # (otherwise keep the version passed to the compiler constructor)
-        if program.version_explicit:
+        # Determine target version:
+        # - If override_version is set, use max of constructor and source (upgrade only, never downgrade)
+        # - Otherwise, use source version if explicit, else constructor version
+        if self.override_version and program.version_explicit:
+            # Take the higher version (upgrade, never downgrade)
+            if program.version > self.version:
+                self.version = program.version
+                self.log(f"  Target version (from source, higher than requested): {self.version}")
+            else:
+                self.log(f"  Target version (overriding source): {self.version}")
+        elif program.version_explicit:
             self.version = program.version
             self.log(f"  Target version (from source): {self.version}")
 
