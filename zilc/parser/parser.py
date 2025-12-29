@@ -241,6 +241,11 @@ class Parser:
             # Skip stray closing bracket
             self.advance()
             return None
+        elif self.current_token.type == TokenType.STRING:
+            # Bare strings at top level are used as documentation in Infocom ZIL
+            # They evaluate to themselves but are ignored
+            self.advance()
+            return None
         elif self.current_token.type == TokenType.QUOTE:
             # Quoted form at top level: '< ... > or '(...)
             # This is MDL data that we can skip
@@ -422,7 +427,8 @@ class Parser:
                         elif clause_type == "XZIP" and version == 5:
                             selected_bodies = clause_bodies
                             found_match = True
-                        elif clause_type == "ELSE" and not found_match:
+                        elif clause_type in ("ELSE", "T") and not found_match:
+                            # T is MDL's true/else pattern, treat as fallback
                             selected_bodies = clause_bodies
                             found_match = True
 

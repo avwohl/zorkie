@@ -832,49 +832,58 @@ class ZILCompiler:
 
     def _parse_conditional_parts(self, content: str) -> dict:
         """
-        Parse conditional content: (CONDITION expr) (ELSE expr)
+        Parse conditional content with multiple clauses.
+        Supports: (CONDITION expr) (ELSE expr) or (ZIP expr) (T expr) etc.
         Returns dict with 'condition', 'true_expr', 'false_expr'
         """
         content = content.strip()
 
-        # Find first balanced parenthesis group
         if not content.startswith('('):
             return {}
 
-        # Extract first group (CONDITION expr)
-        depth = 0
+        # Parse all parenthesized clauses
+        clauses = []
         pos = 0
-        for i, ch in enumerate(content):
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    pos = i + 1
-                    break
+        while pos < len(content):
+            # Skip whitespace
+            while pos < len(content) and content[pos] in ' \t\n':
+                pos += 1
+            if pos >= len(content) or content[pos] != '(':
+                break
 
-        if depth != 0:
+            # Find matching )
+            depth = 1
+            start = pos + 1
+            pos += 1
+            while pos < len(content) and depth > 0:
+                if content[pos] == '(':
+                    depth += 1
+                elif content[pos] == ')':
+                    depth -= 1
+                pos += 1
+
+            if depth == 0:
+                clause_content = content[start:pos-1].strip()
+                # Split on first whitespace to get clause name and body
+                parts = clause_content.split(None, 1)
+                if parts:
+                    clause_name = parts[0].upper()
+                    clause_body = parts[1] if len(parts) > 1 else ''
+                    clauses.append((clause_name, clause_body))
+
+        if not clauses:
             return {}
 
-        first_group = content[1:pos-1].strip()  # Remove outer parens
+        # First clause is the primary condition
+        condition = clauses[0][0]
+        true_expr = clauses[0][1]
 
-        # Split on first whitespace to get condition name
-        parts = first_group.split(None, 1)
-        if not parts:
-            return {}
-
-        condition = parts[0]
-        true_expr = parts[1] if len(parts) > 1 else ''
-
-        # Look for (ELSE ...) group
+        # Look for ELSE or T clause as fallback
         false_expr = ''
-        remaining = content[pos:].strip()
-        if remaining.startswith('('):
-            # Check if it's an ELSE clause
-            import re
-            else_match = re.match(r'\(\s*ELSE\s+(.*)\)\s*$', remaining, re.IGNORECASE | re.DOTALL)
-            if else_match:
-                false_expr = else_match.group(1).strip()
+        for clause_name, clause_body in clauses[1:]:
+            if clause_name in ('ELSE', 'T'):
+                false_expr = clause_body
+                break
 
         return {
             'condition': condition,
