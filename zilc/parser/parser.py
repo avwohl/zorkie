@@ -147,6 +147,9 @@ class Parser:
                             node.column
                         )
                         program.globals.append(global_node)
+                elif op_name in ('ZPUT', 'PUTB', 'ZGET', 'ZREST'):
+                    # Compile-time table manipulation operations
+                    program.compile_time_ops.append(node)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""
@@ -1810,9 +1813,9 @@ class Parser:
         size = None
         values = []
 
-        # Check for size or bare flags (ITABLE/LTABLE)
+        # Check for size or bare flags (ITABLE only - LTABLE doesn't use size)
         # BYTE/WORD can appear as bare atoms before size: <ITABLE BYTE 2500>
-        if table_type in ("ITABLE", "LTABLE"):
+        if table_type == "ITABLE":
             # Handle bare BYTE/WORD flags before size
             while self.current_token.type == TokenType.ATOM and \
                   self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH'):
@@ -1820,6 +1823,12 @@ class Parser:
                 self.advance()
             if self.current_token.type == TokenType.NUMBER:
                 size = self.current_token.value
+                self.advance()
+        elif table_type == "LTABLE":
+            # LTABLE can have bare flags but NOT a size parameter
+            while self.current_token.type == TokenType.ATOM and \
+                  self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH'):
+                flags.append(self.current_token.value)
                 self.advance()
 
         # Check for flags (BYTE), (PURE), (PATTERN (BYTE WORD)), etc.

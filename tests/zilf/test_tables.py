@@ -113,7 +113,6 @@ class TestPureTable:
 class TestCompileTimeTableManipulation:
     """Tests for compile-time table manipulation."""
 
-    @pytest.mark.xfail(reason="ZPUT compile-time table manipulation not implemented")
     def test_table_mutable_at_compile_time(self):
         """Test that TABLE is mutable at compile time."""
         AssertGlobals(
@@ -132,7 +131,6 @@ class TestCompileTimeTableManipulation:
             "<GLOBAL TBL ,MY-TBL>"
         ).implies("<==? <GET ,TBL 1> 1>")
 
-    @pytest.mark.xfail(reason="ZGET compile-time table access not implemented")
     def test_table_length_words_accessible_at_compile_time(self):
         """Test that table length words are accessible at compile time."""
         AssertGlobals(
@@ -146,7 +144,6 @@ class TestCompileTimeTableManipulation:
             "<=? <GET ,TBL 4> 400>"
         )
 
-    @pytest.mark.xfail(reason="Compile-time ZPUT not implemented")
     def test_table_with_adjacent_bytes_can_be_overwritten_with_words(self):
         """Test that adjacent bytes can be overwritten with words."""
         AssertGlobals(
@@ -160,7 +157,6 @@ class TestCompileTimeTableManipulation:
             "<==? <GETB ,TBL 3> 89>"
         )
 
-    @pytest.mark.xfail(reason="Compile-time PUTB not implemented")
     def test_table_with_words_can_be_overwritten_with_bytes(self):
         """Test that words can be overwritten with bytes."""
         AssertGlobals(

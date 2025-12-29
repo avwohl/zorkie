@@ -574,6 +574,7 @@ class Program:
     order_objects: Optional[str] = None  # ORDER-OBJECTS? setting (e.g., ROOMS-FIRST)
     order_tree: Optional[str] = None  # ORDER-TREE? setting (e.g., REVERSE-DEFINED)
     define_globals: List['DefineGlobalsNode'] = field(default_factory=list)  # DEFINE-GLOBALS declarations
+    compile_time_ops: List['FormNode'] = field(default_factory=list)  # Compile-time ops: ZPUT, PUTB, ZGET, ZREST
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "

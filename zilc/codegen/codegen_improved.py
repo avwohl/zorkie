@@ -601,6 +601,11 @@ class ImprovedCodeGenerator:
                         if form_op in ('TABLE', 'LTABLE', 'ITABLE', 'PTABLE'):
                             # Compile the table and get placeholder
                             self._compile_global_table(global_node.name, global_node.initial_value, form_op)
+                        elif form_op == 'ZGET':
+                            # Compile-time ZGET - evaluate and store result
+                            val = self._eval_compile_time_zget(global_node.initial_value.operands)
+                            if val is not None:
+                                self.global_values[global_node.name] = val
                 elif isinstance(global_node.initial_value, GlobalVarNode):
                     # Reference to another global - copy its initial value
                     # (could be scalar or table reference marker like 0xFF00 | idx)
@@ -617,6 +622,9 @@ class ImprovedCodeGenerator:
                     init_val = self.get_operand_value(global_node.initial_value)
                     if isinstance(init_val, int):
                         self.global_values[global_node.name] = init_val
+
+        # Process compile-time table operations (ZPUT, PUTB, ZGET, ZREST)
+        self._process_compile_time_ops(program)
 
         # Create SOFT-GLOBALS table if FUNNY-GLOBALS is enabled and we have soft globals
         if self.funny_globals_enabled and self.funny_globals_table:
@@ -1183,6 +1191,334 @@ class ImprovedCodeGenerator:
         # Track special header tables
         if global_name.upper() == 'TCHARS':
             self._tchars_table_idx = table_idx
+
+    def _process_compile_time_ops(self, program):
+        """Process compile-time table operations (ZPUT, PUTB, ZGET, ZREST).
+
+        These operations modify table data at compile time before the tables
+        are written to the output file.
+        """
+        for op in program.compile_time_ops:
+            if not isinstance(op.operator, AtomNode):
+                continue
+
+            op_name = op.operator.value.upper()
+
+            if op_name == 'ZPUT':
+                # <ZPUT ,TABLE-VAR index value> - set word at index
+                self._compile_time_zput(op.operands)
+            elif op_name == 'PUTB':
+                # <PUTB ,TABLE-VAR index value> - set byte at index
+                self._compile_time_putb(op.operands)
+            elif op_name == 'ZGET':
+                # <ZGET ,TABLE-VAR index> - get word at index (for CONSTANT defs)
+                # This is handled when evaluating constants, not here
+                pass
+            elif op_name == 'ZREST':
+                # <ZREST ,TABLE-VAR offset> - create offset view
+                # This creates a new table reference at the offset
+                self._compile_time_zrest(op.operands)
+
+    def _get_table_for_global(self, global_name: str):
+        """Get the table index and data for a global that references a table.
+
+        Returns (table_idx, table_data as bytearray) or (None, None) if not a table.
+        """
+        if global_name not in self.global_values:
+            return None, None
+
+        val = self.global_values[global_name]
+        if not isinstance(val, int) or (val & 0xFF00) != 0xFF00:
+            return None, None
+
+        table_idx = val & 0xFF
+        if table_idx >= len(self.tables):
+            return None, None
+
+        name, data, is_pure = self.tables[table_idx]
+        return table_idx, bytearray(data)
+
+    def _update_table_data(self, table_idx: int, new_data: bytes):
+        """Update the data for a table at the given index."""
+        if table_idx < len(self.tables):
+            name, old_data, is_pure = self.tables[table_idx]
+            self.tables[table_idx] = (name, bytes(new_data), is_pure)
+
+    def _compile_time_zput(self, operands):
+        """Execute compile-time ZPUT: set word at index in table.
+
+        <ZPUT ,TABLE-VAR index value>
+        """
+        if len(operands) < 3:
+            return
+
+        # Get table reference
+        table_ref = operands[0]
+        if isinstance(table_ref, FormNode):
+            # Could be <GVAL TABLE-VAR> or <ZREST ...>
+            if isinstance(table_ref.operator, AtomNode):
+                if table_ref.operator.value.upper() in ('GVAL', ','):
+                    if table_ref.operands and isinstance(table_ref.operands[0], AtomNode):
+                        table_name = table_ref.operands[0].value
+                    else:
+                        return
+                elif table_ref.operator.value.upper() == 'ZREST':
+                    # Handle ZREST inline - get table with offset
+                    self._compile_time_zput_with_offset(table_ref, operands[1], operands[2])
+                    return
+                else:
+                    return
+            else:
+                return
+        elif isinstance(table_ref, GlobalVarNode):
+            table_name = table_ref.name
+        else:
+            return
+
+        table_idx, table_data = self._get_table_for_global(table_name)
+        if table_idx is None:
+            return
+
+        # Get index
+        index = self._eval_compile_time_value(operands[1])
+        if index is None:
+            return
+
+        # Get value
+        value = self._eval_compile_time_value(operands[2])
+        if value is None:
+            return
+
+        # Set word at byte offset = index * 2
+        byte_offset = index * 2
+        if byte_offset + 1 < len(table_data):
+            table_data[byte_offset] = (value >> 8) & 0xFF
+            table_data[byte_offset + 1] = value & 0xFF
+            self._update_table_data(table_idx, table_data)
+
+    def _compile_time_zput_with_offset(self, zrest_form, index_node, value_node):
+        """Execute compile-time ZPUT on a ZREST result."""
+        if len(zrest_form.operands) < 2:
+            return
+
+        # Get base table
+        table_ref = zrest_form.operands[0]
+        if isinstance(table_ref, GlobalVarNode):
+            table_name = table_ref.name
+        elif isinstance(table_ref, FormNode) and isinstance(table_ref.operator, AtomNode):
+            if table_ref.operator.value.upper() in ('GVAL', ',') and table_ref.operands:
+                if isinstance(table_ref.operands[0], AtomNode):
+                    table_name = table_ref.operands[0].value
+                else:
+                    return
+            else:
+                return
+        else:
+            return
+
+        table_idx, table_data = self._get_table_for_global(table_name)
+        if table_idx is None:
+            return
+
+        # Get base offset from ZREST
+        base_offset = self._eval_compile_time_value(zrest_form.operands[1])
+        if base_offset is None:
+            return
+
+        # Get index
+        index = self._eval_compile_time_value(index_node)
+        if index is None:
+            return
+
+        # Get value
+        value = self._eval_compile_time_value(value_node)
+        if value is None:
+            return
+
+        # Set word at byte offset = base_offset + index * 2
+        byte_offset = base_offset + index * 2
+        if byte_offset + 1 < len(table_data):
+            table_data[byte_offset] = (value >> 8) & 0xFF
+            table_data[byte_offset + 1] = value & 0xFF
+            self._update_table_data(table_idx, table_data)
+
+    def _compile_time_putb(self, operands):
+        """Execute compile-time PUTB: set byte at index in table.
+
+        <PUTB ,TABLE-VAR index value>
+        """
+        if len(operands) < 3:
+            return
+
+        # Get table reference
+        table_ref = operands[0]
+        if isinstance(table_ref, FormNode):
+            if isinstance(table_ref.operator, AtomNode):
+                if table_ref.operator.value.upper() in ('GVAL', ','):
+                    if table_ref.operands and isinstance(table_ref.operands[0], AtomNode):
+                        table_name = table_ref.operands[0].value
+                    else:
+                        return
+                else:
+                    return
+            else:
+                return
+        elif isinstance(table_ref, GlobalVarNode):
+            table_name = table_ref.name
+        else:
+            return
+
+        table_idx, table_data = self._get_table_for_global(table_name)
+        if table_idx is None:
+            return
+
+        # Get index (byte offset)
+        index = self._eval_compile_time_value(operands[1])
+        if index is None:
+            return
+
+        # Get value
+        value = self._eval_compile_time_value(operands[2])
+        if value is None:
+            return
+
+        # Set byte at index
+        if index < len(table_data):
+            table_data[index] = value & 0xFF
+            self._update_table_data(table_idx, table_data)
+
+    def _compile_time_zrest(self, operands):
+        """Execute compile-time ZREST: create offset reference to table.
+
+        <SETG RESTED <ZREST ,TABLE-VAR offset>>
+        This doesn't directly execute - it creates a reference that will be
+        used when accessing the result via ZGET/ZPUT.
+        """
+        # ZREST at top level doesn't do anything directly - it's evaluated
+        # when used in a SETG or CONSTANT context
+        pass
+
+    def _eval_compile_time_value(self, node):
+        """Evaluate a compile-time constant value.
+
+        Returns the integer value or None if not evaluable.
+        """
+        if isinstance(node, NumberNode):
+            return node.value
+        elif isinstance(node, AtomNode):
+            # Could be a constant
+            name = node.value.upper()
+            if name in self.constants:
+                val = self.constants[name]
+                if isinstance(val, int):
+                    return val
+            return None
+        elif isinstance(node, GlobalVarNode):
+            # Get global value
+            name = node.name
+            if name in self.global_values:
+                val = self.global_values[name]
+                if isinstance(val, int):
+                    return val
+            return None
+        elif isinstance(node, FormNode):
+            # Could be compile-time arithmetic or ZGET
+            if isinstance(node.operator, AtomNode):
+                op_name = node.operator.value.upper()
+                if op_name == 'ZGET':
+                    return self._eval_compile_time_zget(node.operands)
+                elif op_name in ('GVAL', ','):
+                    if node.operands and isinstance(node.operands[0], AtomNode):
+                        name = node.operands[0].value
+                        if name in self.global_values:
+                            return self.global_values[name]
+                # Add more compile-time operations as needed
+            return None
+        return None
+
+    def _eval_compile_time_zget(self, operands):
+        """Evaluate compile-time ZGET: get word at index from table.
+
+        Returns the word value or None if not evaluable.
+        """
+        if len(operands) < 2:
+            return None
+
+        # Get table reference
+        table_ref = operands[0]
+        if isinstance(table_ref, GlobalVarNode):
+            table_name = table_ref.name
+        elif isinstance(table_ref, FormNode):
+            if isinstance(table_ref.operator, AtomNode):
+                if table_ref.operator.value.upper() in ('GVAL', ','):
+                    if table_ref.operands and isinstance(table_ref.operands[0], AtomNode):
+                        table_name = table_ref.operands[0].value
+                    else:
+                        return None
+                elif table_ref.operator.value.upper() == 'ZREST':
+                    # ZGET on a ZREST result
+                    return self._eval_compile_time_zget_with_offset(table_ref, operands[1])
+                else:
+                    return None
+            else:
+                return None
+        else:
+            return None
+
+        table_idx, table_data = self._get_table_for_global(table_name)
+        if table_idx is None or table_data is None:
+            return None
+
+        # Get index
+        index = self._eval_compile_time_value(operands[1])
+        if index is None:
+            return None
+
+        # Get word at byte offset = index * 2
+        byte_offset = index * 2
+        if byte_offset + 1 < len(table_data):
+            return (table_data[byte_offset] << 8) | table_data[byte_offset + 1]
+        return None
+
+    def _eval_compile_time_zget_with_offset(self, zrest_form, index_node):
+        """Evaluate compile-time ZGET on a ZREST result."""
+        if len(zrest_form.operands) < 2:
+            return None
+
+        # Get base table
+        table_ref = zrest_form.operands[0]
+        if isinstance(table_ref, GlobalVarNode):
+            table_name = table_ref.name
+        elif isinstance(table_ref, FormNode) and isinstance(table_ref.operator, AtomNode):
+            if table_ref.operator.value.upper() in ('GVAL', ',') and table_ref.operands:
+                if isinstance(table_ref.operands[0], AtomNode):
+                    table_name = table_ref.operands[0].value
+                else:
+                    return None
+            else:
+                return None
+        else:
+            return None
+
+        table_idx, table_data = self._get_table_for_global(table_name)
+        if table_idx is None or table_data is None:
+            return None
+
+        # Get base offset from ZREST
+        base_offset = self._eval_compile_time_value(zrest_form.operands[1])
+        if base_offset is None:
+            return None
+
+        # Get index
+        index = self._eval_compile_time_value(index_node)
+        if index is None:
+            return None
+
+        # Get word at byte offset = base_offset + index * 2
+        byte_offset = base_offset + index * 2
+        if byte_offset + 1 < len(table_data):
+            return (table_data[byte_offset] << 8) | table_data[byte_offset + 1]
+        return None
 
     def _generate_action_tables(self):
         """Generate ACTIONS and PREACTIONS table data.
