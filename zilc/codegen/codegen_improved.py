@@ -1968,6 +1968,73 @@ class ImprovedCodeGenerator:
             # Handle ZGET for compile-time table access
             if isinstance(node.operator, AtomNode) and node.operator.value.upper() == 'ZGET':
                 return self._eval_compile_time_zget(node.operands)
+            # Handle compile-time arithmetic and bitwise operations
+            if isinstance(node.operator, AtomNode):
+                op = node.operator.value.upper()
+                if op in ('+', '-', '*', '/', 'MOD', 'BAND', 'BOR', 'BXOR', 'ANDB', 'ORB', 'XORB', 'LSH'):
+                    # Evaluate all operands
+                    values = []
+                    for operand in node.operands:
+                        val = self.eval_expression(operand)
+                        if val is None:
+                            return None  # Cannot evaluate at compile time
+                        values.append(val)
+                    if not values:
+                        return None
+                    # Perform the operation
+                    if op == '+':
+                        result = 0
+                        for v in values:
+                            result += v
+                        return result & 0xFFFF  # Z-machine words are 16-bit
+                    elif op == '-':
+                        if len(values) == 1:
+                            return (-values[0]) & 0xFFFF
+                        result = values[0]
+                        for v in values[1:]:
+                            result -= v
+                        return result & 0xFFFF
+                    elif op == '*':
+                        result = 1
+                        for v in values:
+                            result *= v
+                        return result & 0xFFFF
+                    elif op == '/':
+                        if len(values) < 2:
+                            return None
+                        result = values[0]
+                        for v in values[1:]:
+                            if v == 0:
+                                return None  # Division by zero
+                            result //= v
+                        return result & 0xFFFF
+                    elif op == 'MOD':
+                        if len(values) != 2 or values[1] == 0:
+                            return None
+                        return (values[0] % values[1]) & 0xFFFF
+                    elif op in ('BAND', 'ANDB'):
+                        result = values[0]
+                        for v in values[1:]:
+                            result &= v
+                        return result & 0xFFFF
+                    elif op in ('BOR', 'ORB'):
+                        result = values[0]
+                        for v in values[1:]:
+                            result |= v
+                        return result & 0xFFFF
+                    elif op in ('BXOR', 'XORB'):
+                        result = values[0]
+                        for v in values[1:]:
+                            result ^= v
+                        return result & 0xFFFF
+                    elif op == 'LSH':
+                        if len(values) != 2:
+                            return None
+                        shift = values[1]
+                        if shift >= 0:
+                            return (values[0] << shift) & 0xFFFF
+                        else:
+                            return (values[0] >> (-shift)) & 0xFFFF
         return None
 
     def generate_routine(self, routine: RoutineNode) -> bytes:
