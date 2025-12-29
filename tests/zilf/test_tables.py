@@ -170,7 +170,6 @@ class TestCompileTimeTableManipulation:
             "<==? <GET ,TBL 1> 6789>"
         )
 
-    @pytest.mark.xfail(reason="Compile-time table element preservation not implemented")
     def test_round_tripping_table_elements_preserves_widths(self):
         """Test that round-tripping table elements preserves widths."""
         AssertGlobals(

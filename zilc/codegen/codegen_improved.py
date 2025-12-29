@@ -948,7 +948,11 @@ class ImprovedCodeGenerator:
 
         # For LTABLE, add length prefix
         if table_type == 'LTABLE':
-            table_data.extend(struct.pack('>H', len(values)))
+            # Use byte prefix for BYTE tables, word prefix otherwise
+            if is_byte:
+                table_data.append(len(values) & 0xFF)
+            else:
+                table_data.extend(struct.pack('>H', len(values)))
 
         # Handle ITABLE with repeat count
         initial_size = table_node.size
@@ -1071,7 +1075,11 @@ class ImprovedCodeGenerator:
 
         # For LTABLE, add length prefix
         if table_type == 'LTABLE':
-            table_data.extend(struct.pack('>H', len(values)))
+            # Use byte prefix for BYTE tables, word prefix otherwise
+            if is_byte:
+                table_data.append(len(values) & 0xFF)
+            else:
+                table_data.extend(struct.pack('>H', len(values)))
 
         # Handle ITABLE size prefix
         initial_size = None
@@ -2170,6 +2178,12 @@ class ImprovedCodeGenerator:
                     # E.g., for -3 = 0xFFFD, if we see 0xFD at position i,
                     # the preceding byte 0xFF suggests this is the low byte of 0xFFFD
                     if i > 0 and stmt_code[i - 1] in (0xFE, 0xFF):
+                        continue
+                    # Skip if this is a variable number operand after a 1OP short form opcode
+                    # Short form 1OP: 10 tt nnnn where tt=01 for small constant (variable num)
+                    # Range 0x90-0x9F = 1OP with small constant operand
+                    # E.g., 0x95 (INC), 0x96 (DEC), 0x9E (LOAD) followed by var number
+                    if i > 0 and 0x90 <= stmt_code[i - 1] <= 0x9F:
                         continue
                     # Skip if this looks like the low byte of a funny global index
                     # Pattern: [opcode] [type] [var] 00 [low>=FD] ...
@@ -3329,7 +3343,11 @@ class ImprovedCodeGenerator:
 
         # For LTABLE, add length prefix
         if table_type == 'LTABLE':
-            table_data.extend(struct.pack('>H', len(node.values)))
+            # Use byte prefix for BYTE tables, word prefix otherwise
+            if is_byte:
+                table_data.append(len(node.values) & 0xFF)
+            else:
+                table_data.extend(struct.pack('>H', len(node.values)))
 
         # Handle ITABLE with repeat count
         if node.size and table_type == 'ITABLE' and node.values:
@@ -4734,6 +4752,13 @@ class ImprovedCodeGenerator:
         code.append(0x95)  # Short 1OP with small constant, opcode 0x05
         code.append(var_num)
 
+        # In ZIL, INC returns the new value. Z-machine INC doesn't have a store,
+        # so we need to LOAD the variable onto the stack after incrementing.
+        # LOAD is 1OP opcode 0x0E, short form with small constant: 10 01 1110 = 0x9E
+        code.append(0x9E)  # 1OP LOAD short form
+        code.append(var_num)  # Variable to load
+        code.append(0x00)  # Store to stack
+
         return bytes(code)
 
     def gen_dec(self, operands: List[ASTNode]) -> bytes:
@@ -4795,6 +4820,13 @@ class ImprovedCodeGenerator:
         # 0x96 = 10 01 0110 = short 1OP, small const, opcode 6
         code.append(0x96)  # Short 1OP with small constant, opcode 0x06
         code.append(var_num)
+
+        # In ZIL, DEC returns the new value. Z-machine DEC doesn't have a store,
+        # so we need to LOAD the variable onto the stack after decrementing.
+        # LOAD is 1OP opcode 0x0E, short form with small constant: 10 01 1110 = 0x9E
+        code.append(0x9E)  # 1OP LOAD short form
+        code.append(var_num)  # Variable to load
+        code.append(0x00)  # Store to stack
 
         return bytes(code)
 
@@ -18566,7 +18598,11 @@ class ImprovedCodeGenerator:
         # For LTABLE, first value is the count (or we compute it)
         if table_type == 'LTABLE':
             # LTABLE has a length prefix
-            table_data.extend(struct.pack('>H', len(values)))
+            # Use byte prefix for BYTE tables, word prefix otherwise
+            if is_byte:
+                table_data.append(len(values) & 0xFF)
+            else:
+                table_data.extend(struct.pack('>H', len(values)))
 
         # For ITABLE, first value might be the size (repeat count)
         if table_type == 'ITABLE' and values and isinstance(values[0], NumberNode):

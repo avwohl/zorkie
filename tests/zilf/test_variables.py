@@ -36,7 +36,6 @@ def make_many_globals(count, prefix="MY-GLOBAL"):
 class TestFunnyGlobals:
     """Tests for FUNNY-GLOBALS (extended global support)."""
 
-    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_funny_globals_allows_lots_of_globals(self):
         """Test that FUNNY-GLOBALS allows more than 240 globals."""
         num_globals = 500
@@ -55,7 +54,6 @@ class TestFunnyGlobals:
             .with_global(globals_code) \
             .outputs("\n".join(expected_parts) + "\n")
 
-    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_funny_globals_works_with_inc(self):
         """Test that FUNNY-GLOBALS works with INC."""
         num_globals = 500

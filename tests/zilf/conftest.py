@@ -330,7 +330,8 @@ class ZMachine:
         ]
         for path in dfrotz_paths:
             if os.path.exists(path):
-                return (path, ["-q", "-m", "-p"], "dfrotz")
+                # -h 1000 sets screen height to 1000 to avoid pagination blank lines
+                return (path, ["-q", "-m", "-p", "-h", "1000"], "dfrotz")
 
         return (None, [], None)
 
@@ -394,6 +395,27 @@ class ZMachine:
                     if not line.startswith("[Version") and not line.startswith("[Fatal")
                 ]
                 output = "\n".join(output_lines)
+
+                # dfrotz inserts blank lines for pagination even with -m flag
+                # Filter out isolated blank lines that appear far into the output
+                # (pagination artifacts typically appear every ~200+ lines)
+                # Keep early blank lines as they're likely intentional output
+                if interpreter_name == "dfrotz":
+                    lines = output.split("\n")
+                    filtered = []
+                    for i, line in enumerate(lines):
+                        if line.strip() == '':
+                            # Keep blank line if it's near the start (first 100 lines)
+                            if i < 100:
+                                filtered.append(line)
+                            # Keep blank line if adjacent to another blank line
+                            elif (i > 0 and lines[i-1].strip() == '') or \
+                                 (i < len(lines)-1 and lines[i+1].strip() == ''):
+                                filtered.append(line)
+                            # Otherwise, skip this isolated blank line (likely pagination)
+                        else:
+                            filtered.append(line)
+                    output = "\n".join(filtered)
 
                 # Strip leading/trailing whitespace (bocfel adds extra newlines)
                 output = output.strip()
