@@ -47,6 +47,11 @@ class ImprovedCodeGenerator:
         # DEFINE-GLOBALS entries: name -> (table_global_name, offset, is_byte)
         self.define_globals_entries: Dict[str, tuple] = {}
 
+        # FUNNY-GLOBALS support: when enabled, globals beyond slot 255 go into a table
+        self.funny_globals_enabled = False
+        self.funny_globals_table: Dict[str, int] = {}  # name -> index in SOFT-GLOBALS table
+        self.funny_globals_table_global = None  # Name of the global holding the table
+
         # Add pre-scanned symbols (flags, properties, parser constants)
         # Track defined flags for ZIL0211 warning
         self.defined_flags: set = set()
@@ -136,6 +141,9 @@ class ImprovedCodeGenerator:
         # Current statement's routine placeholder offsets: (offset_in_stmt_code, placeholder_idx)
         # Populated by gen_routine_call(), consumed by generate_routine()
         self._current_stmt_routine_offsets: List[Tuple[int, int]] = []
+        # Current statement's positions to exclude from placeholder scanning
+        # (for large constants in funny globals that might look like placeholders)
+        self._current_stmt_excluded_positions: set = set()
 
         # TELL string placeholders - for strings in TELL statements
         # Encoded as 0x8D <hi> <lo> where value = 0xE000 + index (8190 slots)
@@ -515,6 +523,15 @@ class ImprovedCodeGenerator:
         allow_redefine = False
         if self.compiler and hasattr(self.compiler, 'compile_globals'):
             allow_redefine = self.compiler.compile_globals.get('REDEFINE', False)
+            # Check if FUNNY-GLOBALS? is enabled
+            self.funny_globals_enabled = self.compiler.compile_globals.get('FUNNY-GLOBALS?', False)
+
+        # If FUNNY-GLOBALS? is enabled, reserve a slot for the SOFT-GLOBALS table pointer
+        # We need to do this early to ensure we have a hard global slot available
+        if self.funny_globals_enabled:
+            self.funny_globals_table_global = 'SOFT-GLOBALS'
+            self.globals[self.funny_globals_table_global] = self.next_global
+            self.next_global += 1
 
         # V3 status line globals - these must be at fixed positions for status line
         # If any of HERE, SCORE, MOVES are defined, ensure all three are allocated
@@ -552,8 +569,24 @@ class ImprovedCodeGenerator:
                         f"Use <SET REDEFINE T> to allow redefinition."
                     )
                 if global_node.name not in self.globals:
-                    self.globals[global_node.name] = self.next_global
-                    self.next_global += 1
+                    # Check if we've exceeded hard global slots (16-255 = 240 slots)
+                    if self.next_global > 0xFF:
+                        if self.funny_globals_enabled:
+                            # Put this global in the FUNNY-GLOBALS table
+                            table_idx = len(self.funny_globals_table)
+                            self.funny_globals_table[global_node.name] = table_idx
+                            # Use a marker value to indicate it's a funny global
+                            # We'll use 0x1XX where XX is the table index
+                            self.globals[global_node.name] = 0x100 + table_idx
+                        else:
+                            raise ValueError(
+                                f"Too many globals: '{global_node.name}' would be global #{self.next_global}. "
+                                f"Z-machine only supports 240 globals (16-255). "
+                                f"Use <FUNNY-GLOBALS?> to enable soft globals."
+                            )
+                    else:
+                        self.globals[global_node.name] = self.next_global
+                        self.next_global += 1
 
             # Capture initial value if provided
             if global_node.initial_value is not None:
@@ -584,6 +617,10 @@ class ImprovedCodeGenerator:
                     init_val = self.get_operand_value(global_node.initial_value)
                     if isinstance(init_val, int):
                         self.global_values[global_node.name] = init_val
+
+        # Create SOFT-GLOBALS table if FUNNY-GLOBALS is enabled and we have soft globals
+        if self.funny_globals_enabled and self.funny_globals_table:
+            self._create_soft_globals_table(program)
 
         # Reserve globals for ACTIONS and PREACTIONS tables
         if self.action_table:
@@ -640,6 +677,179 @@ class ImprovedCodeGenerator:
             self._generate_action_tables()
 
         return bytes(self.code)
+
+    def is_funny_global(self, name: str) -> bool:
+        """Check if a global is stored in the SOFT-GLOBALS table."""
+        return name in self.funny_globals_table
+
+    def prepare_operand(self, operand: 'ASTNode') -> Tuple[bytes, int, int]:
+        """Prepare an operand for use in an instruction.
+
+        Handles special cases like FormNode (expression) and funny globals
+        by generating code to evaluate them and pushing to stack.
+
+        Returns:
+            Tuple of (pre_code, type, value) where:
+            - pre_code: bytes to execute before using the operand (may be empty)
+            - type: operand type (0=small const, 1=variable)
+            - value: operand value or variable number
+        """
+        if isinstance(operand, FormNode):
+            # Expression - evaluate and push to stack
+            expr_code = self.generate_form(operand)
+            return (expr_code if expr_code else b'', 1, 0)  # Variable 0 = stack
+
+        if isinstance(operand, GlobalVarNode) and self.is_funny_global(operand.name):
+            # Funny global - generate GET and push to stack
+            read_code = self.gen_read_funny_global(operand.name)
+            return (read_code, 1, 0)  # Variable 0 = stack
+
+        # Regular operand - no pre-code needed
+        op_type, op_val = self._get_operand_type_and_value(operand)
+        return (b'', op_type, op_val)
+
+    def gen_read_funny_global(self, name: str) -> bytes:
+        """Generate code to read a funny global value onto the stack.
+
+        Generates: GET ,SOFT-GLOBALS idx -> stack
+        """
+        if name not in self.funny_globals_table:
+            raise ValueError(f"'{name}' is not a funny global")
+
+        table_idx = self.funny_globals_table[name]
+        soft_globals_var = self.globals[self.funny_globals_table_global]
+
+        code = bytearray()
+        # GET table index -> stack
+        # 2OP opcode 0x0F (GET), variable form
+        code.append(0xCF)  # VAR 2OP opcode 0x0F (GET)
+
+        # Use large constant form for indices >= 0xFD to avoid collision with
+        # routine placeholder scanning (which looks for bytes >= 0xFD)
+        if table_idx > 255 or table_idx >= 0xFD:
+            # Large index: need 2-byte operand
+            # Operand types: 10 (var) 00 (large const) 11 11 = 0x8F
+            code.append(0x8F)
+            code.append(soft_globals_var)  # SOFT-GLOBALS variable number
+            code.append((table_idx >> 8) & 0xFF)  # High byte of index
+            code.append(table_idx & 0xFF)  # Low byte of index
+        else:
+            # Small index: 1-byte operand
+            # Operand types: 10 (var) 01 (small const) 11 11 = 0x9F
+            code.append(0x9F)
+            code.append(soft_globals_var)  # SOFT-GLOBALS variable number
+            code.append(table_idx)  # Index in table
+
+        code.append(0x00)  # Store to stack
+
+        return bytes(code)
+
+    def gen_write_funny_global(self, name: str, value_code: bytes = None, value_operand=None) -> bytes:
+        """Generate code to write a value to a funny global.
+
+        Generates: PUT ,SOFT-GLOBALS idx value
+
+        Either value_code (pre-computed expression code that pushes to stack)
+        or value_operand (an ASTNode for a simple value) should be provided.
+        """
+        if name not in self.funny_globals_table:
+            raise ValueError(f"'{name}' is not a funny global")
+
+        table_idx = self.funny_globals_table[name]
+        soft_globals_var = self.globals[self.funny_globals_table_global]
+        # Use large constant form for indices >= 0xFD to avoid collision with
+        # routine placeholder scanning (which looks for bytes >= 0xFD)
+        is_large_idx = table_idx > 255 or table_idx >= 0xFD
+
+        code = bytearray()
+
+        if value_code is not None:
+            # Value is already on stack from expression evaluation
+            code.extend(value_code)
+            # PUT table index stack
+            # VAR opcode 0x01 (STOREW/PUT)
+            code.append(0xE1)  # VAR opcode 0x01 (STOREW/PUT)
+            if is_large_idx:
+                # Operand types: 10 (var) 00 (large) 10 (var) 11 (omit) = 0x8B
+                code.append(0x8B)
+                code.append(soft_globals_var)  # SOFT-GLOBALS variable number
+                code.append((table_idx >> 8) & 0xFF)  # High byte of index
+                code.append(table_idx & 0xFF)  # Low byte of index
+            else:
+                # Operand types: 10 (var) 01 (small) 10 (var) 11 (omit) = 0x9B
+                code.append(0x9B)
+                code.append(soft_globals_var)  # SOFT-GLOBALS variable number
+                code.append(table_idx)  # Index in table
+            code.append(0x00)  # Stack (value to store)
+        elif value_operand is not None:
+            # Generate the value operand
+            val_type, val_val = self._get_operand_type_and_value(value_operand)
+            # Check if value is a large constant
+            is_large_val = val_type == 0 and val_val > 255
+
+            # PUT table index value
+            code.append(0xE1)  # VAR opcode 0x01 (STOREW/PUT)
+            if is_large_idx:
+                if is_large_val:
+                    # Operand types: 10 (var) 00 (large) 00 (large) 11 (omit) = 0x83
+                    code.append(0x83)
+                elif val_type == 0:  # Small constant
+                    # Operand types: 10 (var) 00 (large) 01 (small) 11 (omit) = 0x87
+                    code.append(0x87)
+                else:  # Variable
+                    # Operand types: 10 (var) 00 (large) 10 (var) 11 (omit) = 0x8B
+                    code.append(0x8B)
+                code.append(soft_globals_var)  # SOFT-GLOBALS variable number
+                code.append((table_idx >> 8) & 0xFF)  # High byte of index
+                code.append(table_idx & 0xFF)  # Low byte of index
+            else:
+                if is_large_val:
+                    # Operand types: 10 (var) 01 (small) 00 (large) 11 (omit) = 0x93
+                    code.append(0x93)
+                elif val_type == 0:  # Small constant
+                    # Operand types: 10 (var) 01 (small) 01 (small) 11 (omit) = 0x97
+                    code.append(0x97)
+                else:  # Variable
+                    # Operand types: 10 (var) 01 (small) 10 (var) 11 (omit) = 0x9B
+                    code.append(0x9B)
+                code.append(soft_globals_var)  # SOFT-GLOBALS variable number
+                code.append(table_idx)  # Index in table
+
+            if is_large_val:
+                code.append((val_val >> 8) & 0xFF)  # High byte of value
+                code.append(val_val & 0xFF)  # Low byte of value
+            else:
+                code.append(val_val & 0xFF)  # Value to store
+
+        return bytes(code)
+
+    def _create_soft_globals_table(self, program):
+        """Create the SOFT-GLOBALS table for FUNNY-GLOBALS overflow.
+
+        When more than 240 globals are defined and FUNNY-GLOBALS? is enabled,
+        the excess globals are stored in a word table. Access to these globals
+        uses GET/PUT on this table instead of direct global access.
+
+        Note: The SOFT-GLOBALS hard global slot was already reserved in
+        the earlier processing phase.
+        """
+        # Build the initial values for the table
+        table_data = bytearray()
+        for name, idx in sorted(self.funny_globals_table.items(), key=lambda x: x[1]):
+            # Get initial value for this global
+            init_val = self.global_values.get(name, 0)
+            # Store as word (2 bytes, big-endian)
+            table_data.append((init_val >> 8) & 0xFF)
+            table_data.append(init_val & 0xFF)
+
+        # Add the table to our tables list and track its offset
+        table_idx = len(self.tables)
+        self.table_offsets[table_idx] = self._table_data_size
+        self._table_data_size += len(table_data)
+        self.tables.append((f"_SOFT_GLOBALS", bytes(table_data), False))  # Not pure, mutable
+
+        # Set the global's initial value to the table reference marker
+        self.global_values[self.funny_globals_table_global] = 0xFF00 | table_idx
 
     def _setup_action_table_globals(self):
         """Reserve globals for ACTIONS, PREACTIONS, and PREPOSITIONS tables."""
@@ -1167,6 +1377,9 @@ class ImprovedCodeGenerator:
         table_data = self.get_table_data()
 
         # Scan table data for placeholder markers (16-bit values in 0xFD00-0xFFFE range)
+        # Scan word-aligned (every 2 bytes) since placeholders are always full 16-bit values
+        # This prevents false matches from unaligned byte sequences like [00 FD 00 FE]
+        # where scanning at odd positions would see [FD 00] as 0xFD00
         i = 0
         while i < len(table_data) - 1:
             high_byte = table_data[i]
@@ -1183,7 +1396,7 @@ class ImprovedCodeGenerator:
                         # Missing routine - track it and use offset 0
                         self._missing_routines.add(routine_name)
                         fixups.append((i, 0))  # Will become 0x0000
-            i += 1
+            i += 2  # Step by words, not bytes
 
         return fixups
 
@@ -1532,6 +1745,21 @@ class ImprovedCodeGenerator:
                     # the preceding byte 0xFF suggests this is the low byte of 0xFFFD
                     if i > 0 and stmt_code[i - 1] in (0xFE, 0xFF):
                         continue
+                    # Skip if this looks like the low byte of a funny global index
+                    # Pattern: [opcode] [type] [var] 00 [low>=FD] ...
+                    # Where opcode is GET (0xCF) or PUT (0xE1)
+                    # And type byte has second operand as large constant (bits 5-4 = 00)
+                    # And high byte is 0x00 (index < 256 but low byte >= 0xFD)
+                    if i >= 4:
+                        opcode = stmt_code[i - 4]
+                        type_byte = stmt_code[i - 3]
+                        prev_byte = stmt_code[i - 1]
+                        # Check for GET (0xCF) or PUT (0xE1) with large second operand
+                        if opcode in (0xCF, 0xE1):
+                            second_op_type = (type_byte >> 4) & 0x03
+                            if second_op_type == 0 and prev_byte == 0x00:
+                                # This is the low byte of a table index, not a placeholder
+                                continue
                     placeholder_val = (high_byte << 8) | low_byte
                     if placeholder_val in self._routine_placeholders:
                         self._pending_placeholders.append((stmt_offset + i, placeholder_val))
@@ -3466,6 +3694,12 @@ class ImprovedCodeGenerator:
             code.extend(expr_code)
             op_type = 2  # Variable (matching _get_operand_type_and_value_ext convention)
             op_val = 0   # Stack
+        elif isinstance(operand, GlobalVarNode) and self.is_funny_global(operand.name):
+            # Funny global - generate GET from SOFT-GLOBALS table
+            read_code = self.gen_read_funny_global(operand.name)
+            code.extend(read_code)
+            op_type = 2  # Variable
+            op_val = 0   # Stack
         else:
             # Determine operand type and value using extended version
             # (handles large constants for negative numbers and values > 255)
@@ -3891,6 +4125,25 @@ class ImprovedCodeGenerator:
 
             return bytes(code)
 
+        # Handle FUNNY-GLOBALS: if the target is a funny global, use gen_write_funny_global
+        if is_global and hasattr(self, 'funny_globals_table') and var_name in self.funny_globals_table:
+            if isinstance(value_node, (FormNode, RepeatNode, CondNode)):
+                # Evaluate expression first
+                if isinstance(value_node, FormNode):
+                    expr_code = self.generate_form(value_node)
+                elif isinstance(value_node, RepeatNode):
+                    expr_code = self.generate_repeat(value_node)
+                else:  # CondNode
+                    expr_code = self.generate_cond(value_node)
+                code.extend(self.gen_write_funny_global(var_name, value_code=expr_code))
+            else:
+                # Simple value
+                code.extend(self.gen_write_funny_global(var_name, value_operand=value_node))
+            # For value context, push the value back on stack
+            # Read the funny global we just wrote
+            code.extend(self.gen_read_funny_global(var_name))
+            return bytes(code)
+
         # Direct variable assignment
         # Check if value is an expression (FormNode, RepeatNode, CondNode) that needs evaluation
         if isinstance(value_node, (FormNode, RepeatNode, CondNode)):
@@ -3988,6 +4241,9 @@ class ImprovedCodeGenerator:
         small constant (1 byte).
 
         The operand must be a variable name (atom), not a literal number.
+
+        For funny globals, generates equivalent code:
+            <SET var <+ ,var 1>> and returns the new value
         """
         if not operands:
             raise ValueError("INC requires exactly 1 operand")
@@ -3998,6 +4254,44 @@ class ImprovedCodeGenerator:
             raise ValueError("INC requires a variable name, not a number")
 
         code = bytearray()
+
+        # Check if this is a funny global
+        var_name = None
+        if isinstance(op, AtomNode):
+            var_name = op.value
+        elif isinstance(op, GlobalVarNode):
+            var_name = op.name
+
+        # DEBUG - uncomment to trace
+        # import sys
+        # print(f"[DEBUG gen_inc] op type: {type(op).__name__}, var_name: {var_name}, is_funny: {var_name and self.is_funny_global(var_name)}", file=sys.stderr)
+
+        if var_name and self.is_funny_global(var_name):
+            # Funny global: read from table, add 1, write back
+            # 1. Read current value from SOFT-GLOBALS
+            code.extend(self.gen_read_funny_global(var_name))
+            # 2. Add 1 -> result on stack
+            # ADD is 2OP:20, which is > 15, so must use variable form
+            # VAR 2OP format: 0xC0 + opcode = 0xC0 + 0x14 = 0xD4
+            # Type byte: 10 01 11 11 = 0x9F for (var, small, omit, omit)
+            code.append(0xD4)  # VAR 2OP ADD
+            code.append(0x9F)  # Type byte: var, small, omit, omit
+            code.append(0x00)  # Stack (first operand - variable 0)
+            code.append(0x01)  # 1 (second operand - small constant)
+            code.append(0x00)  # Store to stack
+            # 3. Write back to SOFT-GLOBALS (value already on stack)
+            # We need to duplicate the stack value first, since PUT consumes it
+            # but INC should leave the new value on stack
+            # Use: PUSH stack (copy stack top)
+            # Actually, there's no PUSH opcode that duplicates stack top
+            # So we need to store to a temp, write, then read back
+            # Alternative: read again after writing, or restructure
+            # Simpler: write first (consumes stack), then read (pushes result)
+            code.extend(self.gen_write_funny_global(var_name, value_code=b''))
+            # 4. Read again to get value on stack for return
+            code.extend(self.gen_read_funny_global(var_name))
+            return bytes(code)
+
         var_num = self.get_variable_number(op)
         if var_num == 0:
             # var_num 0 is stack, which is invalid for INC - the variable wasn't found
@@ -4020,6 +4314,9 @@ class ImprovedCodeGenerator:
         small constant (1 byte).
 
         The operand must be a variable name (atom), not a literal number.
+
+        For funny globals, generates equivalent code:
+            <SET var <- ,var 1>> and returns the new value
         """
         if not operands:
             raise ValueError("DEC requires exactly 1 operand")
@@ -4030,6 +4327,33 @@ class ImprovedCodeGenerator:
             raise ValueError("DEC requires a variable name, not a number")
 
         code = bytearray()
+
+        # Check if this is a funny global
+        var_name = None
+        if isinstance(op, AtomNode):
+            var_name = op.value
+        elif isinstance(op, GlobalVarNode):
+            var_name = op.name
+
+        if var_name and self.is_funny_global(var_name):
+            # Funny global: read from table, subtract 1, write back
+            # 1. Read current value from SOFT-GLOBALS
+            code.extend(self.gen_read_funny_global(var_name))
+            # 2. Subtract 1 -> result on stack
+            # SUB is 2OP:21, which is > 15, so must use variable form
+            # VAR 2OP format: 0xC0 + opcode = 0xC0 + 0x15 = 0xD5
+            # Type byte: 10 01 11 11 = 0x9F for (var, small, omit, omit)
+            code.append(0xD5)  # VAR 2OP SUB
+            code.append(0x9F)  # Type byte: var, small, omit, omit
+            code.append(0x00)  # Stack (first operand - variable 0)
+            code.append(0x01)  # 1 (second operand - small constant)
+            code.append(0x00)  # Store to stack
+            # 3. Write back to SOFT-GLOBALS (value already on stack)
+            code.extend(self.gen_write_funny_global(var_name, value_code=b''))
+            # 4. Read again to get value on stack for return
+            code.extend(self.gen_read_funny_global(var_name))
+            return bytes(code)
+
         var_num = self.get_variable_number(op)
         if var_num == 0:
             # var_num 0 is stack, which is invalid for DEC - the variable wasn't found
@@ -4312,10 +4636,21 @@ class ImprovedCodeGenerator:
         """
         code = bytearray()
 
-        # Pre-generate any FormNode operands first (they push to stack)
+        # Helper to check if a node is a funny global
+        def is_funny_global_node(node):
+            return (isinstance(node, GlobalVarNode) and
+                    hasattr(self, 'funny_globals_table') and
+                    node.name in self.funny_globals_table)
+
+        # Pre-generate any FormNode or funny global operands first (they push to stack)
         # Process in order so stack values are correct
         if isinstance(op1_node, FormNode):
             inner_code = self.generate_form(op1_node)
+            code.extend(inner_code)
+            op1_type = 2  # Variable
+            op1_val = 0   # Stack
+        elif is_funny_global_node(op1_node):
+            inner_code = self.gen_read_funny_global(op1_node.name)
             code.extend(inner_code)
             op1_type = 2  # Variable
             op1_val = 0   # Stack
@@ -4324,6 +4659,11 @@ class ImprovedCodeGenerator:
 
         if isinstance(op2_node, FormNode):
             inner_code = self.generate_form(op2_node)
+            code.extend(inner_code)
+            op2_type = 2  # Variable
+            op2_val = 0   # Stack
+        elif is_funny_global_node(op2_node):
+            inner_code = self.gen_read_funny_global(op2_node.name)
             code.extend(inner_code)
             op2_type = 2  # Variable
             op2_val = 0   # Stack

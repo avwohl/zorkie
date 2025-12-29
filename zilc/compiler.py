@@ -244,6 +244,16 @@ class ZILCompiler:
         set_pattern = r'<\s*SET\s+([A-Z0-9\-?]+)\s+(\d+|T|<>|!\\.)?\s*>'
         source = re.sub(set_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
+        # Handle shorthand flag forms like <FUNNY-GLOBALS?> (sets flag to T)
+        def extract_shorthand_flag(match):
+            flag_name = match.group(1)
+            self.compile_globals[flag_name] = True
+            self.log(f"  Global flag: {flag_name} = True")
+            return match.group(0)  # Keep the form in source
+
+        shorthand_flag_pattern = r'<\s*([A-Z][A-Z0-9\-]*\?)\s*>'
+        source = re.sub(shorthand_flag_pattern, extract_shorthand_flag, source, flags=re.IGNORECASE)
+
         # First pass: Extract COMPILATION-FLAG directives
         # <COMPILATION-FLAG FLAGNAME <T>> or <COMPILATION-FLAG FLAGNAME T>
         # Supports: <T>, <TRUE>, <>, T, TRUE, <> (bare or in angle brackets)

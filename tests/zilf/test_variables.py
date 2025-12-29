@@ -71,7 +71,6 @@ class TestFunnyGlobals:
             .with_global(globals_code) \
             .outputs("\n".join(expected_parts) + "\n")
 
-    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_assigned_funny_globals_works_in_value_context(self):
         """Test that assigned FUNNY-GLOBALS works in value context."""
         num_globals = 500
