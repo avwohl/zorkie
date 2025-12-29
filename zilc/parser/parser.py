@@ -547,8 +547,9 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return node
 
-            elif op_name == "TELL-TOKENS":
-                # TELL-TOKENS declaration
+            elif op_name in ("TELL-TOKENS", "ADD-TELL-TOKENS"):
+                # TELL-TOKENS / ADD-TELL-TOKENS declaration
+                # ADD-TELL-TOKENS is the same as TELL-TOKENS but adds to existing tokens
                 node = self.parse_tell_tokens(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
