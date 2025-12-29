@@ -1930,6 +1930,34 @@ class ZILCompiler:
             const_name = f'PR?{prep_word}'
             verb_constants[const_name] = prep_number
 
+        # Collect adjectives from objects and rooms for A? constants
+        adjectives = {}  # word -> adjective_num
+        adj_num = 1  # Start from 1
+        for obj in program.objects + program.rooms:
+            if 'ADJECTIVE' in obj.properties:
+                adj_list = obj.properties['ADJECTIVE']
+                if hasattr(adj_list, '__iter__') and not isinstance(adj_list, str):
+                    for adj in adj_list:
+                        if hasattr(adj, 'value'):
+                            adj_word = str(adj.value).upper()
+                        elif isinstance(adj, str):
+                            adj_word = adj.upper()
+                        else:
+                            adj_word = str(adj).upper()
+                        if adj_word not in adjectives:
+                            adjectives[adj_word] = adj_num
+                            adj_num += 1
+                elif hasattr(adj_list, 'value'):
+                    adj_word = str(adj_list.value).upper()
+                    if adj_word not in adjectives:
+                        adjectives[adj_word] = adj_num
+                        adj_num += 1
+
+        # Add A? constants to verb_constants
+        for adj_word, adj_number in adjectives.items():
+            const_name = f'A?{adj_word}'
+            verb_constants[const_name] = adj_number
+
         # Check verb/action limits for old parser (limit 255)
         # NEW-PARSER? removes this limit
         new_parser = self.compile_globals.get('NEW-PARSER?', False)
