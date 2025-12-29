@@ -237,7 +237,6 @@ class TestZREST:
             "<=? <GET ,TBL 2> 345>"
         )
 
-    @pytest.mark.xfail(reason="ZREST with 2OP instruction format not implemented")
     def test_zrest_works_with_2op_instruction(self):
         """Test that ZREST works with 2OP instruction."""
         AssertGlobals(

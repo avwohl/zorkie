@@ -3063,6 +3063,8 @@ class ImprovedCodeGenerator:
         # List/table operations
         elif op_name == 'REST':
             return self.gen_rest(form.operands)
+        elif op_name == 'ZREST':
+            return self.gen_rest(form.operands)
 
         # Game control
         elif op_name == 'JIGS-UP':
@@ -3116,6 +3118,8 @@ class ImprovedCodeGenerator:
         elif op_name == 'PTABLE':
             return self.gen_table(form.operands, table_type='PTABLE')
         elif op_name == 'REST':
+            return self.gen_rest(form.operands)
+        elif op_name == 'ZREST':
             return self.gen_rest(form.operands)
 
         # DEFINE-GLOBALS accessor - check before routine calls
