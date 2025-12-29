@@ -12959,6 +12959,16 @@ class ImprovedCodeGenerator:
         JE can compare up to 4 values: <EQUAL? a b c d> tests if a equals any of b, c, d.
         Returns true (1) if equal, false (0) otherwise.
         """
+        # Flatten any list operands (from MULTIFROB macro expansion)
+        # <EQUAL? ,PRSO (ROOMS <> TREE)> becomes <EQUAL? ,PRSO ,ROOMS <> ,TREE>
+        flattened = []
+        for op in operands:
+            if isinstance(op, list):
+                flattened.extend(op)
+            else:
+                flattened.append(op)
+        operands = flattened
+
         if len(operands) < 1:
             raise ValueError("EQUAL? requires at least 1 operand")
         if len(operands) < 2:
@@ -15388,6 +15398,16 @@ class ImprovedCodeGenerator:
             code.append(0x00)  # Address low byte = 0
             code.append(0x00)  # Store result to stack
             return bytes(code)
+
+        # Flatten any list operands (from unexpanded MULTIFROB macro)
+        # Lists can occur when MULTIFROB's REPEAT loops aren't fully evaluated
+        flattened = []
+        for op in operands:
+            if isinstance(op, list):
+                flattened.extend(op)
+            else:
+                flattened.append(op)
+        operands = flattened
 
         # Validate argument count if we have info about this routine
         num_args = len(operands)

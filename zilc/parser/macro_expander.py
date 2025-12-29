@@ -87,9 +87,30 @@ class MDLEvaluator:
         if isinstance(node, CondNode):
             return self._eval_cond_node(node, env)
 
-        # Handle lists
+        # Handle splice-unquote (!.VAR) - evaluate inner expr and return as SpliceResultNode
+        # This is used in FORM constructors like <FORM EQUAL? ,X !.L>
+        if isinstance(node, SpliceUnquoteNode):
+            result = self.evaluate(node.expr, env)
+            # Wrap in SpliceResultNode so FORM constructor knows to inline it
+            if isinstance(result, list):
+                return SpliceResultNode(result, node.line, node.column)
+            elif result is None:
+                return SpliceResultNode([], node.line, node.column)
+            else:
+                # Single value - still wrap as SpliceResultNode for consistency
+                return SpliceResultNode([result], node.line, node.column)
+
+        # Handle lists - inline SpliceResultNode items
         if isinstance(node, list):
-            return [self.evaluate(item, env) for item in node]
+            result = []
+            for item in node:
+                evaluated = self.evaluate(item, env)
+                if isinstance(evaluated, SpliceResultNode):
+                    # Inline the splice items
+                    result.extend(evaluated.items)
+                else:
+                    result.append(evaluated)
+            return result
 
         # Return other nodes as-is
         return node
@@ -124,6 +145,8 @@ class MDLEvaluator:
             return self._eval_nth(operands, env)
         elif op_name == 'REST':
             return self._eval_rest(operands, env)
+        elif op_name == 'PUTREST':
+            return self._eval_putrest(operands, env)
         elif op_name == 'EMPTY?':
             return self._eval_empty(operands, env)
         elif op_name == 'LENGTH':
@@ -430,6 +453,29 @@ class MDLEvaluator:
 
         return []
 
+    def _eval_putrest(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate PUTREST (set tail of list).
+
+        <PUTREST list new-tail> sets the rest (cdr) of list to new-tail.
+        Returns the modified list.
+        Used by MULTIFROB to build up OR/EQUAL? forms.
+        """
+        if len(operands) < 2:
+            return []
+
+        lst = self.evaluate(operands[0], env)
+        new_tail = self.evaluate(operands[1], env)
+
+        if isinstance(lst, list) and len(lst) > 0:
+            # In MDL, PUTREST modifies lst[1:] to be new_tail
+            # <PUTREST (a) (b c)> -> (a b c)
+            if isinstance(new_tail, list):
+                return [lst[0]] + new_tail
+            else:
+                return [lst[0], new_tail]
+
+        return lst if isinstance(lst, list) else []
+
     def _eval_empty(self, operands: List[ASTNode], env: Dict[str, Any]) -> bool:
         """Evaluate EMPTY? (check if list is empty)."""
         if not operands:
@@ -575,7 +621,16 @@ class MDLEvaluator:
 
         form_operands = []
         for item in evaluated[1:]:
-            if isinstance(item, ASTNode):
+            # Handle SpliceResultNode - inline its items
+            if isinstance(item, SpliceResultNode):
+                for sub in item.items:
+                    if isinstance(sub, ASTNode):
+                        form_operands.append(sub)
+                    elif isinstance(sub, str):
+                        form_operands.append(StringNode(sub))
+                    elif isinstance(sub, int):
+                        form_operands.append(NumberNode(sub))
+            elif isinstance(item, ASTNode):
                 form_operands.append(item)
             elif isinstance(item, str):
                 form_operands.append(StringNode(item))
