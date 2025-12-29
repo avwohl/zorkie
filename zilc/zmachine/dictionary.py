@@ -14,10 +14,15 @@ class Dictionary:
     """Builds Z-machine dictionary."""
 
     def __init__(self, version: int = 3, new_parser: bool = False,
-                 word_flags_in_table: bool = False, one_byte_parts_of_speech: bool = False):
+                 word_flags_in_table: bool = False, one_byte_parts_of_speech: bool = False,
+                 sibreaks: str = ''):
         self.version = version
         self.encoder = ZTextEncoder(version)
-        self.separators = [ord(c) for c in '.,;:?!()[]{}']  # Default separators
+        # Default separators plus SIBREAKS (self-inserting breaks)
+        # SIBREAKS characters both act as separators AND become words themselves
+        default_separators = '.,;:?!()[]{}'
+        all_separators = default_separators + sibreaks
+        self.separators = [ord(c) for c in all_separators]
         self.words: Set[str] = set()
 
         # NEW-PARSER? mode changes vocabulary format

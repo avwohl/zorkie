@@ -50,7 +50,6 @@ class PartOfSpeech:
 class TestSIBREAKS:
     """Tests for SIBREAKS (special input break characters)."""
 
-    @pytest.mark.xfail(reason="SIBREAKS not implemented")
     def test_sibreaks_should_affect_lexing(self):
         """Test that SIBREAKS affects lexer behavior."""
         AssertRoutine(

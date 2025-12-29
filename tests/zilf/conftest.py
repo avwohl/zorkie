@@ -389,6 +389,13 @@ class ZMachine:
                 import re
                 output = re.sub(r'\x1b\[[0-9;]*m', '', output)
 
+                # Filter out V3 status line with location name (dfrotz outputs this on READ)
+                # Status line format: " location                    Score: N        Moves: N"
+                # Note: dfrotz may output a leading space before the location name
+                # Only filter if there's an actual location name (word chars) before Score
+                # Don't filter status lines without location name (all whitespace or just "Score:")
+                output = re.sub(r'^\s*[a-zA-Z][a-zA-Z0-9-]*\s+.*Score:\s*-?\d+\s+Moves:\s*\d+\s*\n+', '', output)
+
                 # Filter out bocfel warning messages (e.g., V6 support warning)
                 output_lines = [
                     line for line in output.split("\n")

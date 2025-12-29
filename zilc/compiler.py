@@ -267,17 +267,21 @@ class ZILCompiler:
             elif var_value.startswith('!\\') and len(var_value) == 3:
                 # Character literal: !\X -> the character X
                 self.compile_globals[var_name] = var_value[2]
+            elif var_value.startswith('"') and var_value.endswith('"'):
+                # String literal: "text" -> text
+                self.compile_globals[var_name] = var_value[1:-1]
             self.log(f"  Global: {var_name} = {self.compile_globals.get(var_name)}")
             return match.group(0)  # Keep the SET/SETG in source
 
         # Handle SETG
         # Variable names can include MDL special suffixes like !- (unbind)
-        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.)?\s*>'
+        # Value can be: integer, T, <>, character literal (!\X), or quoted string ("text")
+        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.|\"\S*\")?\s*>'
         source = re.sub(setg_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
         # Handle SET (compile-time settings like REDEFINE)
         # Variable names can include MDL special suffixes like !- (unbind)
-        set_pattern = r'<\s*SET\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.)?\s*>'
+        set_pattern = r'<\s*SET\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.|\"\S*\")?\s*>'
         source = re.sub(set_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
         # Handle shorthand flag forms like <FUNNY-GLOBALS?> (sets flag to T)
@@ -2397,12 +2401,20 @@ class ZILCompiler:
         # WORD-FLAGS-IN-TABLE and ONE-BYTE-PARTS-OF-SPEECH are COMPILATION-FLAGs
         word_flags_in_table = self.compilation_flags.get('WORD-FLAGS-IN-TABLE', False)
         one_byte_parts_of_speech = self.compilation_flags.get('ONE-BYTE-PARTS-OF-SPEECH', False)
+        # SIBREAKS - self-inserting breaks (characters that separate and become words)
+        sibreaks = self.compile_globals.get('SIBREAKS', '')
         dictionary = Dictionary(
             self.version,
             new_parser=new_parser,
             word_flags_in_table=word_flags_in_table,
-            one_byte_parts_of_speech=one_byte_parts_of_speech
+            one_byte_parts_of_speech=one_byte_parts_of_speech,
+            sibreaks=sibreaks
         )
+
+        # Add SIBREAKS characters as dictionary words
+        # They act as both separators and become words themselves
+        for char in sibreaks:
+            dictionary.add_word(char, 'buzz')  # Add as buzz words so they parse but don't affect actions
 
         # Add BUZZ words
         if program.buzz_words:
