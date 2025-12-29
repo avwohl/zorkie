@@ -5379,6 +5379,15 @@ class ImprovedCodeGenerator:
                 placeholder_val = self._get_routine_placeholder(node.value)
                 # Return the 16-bit placeholder value (will be resolved by get_routine_fixups)
                 return (0, placeholder_val)
+            # Check for W?* vocabulary word constants
+            elif node.value.startswith('W?'):
+                # W?WORD vocabulary word constant - emit placeholder for later resolution
+                word = node.value[2:].lower()  # Extract word name (W?COLUMN -> "column")
+                placeholder_idx = self._next_vocab_placeholder_index
+                self._vocab_placeholders[placeholder_idx] = word
+                self._next_vocab_placeholder_index += 1
+                # Return large constant placeholder (0xFB00 | index)
+                return (0, 0xFB00 | placeholder_idx)
             # Unknown atom - warn and default to 0
             self._warn(f"Unknown identifier '{node.value}' - using 0")
             return (0, 0)
