@@ -167,6 +167,8 @@ class MDLEvaluator:
             return self._eval_assigned(operands, env)
         elif op_name == 'EVAL':
             return self._eval_eval(operands, env)
+        elif op_name == 'IFFLAG':
+            return self._eval_ifflag(operands, env)
 
         # Unknown form - return as-is (will be processed at runtime)
         return form
@@ -727,6 +729,57 @@ class MDLEvaluator:
         # For other forms, just evaluate and return result
         return arg
 
+    def _eval_ifflag(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate IFFLAG (compile-time conditional based on flags).
+
+        <IFFLAG (FLAG1 expr1) (FLAG2 expr2) ... (T default)>
+
+        Checks each flag in order and returns the expression for the first
+        truthy flag. Supports special flags like IN-ZILCH.
+
+        Example: <IFFLAG (IN-ZILCH PRINTI) (T PRINC)>
+        Returns PRINTI if in Z-machine context, PRINC otherwise.
+        """
+        for clause in operands:
+            # Handle both FormNode and list representations
+            # (FLAG EXPR) can be parsed as either a FormNode or a list [FLAG, EXPR]
+            if isinstance(clause, FormNode):
+                if len(clause.operands) < 1:
+                    continue
+                flag_node = clause.operator
+                expr = clause.operands[0] if clause.operands else None
+            elif isinstance(clause, list) and len(clause) >= 2:
+                flag_node = clause[0]
+                expr = clause[1]
+            else:
+                continue
+
+            # Evaluate the flag
+            flag_value = False
+            if isinstance(flag_node, AtomNode):
+                flag_name = flag_node.value.upper()
+                if flag_name == 'T':
+                    flag_value = True
+                elif flag_name == 'ELSE':
+                    flag_value = True
+                elif flag_name == 'IN-ZILCH':
+                    # Check the macro expander's in_zilch flag
+                    flag_value = self.macro_expander.in_zilch
+                elif flag_name in self.macro_expander.compilation_flags:
+                    flag_value = self.macro_expander.compilation_flags[flag_name]
+                else:
+                    # Unknown flag - treat as false
+                    flag_value = False
+
+            if flag_value:
+                # Return the expression for this clause
+                if expr is not None:
+                    return self.evaluate(expr, env)
+                return None
+
+        # No matching clause
+        return None
+
     def _expand_quasiquote(self, node: ASTNode, env: Dict[str, Any]) -> Any:
         """Expand quasiquoted expression."""
         if isinstance(node, UnquoteNode):
@@ -779,6 +832,11 @@ class MacroExpander:
         self.pending_globals: List[GlobalNode] = []
         # Constants created by EVAL during macro expansion
         self.pending_constants: List[ConstantNode] = []
+        # IN-ZILCH flag: True when expanding macros for Z-machine code generation,
+        # False when expanding for compile-time execution
+        self.in_zilch: bool = False
+        # Compilation flags for IFFLAG evaluation
+        self.compilation_flags: Dict[str, bool] = {}
 
     def define_macro(self, macro: MacroNode):
         """Store a macro definition."""
@@ -1030,6 +1088,16 @@ class MacroExpander:
             result = self.mdl_evaluator.evaluate(node, bindings)
             if result is None:
                 # EVAL returned None (side effect only, like defining a global)
+                return None
+            if isinstance(result, ASTNode):
+                return self._evaluate_mdl(result, bindings)
+            return self._convert_to_ast(result)
+
+        # Check for IFFLAG that needs compile-time evaluation
+        if op_name == 'IFFLAG':
+            # Evaluate IFFLAG at compile time using MDL evaluator
+            result = self.mdl_evaluator.evaluate(node, bindings)
+            if result is None:
                 return None
             if isinstance(result, ASTNode):
                 return self._evaluate_mdl(result, bindings)
@@ -1320,7 +1388,8 @@ class MacroExpander:
         for macro in program.macros:
             self.define_macro(macro)
 
-        # Expand macros in routines
+        # Expand macros in routines (IN-ZILCH = true, generating Z-machine code)
+        self.in_zilch = True
         for routine in program.routines:
             # Expand and flatten SpliceResultNodes
             new_body = []
@@ -1336,7 +1405,7 @@ class MacroExpander:
             for var_name, default_val in list(routine.local_defaults.items()):
                 routine.local_defaults[var_name] = self._expand_recursive(default_val)
 
-        # Expand macros in objects
+        # Expand macros in objects (IN-ZILCH = true, generating Z-machine code)
         for obj in program.objects:
             for key, value in obj.properties.items():
                 if isinstance(value, ASTNode):
@@ -1347,7 +1416,7 @@ class MacroExpander:
                         for v in value
                     ]
 
-        # Expand macros in rooms
+        # Expand macros in rooms (IN-ZILCH = true, generating Z-machine code)
         for room in program.rooms:
             for key, value in room.properties.items():
                 if isinstance(value, ASTNode):
@@ -1358,12 +1427,12 @@ class MacroExpander:
                         for v in value
                     ]
 
-        # Expand macros in globals
+        # Expand macros in globals (IN-ZILCH = true, generating Z-machine code)
         for global_node in program.globals:
             if global_node.initial_value:
                 global_node.initial_value = self._expand_recursive(global_node.initial_value)
 
-        # Expand macros in constants
+        # Expand macros in constants (IN-ZILCH = true, generating Z-machine code)
         for const in program.constants:
             if const.value:
                 const.value = self._expand_recursive(const.value)
