@@ -148,11 +148,14 @@ class TestTellTokenErrors:
             .does_not_compile()
 
     def test_tell_builtin_should_reject_mismatched_captures(self):
-        """Test TELL rejects mismatched captures."""
+        """Test TELL rejects using more captures than available."""
+        # Unused captures are allowed (ZILCH behavior - e.g., CAO/CANO in beyondzork)
+        # The callee function may use implicit context instead of .X
         AssertRoutine("", "<>") \
             .with_global("<TELL-TOKENS DBL * <PRINT-DBL>>") \
-            .does_not_compile()
+            .compiles()
 
+        # But using more captures than available is an error
         AssertRoutine("", "<>") \
             .with_global("<TELL-TOKENS DBL * <PRINT-DBL .X .Y>>") \
             .does_not_compile()

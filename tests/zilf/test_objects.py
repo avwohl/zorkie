@@ -381,12 +381,12 @@ class TestObjectProperties:
         AssertGlobals('<OBJECT FOO (DESC "foo") (DESC "bar")>') \
             .compiles()
 
-        # But IN + LOC (location property conflicts) should still error
+        # IN + LOC (same location property) - later value wins (ZILCH behavior)
         AssertGlobals(
             "<OBJECT ROOM1>",
             "<OBJECT ROOM2>",
             "<OBJECT FOO (IN ROOM1) (LOC ROOM2)>"
-        ).does_not_compile()
+        ).compiles()
 
     def test_in_pseudo_property_not_conflict_with_in_string_nexit(self):
         """Test that IN pseudo-property doesn't conflict with IN string NEXIT."""

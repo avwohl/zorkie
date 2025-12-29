@@ -520,10 +520,14 @@ class ImprovedCodeGenerator:
                 self.objects[room.name] = self.next_object
                 self.next_object += 1
 
-        # Check if REDEFINE is allowed
+        # Check if REDEFINE is allowed (may have MDL suffix like !-)
         allow_redefine = False
         if self.compiler and hasattr(self.compiler, 'compile_globals'):
-            allow_redefine = self.compiler.compile_globals.get('REDEFINE', False)
+            # Check for REDEFINE or REDEFINE!- or ZREDEFINE (all variants)
+            for key in ['REDEFINE', 'REDEFINE!-', 'ZREDEFINE']:
+                if self.compiler.compile_globals.get(key, False):
+                    allow_redefine = True
+                    break
             # Check if FUNNY-GLOBALS? is enabled
             self.funny_globals_enabled = self.compiler.compile_globals.get('FUNNY-GLOBALS?', False)
 
@@ -2636,6 +2640,12 @@ class ImprovedCodeGenerator:
             return b''
 
         op_name = form.operator.value.upper()
+
+        # Check if this is a user-defined routine BEFORE checking opcodes
+        # This allows user routines to shadow built-in opcode names
+        # (e.g., GET-CURSOR routine in journey shadows the V6 GET-CURSOR opcode)
+        if form.operator.value in self.routines:
+            return self.gen_routine_call(form.operator.value, form.operands)
 
         # Control flow
         if op_name == 'RTRUE':
@@ -6152,30 +6162,67 @@ class ImprovedCodeGenerator:
         """Generate CURSET (set cursor position - V4+).
 
         <CURSET line column> sets cursor to specified position.
+        <CURSET -1> shows cursor (V6 only).
+        <CURSET -2> hides cursor (V6 only).
         V4+ only. Uses SET_CURSOR opcode (VAR opcode 0x0F).
 
         Args:
-            operands[0]: Line number (1-based)
-            operands[1]: Column number (1-based)
+            operands[0]: Line number (1-based), or -1/-2 for cursor visibility (V6)
+            operands[1]: Column number (1-based) - optional in V6
 
         Returns:
             bytes: Z-machine code
         """
         if self.version < 4:
             raise ValueError("CURSET requires V4 or later")
-        if len(operands) != 2:
-            raise ValueError("CURSET requires exactly 2 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
 
-        code.append(0xF1)  # SET_CURSOR (VAR opcode 0x11)
-        t1 = 0x01 if op1_type == 0 else 0x02
-        t2 = 0x01 if op2_type == 0 else 0x02
-        code.append((t1 << 6) | (t2 << 4) | 0x0F)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        # SET_CURSOR is VAR opcode 0x0F
+        code.append(0xEF)  # 0xE0 | 0x0F
+
+        if len(operands) == 1:
+            # V6 cursor visibility control: <CURSET -1> show, <CURSET -2> hide
+            if self.version < 6:
+                raise ValueError("CURSET with 1 operand requires V6")
+            op1_type, op1_val = self._get_operand_type_and_value_ext(operands[0])
+            if op1_type == 0:  # Large constant
+                code.append(0x3F)  # 00 11 11 11
+                code.append((op1_val >> 8) & 0xFF)
+                code.append(op1_val & 0xFF)
+            elif op1_type == 1:  # Small constant
+                code.append(0x7F)  # 01 11 11 11
+                code.append(op1_val & 0xFF)
+            else:  # Variable
+                code.append(0xBF)  # 10 11 11 11
+                code.append(op1_val & 0xFF)
+        elif len(operands) == 2:
+            # Normal cursor positioning: <CURSET line column>
+            op1_type, op1_val = self._get_operand_type_and_value_ext(operands[0])
+            op2_type, op2_val = self._get_operand_type_and_value_ext(operands[1])
+
+            # Build type byte: each operand is 2 bits
+            # 00=large const, 01=small const, 10=variable, 11=omitted
+            t1 = op1_type if op1_type <= 2 else 3
+            t2 = op2_type if op2_type <= 2 else 3
+            type_byte = (t1 << 6) | (t2 << 4) | 0x0F  # 11 11 for omitted operands 3,4
+            code.append(type_byte)
+
+            # Operand 1
+            if op1_type == 0:  # Large constant
+                code.append((op1_val >> 8) & 0xFF)
+                code.append(op1_val & 0xFF)
+            else:
+                code.append(op1_val & 0xFF)
+
+            # Operand 2
+            if op2_type == 0:  # Large constant
+                code.append((op2_val >> 8) & 0xFF)
+                code.append(op2_val & 0xFF)
+            else:
+                code.append(op2_val & 0xFF)
+        else:
+            raise ValueError(f"CURSET requires 1 or 2 operands, got {len(operands)}")
 
         return bytes(code)
 
