@@ -386,8 +386,16 @@ class Lexer:
 
         # Atoms can contain letters, digits, hyphens, underscores, and some special chars
         # First character must be letter or special
-        while self.peek() and self.is_atom_char(self.peek()):
-            chars.append(self.advance())
+        # Also handle backslash escapes within atoms (e.g., A?G\'S for adjective G'S)
+        while self.peek():
+            if self.is_atom_char(self.peek()):
+                chars.append(self.advance())
+            elif self.peek() == '\\' and self.peek(1) and self.peek(1) not in ' \t\n\r\f':
+                # Backslash escape within atom - include both backslash and escaped char
+                chars.append(self.advance())  # backslash
+                chars.append(self.advance())  # escaped char
+            else:
+                break
 
         return ''.join(chars)
 
@@ -568,8 +576,9 @@ class Lexer:
                 while self.peek(pos) and (self.peek(pos).isdigit() or self.peek(pos) in 'ABCDEFabcdef'):
                     pos += 1
                 # If followed by atom characters after the digits, it's an atom
+                # Exception: ; after a number starts a comment, not an atom (17;comment = 17)
                 next_ch = self.peek(pos)
-                if next_ch and self.is_atom_char(next_ch) and not next_ch.isdigit():
+                if next_ch and self.is_atom_char(next_ch) and not next_ch.isdigit() and next_ch != ';':
                     # It's an atom like 1ST?
                     value = self.read_atom()
                     self.tokens.append(Token(TokenType.ATOM, value, line, col))

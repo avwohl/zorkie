@@ -2900,6 +2900,9 @@ class ImprovedCodeGenerator:
         elif op_name == 'PRINTTYPE':
             return self.gen_printtype(form.operands)
         elif op_name == 'PRINTT':
+            # Check if PRINTT is a user-defined routine (common in Infocom games to print "THE")
+            if form.operator.value in self.routines:
+                return self.gen_routine_call(form.operator.value, form.operands)
             if self.version < 5:
                 raise ValueError("PRINTT requires V5 or later")
             if len(form.operands) < 2 or len(form.operands) > 4:
