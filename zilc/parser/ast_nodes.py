@@ -555,6 +555,7 @@ class TellTokensNode(ASTNode):
 class Program:
     """Top-level program node containing all definitions."""
     version: int = 3
+    version_explicit: bool = False  # True if version was explicitly set via VERSION directive
     routines: List[RoutineNode] = field(default_factory=list)
     objects: List[ObjectNode] = field(default_factory=list)
     rooms: List[RoomNode] = field(default_factory=list)

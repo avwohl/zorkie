@@ -98,6 +98,7 @@ class Parser:
             program.macros.append(node)
         elif isinstance(node, VersionNode):
             program.version = node.version
+            program.version_explicit = True
         elif isinstance(node, TableNode):
             program.tables.append(node)
         elif isinstance(node, BuzzNode):

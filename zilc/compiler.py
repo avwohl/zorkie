@@ -860,6 +860,9 @@ class ZILCompiler:
         Process %<COND> compile-time conditionals.
         Example: %<COND (<==? ,ZORK-NUMBER 1> '(...)) (T '(...))>
         Evaluates at compile time and splices result into code.
+
+        Note: ;%<COND ...> is a comment form that should NOT be evaluated.
+        The semicolon prefix makes it a comment that the lexer will skip.
         """
         import re
         result = []
@@ -871,6 +874,15 @@ class ZILCompiler:
             if not match:
                 result.append(source[pos:])
                 break
+
+            # Check if preceded by semicolon - if so, this is a comment form
+            # that should be left for the lexer to skip
+            abs_match_pos = pos + match.start()
+            if abs_match_pos > 0 and source[abs_match_pos - 1] == ';':
+                # This is ;%<COND ...> - a comment form, skip it
+                result.append(source[pos:pos + match.end()])
+                pos = pos + match.end()
+                continue
 
             # Add text before match
             result.append(source[pos:pos + match.start()])
@@ -2113,10 +2125,11 @@ class ZILCompiler:
         # Store program for access by codegen (e.g., for TELL-TOKENS)
         self.program = program
 
-        # Use program version if specified
-        if program.version:
+        # Use program version only if explicitly specified via VERSION directive
+        # (otherwise keep the version passed to the compiler constructor)
+        if program.version_explicit:
             self.version = program.version
-            self.log(f"  Target version: {self.version}")
+            self.log(f"  Target version (from source): {self.version}")
 
         # Glulx compilation path (version 256)
         if self.version == 256:
