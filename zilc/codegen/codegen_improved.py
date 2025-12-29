@@ -933,7 +933,8 @@ class ImprovedCodeGenerator:
         # LEXV format: byte max_entries, byte count, then 4 bytes per entry
         if is_lexv and table_type == 'ITABLE':
             initial_size = table_node.size or 1
-            # Warn if size isn't a multiple of 3 (each lexeme entry is 3 words)
+            # Warn if size isn't a multiple of 3 (ZILF compatibility)
+            # Note: This warning may be overly strict - LEXV entries are 4 bytes each
             if initial_size % 3 != 0:
                 self.compiler.warn(
                     "MDL0428",
@@ -1122,7 +1123,8 @@ class ImprovedCodeGenerator:
         # LEXV format: byte max_entries, byte count, then 4 bytes per entry
         if is_lexv and table_type == 'ITABLE':
             num_entries = initial_size if initial_size else 1
-            # Warn if size isn't a multiple of 3 (each lexeme entry is 3 words)
+            # Warn if size isn't a multiple of 3 (ZILF compatibility)
+            # Note: This warning may be overly strict - LEXV entries are 4 bytes each
             if num_entries % 3 != 0:
                 self.compiler.warn(
                     "MDL0428",
