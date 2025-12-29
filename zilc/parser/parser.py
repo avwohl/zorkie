@@ -216,17 +216,25 @@ class Parser:
                     return results[0]
             return None
         elif self.current_token.type == TokenType.LBRACKET:
-            # Skip bracket forms at top level - these are visual separators or MDL comments
-            # In ZILCH source, [ on its own line is a page/section break
-            self.advance()
-            # If followed by content and closing bracket, skip the whole thing
-            depth = 1
-            while depth > 0 and self.current_token.type != TokenType.EOF:
-                if self.current_token.type == TokenType.LBRACKET:
-                    depth += 1
-                elif self.current_token.type == TokenType.RBRACKET:
-                    depth -= 1
-                self.advance()
+            # In Infocom ZIL source, [...] brackets are used as section groupings
+            # but contain valid definitions that need to be parsed
+            self.advance()  # Skip [
+            # Parse content inside brackets as top-level forms
+            results = []
+            while self.current_token.type not in (TokenType.RBRACKET, TokenType.EOF):
+                form = self.parse_top_level()
+                if form is not None:
+                    if isinstance(form, list):
+                        results.extend(form)
+                    else:
+                        results.append(form)
+            if self.current_token.type == TokenType.RBRACKET:
+                self.advance()  # Skip ]
+            # Return the first form, queue the rest
+            if results:
+                if len(results) > 1:
+                    self._extra_forms.extend(results[1:])
+                return results[0]
             return None
         elif self.current_token.type == TokenType.RBRACKET:
             # Skip stray closing bracket
