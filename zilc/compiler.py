@@ -2169,7 +2169,17 @@ class ZILCompiler:
 
         # Build dictionary first to get word offsets for SYNONYM properties
         self.log("Building dictionary vocabulary...")
-        dictionary = Dictionary(self.version)
+        # Check for NEW-PARSER? (from global) and related compilation flags
+        new_parser = self.compile_globals.get('NEW-PARSER?', False)
+        # WORD-FLAGS-IN-TABLE and ONE-BYTE-PARTS-OF-SPEECH are COMPILATION-FLAGs
+        word_flags_in_table = self.compilation_flags.get('WORD-FLAGS-IN-TABLE', False)
+        one_byte_parts_of_speech = self.compilation_flags.get('ONE-BYTE-PARTS-OF-SPEECH', False)
+        dictionary = Dictionary(
+            self.version,
+            new_parser=new_parser,
+            word_flags_in_table=word_flags_in_table,
+            one_byte_parts_of_speech=one_byte_parts_of_speech
+        )
 
         # Add BUZZ words
         if program.buzz_words:

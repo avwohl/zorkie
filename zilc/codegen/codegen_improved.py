@@ -642,6 +642,14 @@ class ImprovedCodeGenerator:
         for const_node in program.constants:
             self.eval_constant(const_node)
 
+        # Auto-generate VOCAB global if not already defined
+        # VOCAB points to the dictionary address, which is resolved during assembly
+        if 'VOCAB' not in self.globals and 'VOCAB' not in self.constants:
+            self.globals['VOCAB'] = self.next_global
+            self.next_global += 1
+            # Use special marker 0xFA00 that assembler will replace with dict_addr
+            self.global_values['VOCAB'] = 0xFA00
+
         # Note: Objects were already assigned numbers above (before globals)
         # so that globals can reference objects like <GLOBAL HERE CAT>
 

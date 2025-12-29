@@ -13,11 +13,17 @@ from .text_encoding import ZTextEncoder
 class Dictionary:
     """Builds Z-machine dictionary."""
 
-    def __init__(self, version: int = 3):
+    def __init__(self, version: int = 3, new_parser: bool = False,
+                 word_flags_in_table: bool = False, one_byte_parts_of_speech: bool = False):
         self.version = version
         self.encoder = ZTextEncoder(version)
         self.separators = [ord(c) for c in '.,;:?!()[]{}']  # Default separators
         self.words: Set[str] = set()
+
+        # NEW-PARSER? mode changes vocabulary format
+        self.new_parser = new_parser
+        self.word_flags_in_table = word_flags_in_table
+        self.one_byte_parts_of_speech = one_byte_parts_of_speech
 
         # Track word types (for parser)
         # Each word can have multiple types (e.g., both noun and adjective if they collide)
@@ -186,10 +192,26 @@ class Dictionary:
             result.append(sep)
 
         # Entry length
-        # V1-3: 4 bytes text + 3 bytes data = 7 bytes total
-        # V4+: 6 bytes text + 3 bytes data = 9 bytes total
+        # V1-3: 4 bytes text, V4+: 6 bytes text
         text_bytes = 4 if self.version <= 3 else 6
-        data_bytes = 3  # Standard data bytes for parser info
+
+        if self.new_parser:
+            # NEW-PARSER? format has more data bytes:
+            # - SemanticStuff or AdjId/DirId: 2 bytes
+            # - VerbStuff: 2 bytes
+            # - Flags: 2 bytes (if WORD-FLAGS-IN-TABLE is false, else 0)
+            # - Classification: 2 bytes (if ONE-BYTE-PARTS-OF-SPEECH is false, else 1)
+            data_bytes = 2 + 2  # SemanticStuff + VerbStuff
+            if not self.word_flags_in_table:
+                data_bytes += 2  # Flags
+            if self.one_byte_parts_of_speech:
+                data_bytes += 1  # Classification (1 byte)
+            else:
+                data_bytes += 2  # Classification (2 bytes)
+        else:
+            # Old parser: 3 data bytes
+            data_bytes = 3
+
         entry_length = text_bytes + data_bytes
         result.append(entry_length)
 
@@ -238,22 +260,8 @@ class Dictionary:
             for w in encoded:
                 result.extend(struct.pack('>H', w))
 
-            # Add 3 data bytes for each entry
-            # Byte 1: lexical type flags (merged from all colliding words)
-            # Bytes 2-3: parser info (verb number, etc.)
+            # Add data bytes for each entry
             word_types = merged_types.get(encoded_tuple, set())
-            type_byte = self._compute_type_byte(word_types)
-            result.append(type_byte)
-
-            # Bytes 5-6 in V3 (after 4-byte encoded word + 1 type byte):
-            # For direction words: byte 5 = property number, byte 6 = 0
-            # For verbs: byte 5 = verb number (255-based), byte 6 = 0
-            # For nouns: bytes 5-6 = object number (big-endian)
-            #
-            # When words collide, we need to pick the right data value:
-            # - Get verb number from any colliding verb word
-            # - Get object number from any colliding noun word
-            # - Get property number from any colliding direction word
             encoded_words = encoded_groups.get(encoded_tuple, [word])
 
             # Find verb number from colliding words
@@ -270,16 +278,52 @@ class Dictionary:
                     obj_num = self.word_objects[w]
                     break
 
-            if 'direction' in word_types or 'dir' in word_types:
-                # Direction property number goes in byte 5 directly
-                result.append(obj_num & 0xFF)
-                result.append(0)
-            elif 'verb' in word_types and verb_num > 0:
-                # Verb number goes in byte 5
-                result.append(verb_num & 0xFF)
-                result.append(0)
+            if self.new_parser:
+                # NEW-PARSER? format:
+                # - SemanticStuff or AdjId/DirId: 2 bytes
+                # - VerbStuff: 2 bytes
+                # - Flags: 2 bytes (if WORD-FLAGS-IN-TABLE is false)
+                # - Classification: 2 or 1 bytes
+
+                # SemanticStuff (or AdjId/DirId for directions)
+                if 'direction' in word_types or 'dir' in word_types:
+                    result.append(obj_num & 0xFF)  # DirId
+                    result.append(0)
+                else:
+                    result.extend(struct.pack('>H', obj_num & 0xFFFF))  # SemanticStuff
+
+                # VerbStuff (action table pointer for verbs, 0 for non-verbs)
+                if 'verb' in word_types and verb_num > 0:
+                    # TODO: Should be ACT?<verb> table address
+                    result.extend(struct.pack('>H', verb_num & 0xFFFF))
+                else:
+                    result.extend(struct.pack('>H', 0))
+
+                # Flags (if not in separate table)
+                if not self.word_flags_in_table:
+                    result.extend(struct.pack('>H', 0))  # TODO: word flags
+
+                # Classification
+                type_byte = self._compute_type_byte(word_types)
+                if self.one_byte_parts_of_speech:
+                    result.append(type_byte)
+                else:
+                    result.extend(struct.pack('>H', type_byte))
             else:
-                result.extend(struct.pack('>H', obj_num & 0xFFFF))
+                # Old parser format: 3 data bytes
+                # Byte 1: lexical type flags
+                type_byte = self._compute_type_byte(word_types)
+                result.append(type_byte)
+
+                # Bytes 2-3: parser info
+                if 'direction' in word_types or 'dir' in word_types:
+                    result.append(obj_num & 0xFF)
+                    result.append(0)
+                elif 'verb' in word_types and verb_num > 0:
+                    result.append(verb_num & 0xFF)
+                    result.append(0)
+                else:
+                    result.extend(struct.pack('>H', obj_num & 0xFFFF))
 
         return bytes(result)
 

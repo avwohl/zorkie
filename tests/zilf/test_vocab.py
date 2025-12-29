@@ -298,7 +298,6 @@ class TestNewParser:
             .with_global(NEW_PARSER_BOOTSTRAP) \
             .outputs("Hello, world!\n")
 
-    @pytest.mark.xfail(reason="NEW-PARSER? vocabulary format not implemented")
     def test_new_parser_p_should_affect_vocab_word_size(self):
         """Test NEW-PARSER? affects vocabulary word size."""
         AssertRoutine("", "<GETB ,VOCAB <+ 1 <GETB ,VOCAB 0>>>") \

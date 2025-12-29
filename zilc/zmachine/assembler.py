@@ -76,32 +76,37 @@ class ZAssembler:
         return sum(data[0x40:]) & 0xFFFF
 
     def _resolve_table_placeholders(self, data: bytes, table_base_addr: int,
-                                       table_offsets: dict) -> bytes:
+                                       table_offsets: dict,
+                                       dict_addr: int = None) -> bytes:
         """
         Resolve table address placeholders in data.
 
         Scans for 16-bit values in range 0xFF00-0xFFFF which represent table
         indices, and replaces them with actual table addresses.
+        Also resolves VOCAB placeholder (0xFA00) with dictionary address.
 
         Args:
             data: Bytes to scan (typically globals_data)
             table_base_addr: Base address where tables are placed in memory
             table_offsets: Dict mapping table index to offset within table data
+            dict_addr: Dictionary address for resolving VOCAB placeholder
 
         Returns:
             Modified data with actual table addresses
         """
-        if not table_offsets:
-            return data
-
         result = bytearray(data)
 
-        # Scan for 16-bit table placeholders (0xFF00 | table_index)
+        # Scan for 16-bit placeholders
         # Globals are stored as big-endian 16-bit words
         for i in range(0, len(result) - 1, 2):
             word = (result[i] << 8) | result[i + 1]
+            # Check if this is a VOCAB placeholder (0xFA00)
+            if word == 0xFA00 and dict_addr is not None:
+                # Replace with dictionary address
+                result[i] = (dict_addr >> 8) & 0xFF
+                result[i + 1] = dict_addr & 0xFF
             # Check if this is a table placeholder (0xFF00-0xFFFF)
-            if word >= 0xFF00 and word <= 0xFFFF:
+            elif word >= 0xFF00 and word <= 0xFFFF and table_offsets:
                 table_index = word & 0x00FF
                 if table_index in table_offsets:
                     # Calculate actual table address
@@ -578,16 +583,26 @@ class ZAssembler:
         calc_addr = (calc_addr + 1) // 2 * 2  # pad
         calc_addr += len(objects) if objects else 0  # objects
         calc_addr = (calc_addr + 1) // 2 * 2  # pad
-        # Dictionary is in static memory, not here
 
         # NOW we know where tables will be placed
         table_base_addr = calc_addr
 
-        # Patch globals_data with actual table addresses
-        if table_data and table_offsets:
-            globals_data = self._resolve_table_placeholders(
-                globals_data, table_base_addr, table_offsets
-            )
+        # Pre-calculate dictionary address for VOCAB global resolution
+        # Dictionary comes after: tables, extension table (V5+)
+        dict_addr_precalc = table_base_addr
+        if table_data:
+            dict_addr_precalc += len(table_data)
+            if dict_addr_precalc % 2 != 0:
+                dict_addr_precalc += 1  # Account for alignment
+        if extension_table and self.version >= 5:
+            dict_addr_precalc += len(extension_table)
+            if dict_addr_precalc % 2 != 0:
+                dict_addr_precalc += 1
+
+        # Patch globals_data with actual table addresses and VOCAB
+        globals_data = self._resolve_table_placeholders(
+            globals_data, table_base_addr, table_offsets, dict_addr_precalc
+        )
 
         globals_addr = current_addr
         story.extend(globals_data)
