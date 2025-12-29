@@ -317,20 +317,28 @@ class TestObjectProperties:
             "<OBJECT BAR (BAZ 4 5 FOO)>"
         ).does_not_compile()
 
-    def test_nonexistent_object_in_direction_property_rejected(self):
-        """Test that nonexistent object in direction property is rejected."""
+    def test_nonexistent_object_in_direction_property_warns(self):
+        """Test that nonexistent object in direction property compiles with warning.
+
+        ZILCH behavior: warn but don't fail on undefined objects.
+        """
+        # Should compile (with warnings) - matches ZILCH behavior
         AssertGlobals(
             "<DIRECTIONS NORTH>",
             "<OBJECT FOO (NORTH TO BAR)>"
-        ).does_not_compile()
+        ).compiles()
 
-    def test_nonexistent_global_in_direction_property_rejected(self):
-        """Test that nonexistent global in direction property is rejected."""
+    def test_nonexistent_global_in_direction_property_warns(self):
+        """Test that nonexistent global in direction property compiles with warning.
+
+        ZILCH behavior: warn but don't fail on undefined globals.
+        """
+        # Should compile (with warnings) - matches ZILCH behavior
         AssertGlobals(
             "<DIRECTIONS NORTH>",
             "<OBJECT FOO>",
             "<OBJECT BAR (NORTH TO FOO IF NO-SUCH-GLOBAL)>"
-        ).does_not_compile("ZIL0207")
+        ).compiles()
 
     def test_direction_synonyms_work_identically(self):
         """Test that direction synonyms work identically."""

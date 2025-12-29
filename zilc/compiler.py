@@ -1376,7 +1376,9 @@ class ZILCompiler:
         if isinstance(value, AtomNode):
             dest_name = value.value
             if dest_name not in obj_name_to_num:
-                raise ValueError(f"Direction exit references nonexistent object '{dest_name}'")
+                # Warn but don't fail - matches ZILCH behavior
+                print(f"Warning: Direction exit references undefined object '{dest_name}' - using 0", file=sys.stderr)
+                return 0
             return obj_name_to_num[dest_name]
 
         # List format: [keyword, value] or [keyword, value, ...]
@@ -1389,16 +1391,19 @@ class ZILCompiler:
                 # (NORTH TO DEST-ROOM) -> get object number
                 # Also handles (NORTH TO DEST-ROOM IF CONDITION)
                 dest = value[1]
-                dest_num = None
+                dest_num = 0  # Default to 0 for undefined objects
                 if isinstance(dest, AtomNode):
                     dest_name = dest.value
                     if dest_name not in obj_name_to_num:
-                        raise ValueError(f"Direction exit references nonexistent object '{dest_name}'")
-                    dest_num = obj_name_to_num[dest_name]
+                        # Warn but don't fail - matches ZILCH behavior
+                        print(f"Warning: Direction exit references undefined object '{dest_name}' - using 0", file=sys.stderr)
+                    else:
+                        dest_num = obj_name_to_num[dest_name]
                 elif isinstance(dest, str):
                     if dest not in obj_name_to_num:
-                        raise ValueError(f"Direction exit references nonexistent object '{dest}'")
-                    dest_num = obj_name_to_num[dest]
+                        print(f"Warning: Direction exit references undefined object '{dest}' - using 0", file=sys.stderr)
+                    else:
+                        dest_num = obj_name_to_num[dest]
 
                 # Check for conditional form: (TO DEST IF CONDITION [IS state])
                 if len(value) >= 4:
@@ -1415,7 +1420,8 @@ class ZILCompiler:
                         if hasattr(self, '_current_globals_set') and self._current_globals_set is not None:
                             is_valid = is_valid or cond_name in self._current_globals_set
                         if not is_valid:
-                            raise ValueError(f"ZIL0207: Direction exit references nonexistent object or global '{cond_name}'")
+                            # Warn but don't fail - matches ZILCH behavior
+                            print(f"Warning: Direction exit references undefined object or global '{cond_name}'", file=sys.stderr)
 
                 return dest_num
 
@@ -1445,7 +1451,8 @@ class ZILCompiler:
                     if isinstance(dest, AtomNode):
                         dest_name = dest.value
                         if dest_name not in obj_name_to_num:
-                            raise ValueError(f"Direction exit references nonexistent object '{dest_name}'")
+                            print(f"Warning: Direction exit references undefined object '{dest_name}' - using 0", file=sys.stderr)
+                            return 0
                         return obj_name_to_num[dest_name]
                 # Other exit types need more complex handling
                 return 0
@@ -1453,7 +1460,8 @@ class ZILCompiler:
         # Try to interpret as object name directly
         if isinstance(value, str):
             if value not in obj_name_to_num:
-                raise ValueError(f"Direction exit references nonexistent object '{value}'")
+                print(f"Warning: Direction exit references undefined object '{value}' - using 0", file=sys.stderr)
+                return 0
             return obj_name_to_num[value]
 
         return None
