@@ -195,7 +195,7 @@ class ZILCompiler:
         elif order_mode == 'ROOMS-FIRST':
             # Rooms first (by mention order), then others (by mention order)
             ordered_names.sort(key=lambda n: (not is_room.get(n, False), mention_order[n]))
-        elif order_mode == 'ROOMS-AND-LOCAL-GLOBALS-FIRST':
+        elif order_mode in ('ROOMS-AND-LOCAL-GLOBALS-FIRST', 'ROOMS-AND-LGS-FIRST'):
             # Rooms and local-globals first, then others
             def priority(n):
                 if is_room.get(n, False) or is_local_global.get(n, False):
@@ -2229,9 +2229,10 @@ class ZILCompiler:
                     synonym_to_canonical[word.upper()] = canonical
 
         # Also add PREP-SYNONYM mappings
-        # <PREP-SYNONYM THROUGH THRU> means THRU -> THROUGH
+        # <PREP-SYNONYM TO TOWARD TOWARDS> means TOWARD -> TO, TOWARDS -> TO
         for prep_syn in program.prep_synonyms:
-            synonym_to_canonical[prep_syn.synonym.upper()] = prep_syn.canonical.upper()
+            for synonym in prep_syn.synonyms:
+                synonym_to_canonical[synonym.upper()] = prep_syn.canonical.upper()
 
         for syntax_def in program.syntax:
             if not syntax_def.pattern:
@@ -2266,14 +2267,15 @@ class ZILCompiler:
                             prep_num += 1
 
         # Add PREP-SYNONYM synonyms that weren't encountered in SYNTAX patterns
-        # <PREP-SYNONYM THROUGH THRU> means THRU gets same prep number as THROUGH
+        # <PREP-SYNONYM TO TOWARD TOWARDS> means TOWARD and TOWARDS get same prep number as TO
         for prep_syn in program.prep_synonyms:
             canonical = prep_syn.canonical.upper()
-            synonym = prep_syn.synonym.upper()
-            if canonical in prepositions and synonym not in prepositions:
-                # Synonym gets same prep number as canonical
-                prepositions[synonym] = prepositions[canonical]
-                # Note: synonym is NOT added to canonical_prepositions
+            for synonym in prep_syn.synonyms:
+                synonym_upper = synonym.upper()
+                if canonical in prepositions and synonym_upper not in prepositions:
+                    # Synonym gets same prep number as canonical
+                    prepositions[synonym_upper] = prepositions[canonical]
+                    # Note: synonym is NOT added to canonical_prepositions
 
         # Add PR? constants to verb_constants
         # For synonyms, create PR? constants pointing to the canonical word's number

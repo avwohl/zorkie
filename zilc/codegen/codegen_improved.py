@@ -130,10 +130,11 @@ class ImprovedCodeGenerator:
         self._max_extension_word = 0
 
         # Routine call placeholders - map placeholder_value to routine_name
-        # Placeholders are 16-bit values in range 0xFD00-0xFFFE
-        # This gives us 766 slots for unique routines
+        # Placeholders are 16-bit values in range 0xF000-0xFFFE
+        # This gives us 4094 slots for unique routines (enough for Beyond Zork's 1718)
+        # Note: TELL string placeholders use 0xE000+ with 0x8D encoding, so no conflict
         self._routine_placeholders: Dict[int, str] = {}
-        self._next_placeholder_value = 0xFD00  # Start of placeholder range
+        self._next_placeholder_value = 0xF000  # Start of placeholder range
         self._max_placeholder_value = 0xFFFE   # End of placeholder range (0xFFFF reserved)
         # Reverse mapping: routine_name -> placeholder_value (reuse same value for same routine)
         self._routine_to_placeholder: Dict[str, int] = {}
@@ -445,7 +446,7 @@ class ImprovedCodeGenerator:
 
     def _is_routine_placeholder(self, value: int) -> bool:
         """Check if a 16-bit value is a routine placeholder."""
-        return 0xFD00 <= value <= self._max_placeholder_value and value in self._routine_placeholders
+        return 0xF000 <= value <= self._max_placeholder_value and value in self._routine_placeholders
 
     def _generate_nested_and_adjust(self, node, code: bytearray) -> bytes:
         """Generate code for a nested expression and adjust placeholder offsets.
@@ -758,9 +759,9 @@ class ImprovedCodeGenerator:
         # 2OP opcode 0x0F (GET), variable form
         code.append(0xCF)  # VAR 2OP opcode 0x0F (GET)
 
-        # Use large constant form for indices >= 0xFD to avoid collision with
-        # routine placeholder scanning (which looks for bytes >= 0xFD)
-        if table_idx > 255 or table_idx >= 0xFD:
+        # Use large constant form for indices >= 0xF0 to avoid collision with
+        # routine placeholder scanning (which looks for bytes >= 0xF0)
+        if table_idx > 255 or table_idx >= 0xF0:
             # Large index: need 2-byte operand
             # Operand types: 10 (var) 00 (large const) 11 11 = 0x8F
             code.append(0x8F)
@@ -791,9 +792,9 @@ class ImprovedCodeGenerator:
 
         table_idx = self.funny_globals_table[name]
         soft_globals_var = self.globals[self.funny_globals_table_global]
-        # Use large constant form for indices >= 0xFD to avoid collision with
-        # routine placeholder scanning (which looks for bytes >= 0xFD)
-        is_large_idx = table_idx > 255 or table_idx >= 0xFD
+        # Use large constant form for indices >= 0xF0 to avoid collision with
+        # routine placeholder scanning (which looks for bytes >= 0xF0)
+        is_large_idx = table_idx > 255 or table_idx >= 0xF0
 
         code = bytearray()
 
@@ -2056,16 +2057,16 @@ class ImprovedCodeGenerator:
         fixups = []
         table_data = self.get_table_data()
 
-        # Scan table data for placeholder markers (16-bit values in 0xFD00-0xFFFE range)
+        # Scan table data for placeholder markers (16-bit values in 0xF000-0xFFFE range)
         # Scan word-aligned (every 2 bytes) since placeholders are always full 16-bit values
-        # This prevents false matches from unaligned byte sequences like [00 FD 00 FE]
-        # where scanning at odd positions would see [FD 00] as 0xFD00
+        # This prevents false matches from unaligned byte sequences like [00 F0 00 FE]
+        # where scanning at odd positions would see [F0 00] as 0xF000
         i = 0
         while i < len(table_data) - 1:
             high_byte = table_data[i]
             low_byte = table_data[i + 1]
-            # Check if this could be a routine placeholder (0xFD-0xFF high byte)
-            if high_byte >= 0xFD:
+            # Check if this could be a routine placeholder (0xF0-0xFF high byte)
+            if high_byte >= 0xF0:
                 placeholder_val = (high_byte << 8) | low_byte
                 if placeholder_val in self._routine_placeholders:
                     routine_name = self._routine_placeholders[placeholder_val]
@@ -2501,7 +2502,7 @@ class ImprovedCodeGenerator:
                     for i in range(len(expr_code) - 1):
                         high_byte = expr_code[i]
                         low_byte = expr_code[i + 1]
-                        if high_byte >= 0xFD:
+                        if high_byte >= 0xF0:
                             placeholder_val = (high_byte << 8) | low_byte
                             if placeholder_val in self._routine_placeholders:
                                 # Offset is relative to routine_code start
@@ -2552,8 +2553,8 @@ class ImprovedCodeGenerator:
                     continue  # Already tracked directly
                 high_byte = stmt_code[i]
                 low_byte = stmt_code[i + 1]
-                # Check if this could be a routine placeholder (0xFD-0xFF high byte)
-                if high_byte >= 0xFD:
+                # Check if this could be a routine placeholder (0xF0-0xFF high byte)
+                if high_byte >= 0xF0:
                     # Skip if this follows 0x8D - that's PRINT_PADDR with string placeholder
                     if i > 0 and stmt_code[i - 1] == 0x8D:
                         continue
@@ -2569,10 +2570,10 @@ class ImprovedCodeGenerator:
                     if i > 0 and 0x90 <= stmt_code[i - 1] <= 0x9F:
                         continue
                     # Skip if this looks like the low byte of a funny global index
-                    # Pattern: [opcode] [type] [var] 00 [low>=FD] ...
+                    # Pattern: [opcode] [type] [var] 00 [low>=F0] ...
                     # Where opcode is GET (0xCF) or PUT (0xE1)
                     # And type byte has second operand as large constant (bits 5-4 = 00)
-                    # And high byte is 0x00 (index < 256 but low byte >= 0xFD)
+                    # And high byte is 0x00 (index < 256 but low byte >= 0xF0)
                     if i >= 4:
                         opcode = stmt_code[i - 4]
                         type_byte = stmt_code[i - 3]

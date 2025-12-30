@@ -395,16 +395,26 @@ class BitSynonymNode(ASTNode):
 class PrepSynonymNode(ASTNode):
     """PREP-SYNONYM preposition synonym declaration.
 
-    Makes one preposition a synonym of another, so both share the same prep number.
-    Syntax: <PREP-SYNONYM canonical-prep synonym-prep>
+    Makes one or more prepositions synonyms of a canonical preposition.
+    Syntax: <PREP-SYNONYM canonical-prep synonym-prep...>
+    Example: <PREP-SYNONYM TO TOWARD TOWARDS>
     """
-    def __init__(self, canonical: str, synonym: str, line: int = 0, column: int = 0):
+    def __init__(self, canonical: str, synonyms: list, line: int = 0, column: int = 0):
         super().__init__(NodeType.PREP_SYNONYM, line, column)
         self.canonical = canonical  # The canonical preposition
-        self.synonym = synonym  # The synonym preposition
+        # Support both single synonym (string) and multiple synonyms (list)
+        if isinstance(synonyms, str):
+            self.synonyms = [synonyms]
+        else:
+            self.synonyms = list(synonyms)
+
+    # Backwards compatibility property
+    @property
+    def synonym(self):
+        return self.synonyms[0] if self.synonyms else None
 
     def __repr__(self):
-        return f"PrepSynonym({self.canonical} -> {self.synonym})"
+        return f"PrepSynonym({self.canonical} -> {', '.join(self.synonyms)})"
 
 
 class RemoveSynonymNode(ASTNode):

@@ -1738,10 +1738,10 @@ class Parser:
     def parse_prep_synonym(self, line: int, col: int):
         """Parse PREP-SYNONYM preposition synonym declaration.
 
-        Syntax: <PREP-SYNONYM canonical-prep synonym-prep>
+        Syntax: <PREP-SYNONYM canonical-prep synonym-prep...>
 
-        Example: <PREP-SYNONYM THROUGH THRU>
-        This makes THRU a synonym of THROUGH, sharing the same prep number.
+        Example: <PREP-SYNONYM TO TOWARD TOWARDS>
+        This makes TOWARD and TOWARDS synonyms of TO, sharing the same prep number.
         """
         from .ast_nodes import PrepSynonymNode
 
@@ -1750,12 +1750,16 @@ class Parser:
         canonical = self.current_token.value
         self.advance()
 
-        if self.current_token.type != TokenType.ATOM:
-            self.error("Expected synonym preposition in PREP-SYNONYM")
-        synonym = self.current_token.value
-        self.advance()
+        # Parse one or more synonym prepositions
+        synonyms = []
+        while self.current_token.type == TokenType.ATOM:
+            synonyms.append(self.current_token.value)
+            self.advance()
 
-        return PrepSynonymNode(canonical, synonym, line, col)
+        if not synonyms:
+            self.error("Expected at least one synonym preposition in PREP-SYNONYM")
+
+        return PrepSynonymNode(canonical, synonyms, line, col)
 
     def parse_putprop(self, line: int, col: int):
         """Parse PUTPROP directive.

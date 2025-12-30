@@ -120,6 +120,98 @@ class TestObjectNumberingAndOrdering:
             ["LOCAL-GLOBALS", "FLOOR", "CEILING"]
         ))
 
+    def test_house_objects_rooms_and_lgs_first(self):
+        """Test object ordering with ROOMS-AND-LGS-FIRST."""
+        AssertGlobals(
+            "<ORDER-OBJECTS? ROOMS-AND-LGS-FIRST>",
+            "<OBJECT FRIDGE (IN KITCHEN)>",
+            "<OBJECT SINK (IN KITCHEN)>",
+            "<OBJECT MICROWAVE (IN KITCHEN)>",
+            "<ROOM KITCHEN (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<OBJECT FLOOR (IN LOCAL-GLOBALS)>",
+            "<ROOM BEDROOM (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<OBJECT BED (IN BEDROOM)>",
+            "<OBJECT ROOMS>",
+            "<OBJECT LOCAL-GLOBALS>",
+            "<OBJECT CEILING (IN LOCAL-GLOBALS)>"
+        ).implies(*tree_implications(
+            ["KITCHEN", "FLOOR", "CEILING", "BEDROOM", "FRIDGE", "SINK",
+             "MICROWAVE", "ROOMS", "LOCAL-GLOBALS", "BED"],
+            ["KITCHEN", "FRIDGE", "MICROWAVE", "SINK"],
+            ["BEDROOM", "BED"],
+            ["ROOMS", "KITCHEN", "BEDROOM"],
+            ["LOCAL-GLOBALS", "FLOOR", "CEILING"]
+        ))
+
+    def test_house_objects_rooms_last(self):
+        """Test object ordering with ROOMS-LAST."""
+        AssertGlobals(
+            "<ORDER-OBJECTS? ROOMS-LAST>",
+            "<OBJECT FRIDGE (IN KITCHEN)>",
+            "<OBJECT SINK (IN KITCHEN)>",
+            "<OBJECT MICROWAVE (IN KITCHEN)>",
+            "<ROOM KITCHEN (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<OBJECT FLOOR (IN LOCAL-GLOBALS)>",
+            "<ROOM BEDROOM (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<OBJECT BED (IN BEDROOM)>",
+            "<OBJECT ROOMS>",
+            "<OBJECT LOCAL-GLOBALS>",
+            "<OBJECT CEILING (IN LOCAL-GLOBALS)>"
+        ).implies(*tree_implications(
+            ["FRIDGE", "SINK", "MICROWAVE", "ROOMS", "FLOOR", "CEILING",
+             "LOCAL-GLOBALS", "BED", "KITCHEN", "BEDROOM"],
+            ["KITCHEN", "FRIDGE", "MICROWAVE", "SINK"],
+            ["BEDROOM", "BED"],
+            ["ROOMS", "KITCHEN", "BEDROOM"],
+            ["LOCAL-GLOBALS", "FLOOR", "CEILING"]
+        ))
+
+    def test_house_objects_defined(self):
+        """Test object ordering with DEFINED (definition order)."""
+        AssertGlobals(
+            "<ORDER-OBJECTS? DEFINED>",
+            "<OBJECT FRIDGE (IN KITCHEN)>",
+            "<OBJECT SINK (IN KITCHEN)>",
+            "<OBJECT MICROWAVE (IN KITCHEN)>",
+            "<ROOM KITCHEN (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<OBJECT FLOOR (IN LOCAL-GLOBALS)>",
+            "<ROOM BEDROOM (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<OBJECT BED (IN BEDROOM)>",
+            "<OBJECT ROOMS>",
+            "<OBJECT LOCAL-GLOBALS>",
+            "<OBJECT CEILING (IN LOCAL-GLOBALS)>"
+        ).implies(*tree_implications(
+            ["FRIDGE", "SINK", "MICROWAVE", "KITCHEN", "FLOOR", "BEDROOM",
+             "BED", "ROOMS", "LOCAL-GLOBALS", "CEILING"],
+            ["KITCHEN", "FRIDGE", "MICROWAVE", "SINK"],
+            ["BEDROOM", "BED"],
+            ["ROOMS", "KITCHEN", "BEDROOM"],
+            ["LOCAL-GLOBALS", "FLOOR", "CEILING"]
+        ))
+
+    def test_house_tree_reverse_defined(self):
+        """Test tree ordering with REVERSE-DEFINED for house example."""
+        AssertGlobals(
+            "<ORDER-TREE? REVERSE-DEFINED>",
+            "<OBJECT FRIDGE (IN KITCHEN)>",
+            "<OBJECT SINK (IN KITCHEN)>",
+            "<OBJECT MICROWAVE (IN KITCHEN)>",
+            "<ROOM KITCHEN (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<ROOM BEDROOM (IN ROOMS) (GLOBAL FLOOR CEILING)>",
+            "<OBJECT BED (IN BEDROOM)>",
+            "<OBJECT ROOMS>",
+            "<OBJECT LOCAL-GLOBALS>",
+            "<OBJECT FLOOR (IN LOCAL-GLOBALS)>",
+            "<OBJECT CEILING (IN LOCAL-GLOBALS)>"
+        ).implies(*tree_implications(
+            ["LOCAL-GLOBALS", "BED", "BEDROOM", "CEILING", "FLOOR", "ROOMS",
+             "MICROWAVE", "SINK", "KITCHEN", "FRIDGE"],
+            ["KITCHEN", "MICROWAVE", "SINK", "FRIDGE"],
+            ["BEDROOM", "BED"],
+            ["ROOMS", "BEDROOM", "KITCHEN"],
+            ["LOCAL-GLOBALS", "CEILING", "FLOOR"]
+        ))
+
     def test_contents_tree_reverse_defined(self):
         """Test tree ordering with REVERSE-DEFINED."""
         AssertGlobals(
