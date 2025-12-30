@@ -11,13 +11,16 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-30)
-- **Tests:** 648 passed, 0 failed, 29 xfailed
+- **Tests:** 650 passed, 0 failed, 27 xfailed
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - **Zork1 compiles** to 103KB (runtime issues remain - likely parser-related)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-30)
+- **GVAL/LVAL quirk handling** - Using ,X with local or .X with global now works:
+  - Falls back to correct scope with warning (ZIL0205/ZIL0204)
+  - 2 more tests pass (648 -> 650)
 - **Added 6 PROPDEF/PROPSPEC tests** from ZILF (all xfailed):
   - PROPDEF for implicit directions, DIRECTIONS property suppression
   - VOC in PROPDEF, PROPSPEC with vocab/routines, ROOM type optimization
