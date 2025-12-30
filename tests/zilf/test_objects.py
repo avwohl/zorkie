@@ -389,6 +389,90 @@ class TestPropdef:
             "<OBJECT WOODS (NORTH TO HOUSE)>"
         ).does_not_compile()
 
+    @pytest.mark.xfail(reason="PROPDEF for implicit directions not implemented")
+    def test_propdef_for_directions_can_be_used_for_implicit_directions(self):
+        """Test that PROPDEF for DIRECTIONS can be used for implicit directions."""
+        AssertGlobals(
+            "<PROPDEF DIRECTIONS <> "
+            " (DIR GOES TO R:ROOM = (MY-UEXIT 3) <WORD 0> (MY-REXIT <ROOM .R>))>",
+            "<DIRECTIONS NORTH SOUTH>",
+            "<OBJECT HOUSE (EAST GOES TO WOODS)>",
+            "<OBJECT WOODS (WEST GOES TO HOUSE)>"
+        ).implies(
+            "<=? <PTSIZE <GETPT ,HOUSE ,P?EAST>> ,MY-UEXIT>",
+            "<=? <GETB <GETPT ,HOUSE ,P?EAST> ,MY-REXIT> ,WOODS>",
+            "<BAND <GETB ,W?EAST 4> ,PS?DIRECTION>"
+        )
+
+    @pytest.mark.xfail(reason="PROPDEF DIRECTIONS property name suppression not implemented")
+    def test_propdef_for_directions_should_not_create_directions_property(self):
+        """Test that PROPDEF for DIRECTIONS doesn't create a DIRECTIONS property."""
+        # When using PROPDEF for DIRECTIONS, P?DIRECTIONS should not exist
+        AssertGlobals(
+            "<FILE-FLAGS KEEP-ROUTINES?>",
+            "<PROPDEF DIRECTIONS <> "
+            " (DIR GOES TO R:ROOM = (MY-UEXIT 3) <WORD 0> (MY-REXIT <ROOM .R>))>",
+            "<DIRECTIONS NORTH SOUTH>",
+            "<OBJECT HOUSE (SOUTH GOES TO WOODS)>",
+            "<OBJECT WOODS (NORTH GOES TO HOUSE)>",
+            "<ROUTINE FOO () ,P?DIRECTIONS>"
+        ).does_not_compile()
+
+        AssertGlobals(
+            "<PROPDEF DIRECTIONS <> "
+            " (DIR GOES TO R:ROOM = (MY-UEXIT 3) <WORD 0> (MY-REXIT <ROOM .R>))>",
+            "<DIRECTIONS NORTH SOUTH>",
+            "<OBJECT HOUSE (SOUTH GOES TO WOODS)>",
+            "<OBJECT WOODS (NORTH GOES TO HOUSE)>"
+        ).generates_code_not_matching(r"P\?DIRECTIONS")
+
+    @pytest.mark.xfail(reason="VOC in PROPDEF not implemented")
+    def test_vocab_created_by_propdef_should_work_correctly(self):
+        """Test that vocab created by PROPDEF works correctly."""
+        AssertGlobals(
+            "<PROPDEF FOO <> (FOO A:ATOM = <VOC .A PREP>)>",
+            "<OBJECT BAR (FOO FOO)>"
+        ).implies(
+            "<=? <GETP ,BAR ,P?FOO> ,W?FOO>"
+        )
+
+    @pytest.mark.xfail(reason="PROPSPEC not implemented")
+    def test_vocab_created_by_propspec_should_work_correctly(self):
+        """Test that vocab created by PROPSPEC works correctly."""
+        AssertGlobals(
+            "<PUTPROP FOO PROPSPEC FOO-PROP>",
+            '<DEFINE FOO-PROP (L) (<> <EVAL <CHTYPE (TABLE <VOC "FOO" PREP>) FORM>>)>',
+            "<OBJECT BAR (FOO FOO)>"
+        ).implies(
+            "<=? <GET <GETP ,BAR ,P?FOO> 0> ,W?FOO>"
+        )
+
+    @pytest.mark.xfail(reason="Routine creation via PROPSPEC not implemented")
+    def test_routines_created_by_propspec_should_work_correctly(self):
+        """Test that routines created by PROPSPEC work correctly."""
+        AssertGlobals(
+            "<FILE-FLAGS KEEP-ROUTINES?>",
+            "<PUTPROP FOO PROPSPEC FOO-PROP>",
+            "<DEFINE FOO-PROP (L) <ROUTINE PROP-ROUTINE () 123> (<> PROP-ROUTINE)>",
+            "<OBJECT BAR (FOO FOO)>"
+        ).implies(
+            "<=? <APPLY <GETP ,BAR ,P?FOO>> 123>"
+        )
+
+    @pytest.mark.xfail(reason="ROOM type in PROPDEF not optimized for ROOMS-FIRST")
+    def test_room_in_propdef_one_byte_when_rooms_first(self):
+        """Test that ROOM in PROPDEF is one byte when ORDER-OBJECTS? is ROOMS-FIRST."""
+        AssertGlobals(
+            "<ORDER-OBJECTS? ROOMS-FIRST>",
+            "<DIRECTIONS NORTH>",
+            "<PROPDEF DIRECTIONS <> (DIR TO R:ROOM = (UEXIT 1) (REXIT <ROOM .R>))>",
+            "<OBJECT FOO (NORTH TO BAR)>",
+            "<OBJECT BAR>"
+        ).in_v5() \
+            .implies(
+                "<=? <PTSIZE <GETPT ,FOO ,P?NORTH>> 1>"
+            )
+
 
 class TestObjectProperties:
     """Tests for object property constraints."""
