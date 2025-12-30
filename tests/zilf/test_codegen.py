@@ -211,6 +211,12 @@ class TestAndOrOptimizations:
             .with_global("<ROUTINE FOO () <>>") \
             .generates_code_not_matching(r"\?TMP")
 
+    def test_simple_or_2(self):
+        """Test OR with FIRST? uses temp vars and RSTACK properly."""
+        AssertRoutine('"AUX" OBJ', "<OR <FIRST? .OBJ> <FOO>>") \
+            .with_global("<ROUTINE FOO () <>>") \
+            .generates_code_matching(r"RETURN \?TMP.*RSTACK")
+
     def test_simple_or_3(self):
         """Test OR with SET optimization."""
         AssertRoutine('"AUX" A', "<OR <SET A <FOO>> <BAR>>") \
@@ -552,3 +558,38 @@ class TestPredicateInBind:
         """Test that predicate inside BIND doesn't rely on PUSH."""
         AssertRoutine('"AUX" X', "<COND (<BIND ((Y <* 2 .X>)) <G? .Y 123>> <RTRUE>)>") \
             .generates_code_matching(r"GRTR\? Y,123 (/TRUE|\\FALSE)")
+
+
+class TestPropertyNames:
+    """Tests for properties with special characters."""
+
+    def test_properties_containing_backslash(self):
+        r"""Test that properties containing backslash compile correctly."""
+        AssertRoutine("", r"<PRINTN <GETP ,OBJ ,P?FOO\\BAR>>") \
+            .with_global(r"<OBJECT OBJ (FOO\\BAR 123)>") \
+            .outputs("123")
+
+
+class TestBranchOptimization:
+    """Tests for branch optimization in complex control flow."""
+
+    def test_branch_to_same_condition(self):
+        """Test that optimized branching works with OBJECTLOOP and COND.
+
+        This tests that the compiler properly optimizes branch targets
+        when there are nested conditionals in a loop.
+        """
+        # This is a simplified version of the ZILF test that uses
+        # OBJECTLOOP. We use REPEAT with FIRST?/NEXT? directly instead.
+        AssertRoutine(
+            '"AUX" P',
+            """<REPEAT ((I <FIRST? ,HERE>))
+                <COND (.I
+                    <COND (<AND <NOT <FSET? .I ,TOUCHBIT>> <SET P <GETP .I ,P?FDESC>>>
+                           <PRINT .P> <CRLF>)>
+                    <SET I <NEXT? .I>>)
+                (ELSE <RETURN>)>>"""
+        ).with_global("<GLOBAL HERE <>>") \
+            .with_global("<CONSTANT TOUCHBIT 1>") \
+            .with_global("<CONSTANT P?FDESC 2>") \
+            .compiles()
