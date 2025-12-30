@@ -33,6 +33,7 @@ class NodeType(Enum):
     BUZZ = auto()          # <BUZZ word1 word2 ...>
     SYNONYM = auto()       # <SYNONYM word1 word2 ...> (standalone)
     BIT_SYNONYM = auto()   # <BIT-SYNONYM flag1 flag2> (flag alias)
+    PREP_SYNONYM = auto()  # <PREP-SYNONYM prep1 prep2> (preposition synonym)
     REMOVE_SYNONYM = auto() # <REMOVE-SYNONYM word> (remove from synonyms)
 
     # Table/Array
@@ -385,6 +386,21 @@ class BitSynonymNode(ASTNode):
         return f"BitSynonym({self.original} -> {self.alias})"
 
 
+class PrepSynonymNode(ASTNode):
+    """PREP-SYNONYM preposition synonym declaration.
+
+    Makes one preposition a synonym of another, so both share the same prep number.
+    Syntax: <PREP-SYNONYM canonical-prep synonym-prep>
+    """
+    def __init__(self, canonical: str, synonym: str, line: int = 0, column: int = 0):
+        super().__init__(NodeType.PREP_SYNONYM, line, column)
+        self.canonical = canonical  # The canonical preposition
+        self.synonym = synonym  # The synonym preposition
+
+    def __repr__(self):
+        return f"PrepSynonym({self.canonical} -> {self.synonym})"
+
+
 class RemoveSynonymNode(ASTNode):
     """REMOVE-SYNONYM declaration.
 
@@ -596,6 +612,7 @@ class Program:
     removed_synonyms: List[str] = field(default_factory=list)  # Words removed from synonyms
     directions: List[str] = field(default_factory=list)  # Direction names
     bit_synonyms: List['BitSynonymNode'] = field(default_factory=list)  # Flag aliases
+    prep_synonyms: List['PrepSynonymNode'] = field(default_factory=list)  # Preposition synonyms
     tell_tokens: Dict[str, 'TellTokenDef'] = field(default_factory=dict)  # Custom TELL tokens
     order_objects: Optional[str] = None  # ORDER-OBJECTS? setting (e.g., ROOMS-FIRST)
     order_tree: Optional[str] = None  # ORDER-TREE? setting (e.g., REVERSE-DEFINED)

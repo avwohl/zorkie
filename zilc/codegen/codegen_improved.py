@@ -1744,23 +1744,33 @@ class ImprovedCodeGenerator:
         # Generate PREPOSITIONS table if we have prepositions
         if 'prepositions' in self.action_table and self.action_table['prepositions']:
             prepositions = self.action_table['prepositions']
-            # Only include canonical prepositions in the table (not synonyms)
-            canonical_prepositions = self.action_table.get('canonical_prepositions', set(prepositions.keys()))
 
-            # Table format: [count, word1, prep1, word2, prep2, ...]
-            # count = number of word/prep pairs (only canonical, not synonyms)
+            # Check if COMPACT-VOCABULARY? is enabled
+            compact_vocabulary = False
+            if self.compiler and hasattr(self.compiler, 'compile_globals'):
+                compact_vocabulary = self.compiler.compile_globals.get('COMPACT-VOCABULARY?', False)
+
+            # Decide which entries to include
+            if compact_vocabulary:
+                # Compact mode: include ALL prepositions (including synonyms)
+                entries = prepositions
+            else:
+                # Non-compact mode: only include canonical prepositions (not synonyms)
+                canonical_prepositions = self.action_table.get('canonical_prepositions', set(prepositions.keys()))
+                entries = {w: n for w, n in prepositions.items() if w in canonical_prepositions}
+
+            # Table format depends on mode:
+            # Non-compact: [count, word1, prep1(2 bytes), word2, prep2(2 bytes), ...]
+            # Compact: [count, word1, prep1(1 byte), word2, prep2(1 byte), ...]
             table_data = bytearray()
 
-            # Filter to only canonical prepositions
-            canonical_entries = {w: n for w, n in prepositions.items() if w in canonical_prepositions}
-
             # Write count (number of entries)
-            count = len(canonical_entries)
+            count = len(entries)
             table_data.append((count >> 8) & 0xFF)
             table_data.append(count & 0xFF)
 
             # Write word/prep pairs - sorted by prep number for consistency
-            for word, prep_num in sorted(canonical_entries.items(), key=lambda x: x[1]):
+            for word, prep_num in sorted(entries.items(), key=lambda x: x[1]):
                 # Word address placeholder (0xFB00 | index)
                 placeholder_idx = self._next_vocab_placeholder_index
                 self._vocab_placeholders[placeholder_idx] = word.lower()
@@ -1770,9 +1780,12 @@ class ImprovedCodeGenerator:
                 table_data.append((placeholder_val >> 8) & 0xFF)
                 table_data.append(placeholder_val & 0xFF)
 
-                # Prep number
-                table_data.append((prep_num >> 8) & 0xFF)
-                table_data.append(prep_num & 0xFF)
+                # Prep number - 1 byte in compact mode, 2 bytes otherwise
+                if compact_vocabulary:
+                    table_data.append(prep_num & 0xFF)
+                else:
+                    table_data.append((prep_num >> 8) & 0xFF)
+                    table_data.append(prep_num & 0xFF)
 
             # Track table offset
             table_index = len(self.tables)

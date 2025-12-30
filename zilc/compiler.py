@@ -1834,11 +1834,21 @@ class ZILCompiler:
         # Build object list in same order as compile_string's object building:
         # 1. Combine objects and rooms
         # 2. Sort by source line number
-        # 3. Reverse for object numbering (last defined = lowest number)
-        # 4. Then sort by object number for property extraction
+        # 3. Handle ORDER-OBJECTS? directive if present
+        # 4. Reverse for object numbering (last defined = lowest number)
+        # 5. Then sort by object number for property extraction
         all_items = [(obj.name, obj, False, getattr(obj, 'line', 0)) for obj in program.objects]
         all_items.extend([(room.name, room, True, getattr(room, 'line', 0)) for room in program.rooms])
         all_items.sort(key=lambda x: x[3])
+
+        # Handle ORDER-OBJECTS? directive
+        order_objects_mode = getattr(program, 'order_objects', None)
+        if order_objects_mode == 'ROOMS-FIRST':
+            # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
+            # Since we number in reverse (last in list = lowest number), rooms go at END of list
+            rooms_list = [(n, o, r, l) for n, o, r, l in all_items if r]
+            objs_list = [(n, o, r, l) for n, o, r, l in all_items if not r]
+            all_items = objs_list + list(reversed(rooms_list))
 
         # Assign object numbers (reverse order: last defined = lowest number)
         total_objects = len(all_items)
@@ -1911,13 +1921,23 @@ class ZILCompiler:
         # ZILF numbers objects in reverse definition order (last defined = lowest number)
         # Combine objects and rooms, sort by source line, then reverse
         objects = {}
-        all_items = [(obj, getattr(obj, 'line', 0)) for obj in program.objects]
-        all_items.extend([(room, getattr(room, 'line', 0)) for room in program.rooms])
+        all_items = [(obj, False, getattr(obj, 'line', 0)) for obj in program.objects]
+        all_items.extend([(room, True, getattr(room, 'line', 0)) for room in program.rooms])
         # Sort by line number to get original definition order
-        all_items.sort(key=lambda x: x[1])
+        all_items.sort(key=lambda x: x[2])
+
+        # Handle ORDER-OBJECTS? directive
+        order_objects_mode = getattr(program, 'order_objects', None)
+        if order_objects_mode == 'ROOMS-FIRST':
+            # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
+            # Since we number in reverse (last in list = lowest number), rooms go at END of list
+            rooms_list = [(o, r, l) for o, r, l in all_items if r]
+            objs_list = [(o, r, l) for o, r, l in all_items if not r]
+            all_items = objs_list + list(reversed(rooms_list))
+
         # Assign numbers in reverse order (last defined = lowest number)
         total_objects = len(all_items)
-        for i, (item, _) in enumerate(all_items):
+        for i, (item, _, _) in enumerate(all_items):
             # Reverse: first defined (low line) gets high number, last defined gets low number
             objects[item.name] = total_objects - i
 
@@ -2054,6 +2074,11 @@ class ZILCompiler:
                 for word in group:
                     synonym_to_canonical[word.upper()] = canonical
 
+        # Also add PREP-SYNONYM mappings
+        # <PREP-SYNONYM THROUGH THRU> means THRU -> THROUGH
+        for prep_syn in program.prep_synonyms:
+            synonym_to_canonical[prep_syn.synonym.upper()] = prep_syn.canonical.upper()
+
         for syntax_def in program.syntax:
             if not syntax_def.pattern:
                 continue
@@ -2085,6 +2110,16 @@ class ZILCompiler:
                             prepositions[word_upper] = prep_num
                             canonical_prepositions.add(word_upper)
                             prep_num += 1
+
+        # Add PREP-SYNONYM synonyms that weren't encountered in SYNTAX patterns
+        # <PREP-SYNONYM THROUGH THRU> means THRU gets same prep number as THROUGH
+        for prep_syn in program.prep_synonyms:
+            canonical = prep_syn.canonical.upper()
+            synonym = prep_syn.synonym.upper()
+            if canonical in prepositions and synonym not in prepositions:
+                # Synonym gets same prep number as canonical
+                prepositions[synonym] = prepositions[canonical]
+                # Note: synonym is NOT added to canonical_prepositions
 
         # Add PR? constants to verb_constants
         # For synonyms, create PR? constants pointing to the canonical word's number

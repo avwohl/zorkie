@@ -116,6 +116,9 @@ class Parser:
         elif isinstance(node, BitSynonymNode):
             # Add bit synonym to program's bit_synonyms list
             program.bit_synonyms.append(node)
+        elif isinstance(node, PrepSynonymNode):
+            # Add prep synonym to program's prep_synonyms list
+            program.prep_synonyms.append(node)
         elif isinstance(node, RemoveSynonymNode):
             # Add to removed synonyms list
             program.removed_synonyms.append(node.word)
@@ -540,6 +543,12 @@ class Parser:
             elif op_name == "BIT-SYNONYM":
                 # BIT-SYNONYM flag alias declaration
                 node = self.parse_bit_synonym(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "PREP-SYNONYM":
+                # PREP-SYNONYM preposition synonym declaration
+                node = self.parse_prep_synonym(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 
@@ -1686,6 +1695,28 @@ class Parser:
         alias = flags[0] if len(flags) == 1 else flags
 
         return BitSynonymNode(original, alias, line, col)
+
+    def parse_prep_synonym(self, line: int, col: int):
+        """Parse PREP-SYNONYM preposition synonym declaration.
+
+        Syntax: <PREP-SYNONYM canonical-prep synonym-prep>
+
+        Example: <PREP-SYNONYM THROUGH THRU>
+        This makes THRU a synonym of THROUGH, sharing the same prep number.
+        """
+        from .ast_nodes import PrepSynonymNode
+
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected preposition name in PREP-SYNONYM")
+        canonical = self.current_token.value
+        self.advance()
+
+        if self.current_token.type != TokenType.ATOM:
+            self.error("Expected synonym preposition in PREP-SYNONYM")
+        synonym = self.current_token.value
+        self.advance()
+
+        return PrepSynonymNode(canonical, synonym, line, col)
 
     def parse_putprop(self, line: int, col: int):
         """Parse PUTPROP directive.

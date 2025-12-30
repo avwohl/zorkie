@@ -105,7 +105,6 @@ class TestPrepositions:
                 # THROUGH, UP, WITH entries (non-compact doesn't list synonyms)
             )
 
-    @pytest.mark.xfail(reason="COMPACT-VOCABULARY? not implemented")
     def test_prepositions_compact_should_use_3_byte_entries(self):
         """Test compact prepositions use 3-byte entries and list synonyms."""
         # Compact test format uses 3-byte entries (*203* record length)
