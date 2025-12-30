@@ -98,7 +98,6 @@ class TestFunnyGlobals:
             .in_v3() \
             .generates_code_matching(r"\.GVAR HERE=.*\.GVAR SCORE=.*\.GVAR MOVES=")
 
-    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_propdef_referenced_globals_always_hard_globals(self):
         """Test that PROPDEF-referenced globals are always hard globals."""
         num_globals = 500
@@ -112,7 +111,6 @@ class TestFunnyGlobals:
             .with_global("\n".join(globals_code)) \
             .generates_code_matching(r"\.GVAR MY-GLOBAL-400=")
 
-    @pytest.mark.xfail(reason="FUNNY-GLOBALS not implemented")
     def test_parameter_globals_always_hard_globals(self):
         """Test that parameter globals are always hard globals."""
         num_globals = 500

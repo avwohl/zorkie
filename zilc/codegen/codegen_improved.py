@@ -5700,6 +5700,9 @@ class ImprovedCodeGenerator:
                 return (0, self.objects[node.value])
             # Check if it's a global variable
             elif node.value in self.globals:
+                # ZIL0200: bare atom as global index - this passes the global's slot number
+                # This is usually a mistake (should use ,GLOBAL to get value)
+                self._warn(f"ZIL0200: bare atom '{node.value}' used as global index")
                 return (1, self.globals[node.value])
             # Check if it's a local variable
             elif node.value in self.locals:

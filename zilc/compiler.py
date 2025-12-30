@@ -2914,29 +2914,39 @@ class ZILCompiler:
         self._current_globals_set = global_names
 
         # Helper to validate property values are compile-time constants
-        def validate_property_value(value, obj_name, prop_name):
+        def validate_property_value(value, obj_name, prop_name, allow_globals=False):
             """Validate that a property value is a compile-time constant.
 
             Global variables are not allowed as property values since they
-            are not known at compile time.
+            are not known at compile time, UNLESS the property has a PROPDEF
+            with a :GLOBAL type capture (allow_globals=True).
             """
             from .parser.ast_nodes import AtomNode
             if isinstance(value, AtomNode):
                 atom_name = value.value
                 # Global variables are not valid property values
-                # (but objects and constants are fine)
+                # (but objects and constants are fine, and globals allowed if PROPDEF specifies :GLOBAL)
                 if atom_name in global_names and atom_name not in constant_names and atom_name not in object_names:
-                    raise ValueError(f"Property '{prop_name}' in object '{obj_name}' references global variable '{atom_name}' - only constants are allowed")
+                    if not allow_globals:
+                        raise ValueError(f"Property '{prop_name}' in object '{obj_name}' references global variable '{atom_name}' - only constants are allowed")
             elif isinstance(value, (list, tuple)):
                 # Check all elements in a list
                 for v in value:
-                    validate_property_value(v, obj_name, prop_name)
+                    validate_property_value(v, obj_name, prop_name, allow_globals)
 
         # Build PROPDEF pattern lookup by property name
         propdef_patterns = {}
+        # Track properties that have :GLOBAL type captures (these allow global refs in values)
+        propdef_with_global_type = set()
         for propdef in program.propdefs:
             if propdef.patterns:
                 propdef_patterns[propdef.name] = propdef.patterns
+                # Check if any pattern has a :GLOBAL type capture
+                for input_pattern, output_pattern in propdef.patterns:
+                    for elem_type, elem_val, elem_extra in input_pattern:
+                        if elem_type == 'CAPTURE' and elem_extra == 'GLOBAL':
+                            propdef_with_global_type.add(propdef.name)
+                            break
 
         # Helper to match property value against PROPDEF input pattern
         def match_propdef_pattern(prop_values, input_pattern):
@@ -3236,7 +3246,9 @@ class ZILCompiler:
             for key, value in obj_node.properties.items():
                 # Skip validation for known special properties
                 if key not in ['FLAGS', 'IN', 'LOC', 'SYNONYM', 'ADJECTIVE'] + list(program.directions):
-                    validate_property_value(value, obj_node.name, key)
+                    # Allow globals if PROPDEF for this property uses :GLOBAL type capture
+                    allow_globals = key in propdef_with_global_type
+                    validate_property_value(value, obj_node.name, key, allow_globals)
                 if key == 'SYNONYM' and 'SYNONYM' in prop_map:
                     # Store dictionary word offset placeholder for first synonym
                     prop_num = prop_map['SYNONYM']
