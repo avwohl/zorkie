@@ -11,19 +11,22 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-30)
-- **Tests:** 645 passed, 0 failed, 28 xfailed
+- **Tests:** 646 passed, 0 failed, 27 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-30)
+- **LOWCORE-TABLE builtin** - Iterate over header bytes calling a handler:
+  - `<LOWCORE-TABLE field length handler>` generates unrolled loop
+  - Handler can be opcode (like PRINTN) or routine
+  - Fixed test_macros_returning_constants_can_be_used_in_lowcore_table
 - **F?/FALSE? predicate** - Added opposite of T?/TRUE?:
   - `<F? value>` returns true if value is zero (false), false otherwise
   - Fixes test_constant_comparisons_folded test
 - **Undefined routine errors** - Changed from warning to error (ZIL0415):
   - `<THIS-IS-UNDEFINED>` now fails compilation instead of silently using null address
-  - Exposed LOWCORE-TABLE test needed to be xfailed
 - **PRINTD with nested expressions** - `<PRINTD <FIRST? obj>>` now works correctly:
   - gen_printobj now evaluates FormNode operands before printing
   - Fixes garbage output when using FIRST?/NEXT?/LOC as PRINTD argument
@@ -349,69 +352,60 @@ Focus areas for next session:
 
 ## Known Issues
 
-### Flow Control (~10 failing)
-- DO-FUNNY-RETURN feature
-- DO end clause misplacement detection
-- Macro-related COND tests
-- PROG with bindings inside GO routine detection
-
-### Objects (~27 failing)
-- Object ordering and numbering
-- FIRST?, NEXT?, IN? predicates
-- Object property access
-- PROPDEF handling
-
-### Tell (~24 failing)
-- TELL built-in token extensions
-- Various TELL formatting features
-- Unicode handling
-
-### Vocab (~18 failing)
-- New parser (NEW-PARSER?) features
-- Word flag tables
-- Synonym/preposition handling
-
-### Meta/Macros (~19 failing)
-- IFFLAG/COMPILATION-FLAG
-- SPLICE in void context
-- DEFINE-GLOBALS
-
-### Tables (~14 failing)
-- ~~#BYTE element handling in TABLE~~ FIXED
-- ITABLE multi-element initializers
-- Compile-time table manipulation (ZPUT, ZREST)
-
-### Variables (~6 failing)
-- Funny globals (globals beyond 240 limit)
-- DEFINE-GLOBALS
-- Unused locals warning (ZIL0210) - PARTIALLY FIXED (basic case works)
-
-### Syntax (~7 failing)
-- REMOVE-SYNTAX matching
-- Parser table generation
-
 ### Version Support
-- V7/V8 have interpreter compatibility issues (skipped in tests)
+- V7 has interpreter compatibility issues (xfailed in tests)
+- V8 fully working with bocfel interpreter
+
+### Remaining Work
+See "What's Left" section for categorized xfailed tests.
+All 646 passing tests cover basic ZILF functionality.
 
 ## What's Left
 
-### By Category (approximate)
-- objects: ~26 failing
-- tell: ~24 failing
-- vocab: ~18 failing
-- tables: ~13 failing
-- meta: ~11 failing
-- flow_control: ~8 failing
-- macros: ~8 failing
-- syntax: ~7 failing
-- variables: ~6 failing
+### XFailed Tests (27 remaining)
 
-### Priority Items
-1. ~~Add warning infrastructure for unused variable checks~~ DONE (ZIL0210 works)
-2. ~~Fix #BYTE element handling in tables~~ DONE
-3. Fix DO-FUNNY-RETURN feature
-4. ~~Add ZIL0211 warning for unused flags~~ DONE
-5. ~~Fix property value encoding (GETPT/PUTP/PTSIZE)~~ DONE
-6. ~~Add MDL0417 warning for too many optional args~~ DONE
-7. ~~Add call-site argument count validation~~ DONE
-8. ~~Fix CONSTANT FALSE call handling~~ DONE
+All remaining xfails are for advanced ZILF features not yet implemented:
+
+**Interpreter Limitations (4 tests)** - Cannot fix in compiler:
+- `test_two_spaces_after_period_*` (2) - dfrotz strips trailing spaces
+- `test_unicode_characters_*` (2) - dfrotz/Glulx unicode handling
+
+**CHRSET/LANGUAGE Encoding (5 tests)** - Custom character set support:
+- `test_chrset_should_affect_text_*` (2) - Custom CHRSET encoding
+- `test_language_should_affect_*` (3) - LANGUAGE directive for non-English
+
+**NEW-PARSER Features (4 tests)** - Extended vocabulary format:
+- `test_new_parser_p_should_affect_syntax_format`
+- `test_word_flag_table_should_list_words_and_flags`
+- `test_new_parser_p_synonyms_should_use_pointers`
+- Related vocabulary format tests
+
+**PROPDEF Advanced Features (6 tests)** - Complex property definitions:
+- `test_propdef_for_directions_can_be_used_for_implicit_directions`
+- `test_propdef_for_directions_should_not_create_directions_property`
+- `test_vocab_created_by_propdef_should_work_correctly`
+- `test_vocab_created_by_propspec_should_work_correctly`
+- `test_routines_created_by_propspec_should_work_correctly`
+- `test_room_in_propdef_one_byte_when_rooms_first`
+
+**Table Features (2 tests)**:
+- `test_table_pattern_affects_element_sizes` - TABLE PATTERN not implemented
+- `test_parser_tables_come_before_other_pure_tables` - PARSER-TABLE ordering
+
+**Meta/Hooks (3 tests)**:
+- `test_in_zilch_indicates_macro_expansion_context` - IN-ZILCH flag
+- `test_routine_rewriter_can_rewrite_routines` - ROUTINE-REWRITER
+- `test_pre_compile_hook_can_add_to_compilation_environment` - PRE-COMPILE
+
+**Error Handling (1 test)**:
+- `test_compilation_stops_after_100_errors` - Error limit (requires error accumulation refactor)
+
+**Reader Macros (1 test)**:
+- `test_make_prefix_macro_should_work` - MAKE-PREFIX-MACRO
+
+### Priority Items for Future Work
+1. Error accumulation in compiler (for error limit test)
+2. TABLE PATTERN feature (custom element sizes)
+3. NEW-PARSER vocabulary format
+4. PROPDEF implicit directions support
+5. CHRSET/LANGUAGE encoding support
