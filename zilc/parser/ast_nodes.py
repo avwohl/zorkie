@@ -63,6 +63,7 @@ class NodeType(Enum):
     TELL_TOKENS = auto()   # <TELL-TOKENS token1 pattern1 token2 pattern2 ...>
     ORDER_OBJECTS = auto() # <ORDER-OBJECTS? ROOMS-FIRST>
     ORDER_TREE = auto()    # <ORDER-TREE? REVERSE-DEFINED>
+    LONG_WORDS = auto()    # <LONG-WORDS?>
     DEFINE_GLOBALS = auto() # <DEFINE-GLOBALS table-name (name val) (name BYTE val) ...>
 
 
@@ -522,6 +523,20 @@ class OrderTreeNode(ASTNode):
         return f"OrderTree({self.ordering})"
 
 
+class LongWordsNode(ASTNode):
+    """LONG-WORDS? directive: <LONG-WORDS?>
+
+    Enables long word table generation. When enabled, words longer than the
+    dictionary limit (6 chars in V1-3, 9 chars in V4+) are tracked and a
+    LONG-WORD-TABLE is generated containing the full text of these words.
+    """
+    def __init__(self, line: int = 0, column: int = 0):
+        super().__init__(NodeType.LONG_WORDS, line, column)
+
+    def __repr__(self):
+        return "LongWords()"
+
+
 @dataclass
 class DefineGlobalEntry:
     """A single entry in a DEFINE-GLOBALS declaration."""
@@ -616,6 +631,7 @@ class Program:
     tell_tokens: Dict[str, 'TellTokenDef'] = field(default_factory=dict)  # Custom TELL tokens
     order_objects: Optional[str] = None  # ORDER-OBJECTS? setting (e.g., ROOMS-FIRST)
     order_tree: Optional[str] = None  # ORDER-TREE? setting (e.g., REVERSE-DEFINED)
+    long_words: bool = False  # LONG-WORDS? enabled
     define_globals: List['DefineGlobalsNode'] = field(default_factory=list)  # DEFINE-GLOBALS declarations
     compile_time_ops: List['FormNode'] = field(default_factory=list)  # Compile-time ops: ZPUT, PUTB, ZGET, ZREST
     cleared_propspecs: Set[str] = field(default_factory=set)  # PROPSPEC cleared for atoms (e.g., DIRECTIONS)

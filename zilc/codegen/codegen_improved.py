@@ -1801,6 +1801,74 @@ class ImprovedCodeGenerator:
             if 'PREPOSITIONS' in self.globals:
                 self.global_values['PREPOSITIONS'] = 0xFF00 | table_index
 
+    def generate_long_word_table(self, long_words: List[str]):
+        """Generate LONG-WORD-TABLE for words exceeding dictionary length limit.
+
+        The table format is: [count, word1_addr, word1_string, word2_addr, word2_string, ...]
+        Where:
+        - count: number of long words
+        - word_addr: vocabulary address of the truncated word (W?WORD)
+        - word_string: full text of the word (as an encoded string pointer)
+
+        Args:
+            long_words: List of words that exceed the dictionary length limit
+        """
+        if not long_words:
+            return
+
+        # Reserve LONG-WORD-TABLE global
+        if 'LONG-WORD-TABLE' not in self.globals:
+            self.globals['LONG-WORD-TABLE'] = self.next_global
+            self.next_global += 1
+
+        table_data = bytearray()
+
+        # Count (word entry)
+        count = len(long_words)
+        table_data.append((count >> 8) & 0xFF)
+        table_data.append(count & 0xFF)
+
+        # For each long word: word_addr + string
+        for word in sorted(long_words):
+            # Word address placeholder (0xFB00 | index)
+            placeholder_idx = self._next_vocab_placeholder_index
+            self._vocab_placeholders[placeholder_idx] = word.lower()
+            self._next_vocab_placeholder_index += 1
+            placeholder_val = 0xFB00 | placeholder_idx
+
+            table_data.append((placeholder_val >> 8) & 0xFF)
+            table_data.append(placeholder_val & 0xFF)
+
+            # String placeholder - use string operand placeholder (0xFC00 format)
+            # The full word text as a string (will be resolved to packed address)
+            # First, add the string to the string table
+            if self.string_table is not None:
+                self.string_table.add_string(word.lower())
+            str_placeholder_idx = self._next_string_operand_index
+            if str_placeholder_idx > self._max_string_operand_index:
+                raise ValueError(f"Too many string operands for LONG-WORD-TABLE")
+            self._string_operand_placeholders[str_placeholder_idx] = word.lower()
+            self._string_operand_to_placeholder[word.lower()] = str_placeholder_idx
+            self._next_string_operand_index += 1
+            # String placeholders are 0xFC00 | index (same as routine operands)
+            str_placeholder_val = 0xFC00 | str_placeholder_idx
+
+            table_data.append((str_placeholder_val >> 8) & 0xFF)
+            table_data.append(str_placeholder_val & 0xFF)
+
+        # Track table offset
+        table_index = len(self.tables)
+        self.table_offsets[table_index] = self._table_data_size
+        self._table_data_size += len(table_data)
+
+        # Store table
+        table_name = f'_LONG_WORD_TABLE_{self.table_counter}'
+        self.table_counter += 1
+        self.tables.append((table_name, bytes(table_data), True))
+
+        # Link LONG-WORD-TABLE global to the table
+        self.global_values['LONG-WORD-TABLE'] = 0xFF00 | table_index
+
     def get_routine_fixups(self) -> List[Tuple[int, int]]:
         """Get routine call fixups for the assembler to resolve.
 

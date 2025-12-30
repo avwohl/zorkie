@@ -132,6 +132,9 @@ class Parser:
         elif isinstance(node, OrderTreeNode):
             # Set tree ordering mode
             program.order_tree = node.ordering
+        elif isinstance(node, LongWordsNode):
+            # Enable long word table generation
+            program.long_words = True
         elif isinstance(node, DefineGlobalsNode):
             # Add DEFINE-GLOBALS declaration to program
             program.define_globals.append(node)
@@ -527,6 +530,12 @@ class Parser:
                     self.error("Expected ordering mode for ORDER-TREE?")
                 self.expect(TokenType.RANGLE)
                 return OrderTreeNode(ordering, line, col)
+
+            elif op_name == "LONG-WORDS?":
+                # <LONG-WORDS?>
+                # Enable long word table generation
+                self.expect(TokenType.RANGLE)
+                return LongWordsNode(line, col)
 
             elif op_name == "DEFINE-GLOBALS":
                 # <DEFINE-GLOBALS table-name (name val) (name BYTE val) ...>

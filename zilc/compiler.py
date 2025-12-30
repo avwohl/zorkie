@@ -2428,6 +2428,13 @@ class ZILCompiler:
         for dg in program.define_globals:
             self._process_define_globals(dg, codegen, program)
 
+        # Pre-register LONG-WORD-TABLE global if LONG-WORDS? is enabled
+        # This must happen before routine generation so code can reference the global
+        if program.long_words:
+            if 'LONG-WORD-TABLE' not in codegen.globals:
+                codegen.globals['LONG-WORD-TABLE'] = codegen.next_global
+                codegen.next_global += 1
+
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
 
@@ -2757,6 +2764,23 @@ class ZILCompiler:
         # Rebuild word offsets after adding VOC words
         dict_word_offsets = dictionary.get_word_offsets()
         self.log(f"  Dictionary contains {len(dictionary.words)} words (after VOC)")
+
+        # Collect long words if LONG-WORDS? is enabled
+        long_words_list = []
+        if program.long_words:
+            # Word length limit: 6 for V1-3, 9 for V4+
+            word_limit = 6 if self.version <= 3 else 9
+            for word in dictionary.words:
+                if len(word) > word_limit:
+                    long_words_list.append(word)
+            if long_words_list:
+                self.log(f"  {len(long_words_list)} long words (>{word_limit} chars)")
+                codegen.generate_long_word_table(long_words_list)
+                # Refresh table data and offsets after adding the long word table
+                table_data = codegen.get_table_data()
+                table_offsets = codegen.get_table_offsets()
+                # Rebuild globals_data to include LONG-WORD-TABLE value
+                globals_data = codegen.build_globals_data()
 
         # Build object table with proper properties
         self.log("Building object table...")
@@ -3476,6 +3500,8 @@ class ZILCompiler:
         self.log(f"  Registered {len(flag_bit_map)} flags, {len(obj_name_to_num)} objects")
 
         # Now build vocab_fixups after object table (PROPDEF may have added vocab placeholders)
+        # Also includes vocab placeholders from LONG-WORD-TABLE if enabled
+        vocab_placeholders = codegen.get_vocab_placeholders()  # Re-fetch to include all sources
         vocab_fixups = []  # List of (placeholder_idx, word_offset)
         missing_vocab_words = []
 

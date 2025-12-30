@@ -308,6 +308,44 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_string_placeholders_in_story(self, story: bytearray,
+                                               string_placeholders: dict,
+                                               string_table,
+                                               start_offset: int,
+                                               length: int) -> None:
+        """
+        Resolve string operand placeholders in a section of the story file.
+
+        Scans the specified range for 0xFC00 | index values and replaces them
+        with actual packed string addresses. Modifies story in place.
+
+        Args:
+            story: Story bytearray to modify in place
+            string_placeholders: Dict mapping placeholder index to string text
+            string_table: StringTable instance with resolved addresses
+            start_offset: Start offset in story to scan
+            length: Number of bytes to scan
+        """
+        if not string_placeholders or not string_table or length == 0:
+            return
+
+        # Scan for 0xFC00 | index patterns (16-bit values)
+        end_offset = min(start_offset + length, len(story) - 1)
+        i = start_offset
+        while i < end_offset:
+            # Check for 0xFC high byte
+            if story[i] == 0xFC:
+                placeholder_idx = story[i + 1]
+                if placeholder_idx in string_placeholders:
+                    text = string_placeholders[placeholder_idx]
+                    # Get packed address from string table
+                    packed_addr = string_table.get_packed_address(text, self.version)
+                    if packed_addr is not None:
+                        # Patch the 16-bit address
+                        story[i] = (packed_addr >> 8) & 0xFF
+                        story[i + 1] = packed_addr & 0xFF
+            i += 1
+
     def _resolve_vocab_placeholders(self, routines: bytes, vocab_fixups: list,
                                        dict_addr: int) -> bytes:
         """
@@ -761,6 +799,8 @@ class ZAssembler:
         # Add table data in dynamic memory (before static memory)
         # Tables need to be writable, so they go in dynamic memory
         table_base_addr = current_addr
+        table_data_start = 0  # Track position for later string placeholder resolution
+        table_data_len = 0
 
         if table_data:
             # Calculate dictionary address for resolving vocab placeholders in tables
@@ -779,6 +819,9 @@ class ZAssembler:
                     table_data, vocab_fixups, dict_addr_for_tables
                 )
 
+            # Track table data position for later string placeholder resolution
+            table_data_start = len(story)
+            table_data_len = len(table_data)
             story.extend(table_data)
             current_addr += len(table_data)
 
@@ -932,6 +975,13 @@ class ZAssembler:
             if string_placeholders:
                 routines = self._resolve_string_placeholders(
                     routines, string_placeholders, string_table
+                )
+
+            # Also resolve string placeholders in table data (for LONG-WORD-TABLE)
+            if string_placeholders and table_data_len > 0:
+                self._resolve_string_placeholders_in_story(
+                    story, string_placeholders, string_table,
+                    table_data_start, table_data_len
                 )
 
         # Resolve routine call fixups (patch call addresses)

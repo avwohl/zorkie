@@ -124,7 +124,6 @@ class TestPrepositions:
 class TestLongWords:
     """Tests for LONG-WORDS? feature."""
 
-    @pytest.mark.xfail(reason="LONG-WORDS? not implemented")
     def test_long_words_p_should_generate_long_word_table(self):
         """Test that LONG-WORDS? generates LONG-WORD-TABLE."""
         AssertGlobals(
