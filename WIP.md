@@ -11,13 +11,18 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-30)
-- **Tests:** 643 passed, 0 failed, 23 xfailed
+- **Tests:** 648 passed, 0 failed, 23 xfailed
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
-- **Zork1 compiles** to 103KB but has runtime issues (missing parser features)
+- **Zork1 compiles** to 103KB (runtime issues remain - likely parser-related)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-30)
+- **Property routine placeholder fixups** - Object properties referencing routines now work:
+  - Compiler detects routine names in `resolve_atom_value()`
+  - Creates 0xFA00 | idx placeholders in property data
+  - Assembler resolves to packed routine addresses after high_mem_base known
+  - Fixed 5 tests (643 -> 648 passing)
 - Added ZILF-derived tests for codegen, pruning, and quirks:
   - TestSimpleOR_2 (OR with FIRST? temp vars)
   - test_properties_containing_backslash
@@ -25,20 +30,15 @@ Focus areas for next session:
   - 5 routine pruning tests (all passing)
   - 2 GVAL/LVAL quirk tests (xfailed - need compiler work)
   - test_map_contents_with_next_and_end_empty
-- Test count improved from 630 to 643 passing tests
+- Test count improved from 630 to 648 passing tests
 - Test coverage vs ZILF now at 93-100% for most test files
 
 ## Zork1 Compilation Status
 - **Zork1 compiles** to a 103KB story file
-- **Runtime status**: Crashes/hangs due to unresolved routine placeholders
-- **Root cause**: Object properties with routine values (e.g., `(ACTION BOARD-F)`) create
-  routine placeholders (0xFD00+) that are stored in property data but never resolved.
-  The assembler only resolves placeholders in code and table data, not in object properties.
-- **Required fix**: Add property routine fixup mechanism to track and resolve routine
-  placeholders in object property data during assembly
-- **Affected features**: ACTION property on ~124 objects references routines
+- **Runtime status**: Still hangs (may need parser/SYNTAX features)
+- **Property routine fixups** (FIXED): ACTION properties now properly resolve routine addresses
 - **Remaining warnings**: ON-LAKE, IN-LAKE only (missing room definitions in source)
-- **Previous issues (FIXED)**: Illegal opcode, backward branch offsets, ACT? constants, PREPOSITIONS
+- **Previous issues (FIXED)**: Illegal opcode, backward branch offsets, ACT? constants, PREPOSITIONS, property routines
 
 ## Recent Changes (2025-12-27)
 - **Verb/action limit checking (MDL0426)** - Old parser now validates syntax definitions
