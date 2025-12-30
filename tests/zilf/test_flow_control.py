@@ -265,6 +265,14 @@ class TestMapContents:
             .with_global("<OBJECT BANANA (IN TABLE) (PRICE 3)>") \
             .gives_number("6")
 
+    def test_map_contents_with_next_and_end_empty(self):
+        """Test MAP-CONTENTS with NEXT and END clause on empty container."""
+        AssertRoutine(
+            '"AUX" (SUM 0)',
+            "<MAP-CONTENTS (F N ,TABLE) (END <RETURN 42>) <RFALSE>>"
+        ).with_global('<OBJECT TABLE (DESC "table")>') \
+            .gives_number("42")
+
     def test_unused_map_contents_variables_should_not_warn(self):
         """Test that unused MAP-CONTENTS variables don't warn."""
         AssertRoutine('"AUX" CNT', "<MAP-CONTENTS (I ,STARTROOM) <SET CNT <+ .CNT 1>>>") \
