@@ -2019,24 +2019,13 @@ class ZILCompiler:
                     action_num_to_preaction[action_num] = None
                     action_num += 1
 
+            # Get or create action number for this routine
             if action_routine and action_routine not in actions:
                 actions[action_routine] = action_num
                 action_num_to_routine[action_num] = action_routine
                 # Store first preaction for this action (may be None)
                 action_num_to_preaction[action_num] = preaction_routine
-
-                # Create V?VERB constant from verb pattern
-                if syntax_def.pattern:
-                    verb_word = syntax_def.pattern[0]
-                    if isinstance(verb_word, str):
-                        const_name = f'V?{verb_word.upper()}'
-                        if const_name not in verb_constants:
-                            verb_constants[const_name] = action_num
-                        # Also create ACT?VERB from the verb word
-                        # This allows code like <EQUAL? .ACT ,ACT?FLY> when FLY maps to V-WALK
-                        act_const_name = f'ACT?{verb_word.upper()}'
-                        if act_const_name not in verb_constants:
-                            verb_constants[act_const_name] = action_num
+                current_action_num = action_num
 
                 # Create ACT?ACTION and V?ACTION constants from action routine name
                 # E.g., V-WALK -> ACT?WALK and V?WALK, V-ALARM -> ACT?ALARM and V?ALARM
@@ -2051,6 +2040,23 @@ class ZILCompiler:
                         verb_constants[v_const_name] = action_num
 
                 action_num += 1
+            else:
+                current_action_num = actions.get(action_routine, 0)
+
+            # Always create V?VERB and ACT?VERB constants from verb pattern
+            # This ensures each verb word (FOO, BAR, BAZ) gets its own ACT?VERB constant
+            # even when they share the same action routine (V-DUMMY)
+            if action_routine and syntax_def.pattern:
+                verb_word = syntax_def.pattern[0]
+                if isinstance(verb_word, str):
+                    const_name = f'V?{verb_word.upper()}'
+                    if const_name not in verb_constants:
+                        verb_constants[const_name] = current_action_num
+                    # Also create ACT?VERB from the verb word
+                    # This allows code like <EQUAL? .ACT ,ACT?FLY> when FLY maps to V-WALK
+                    act_const_name = f'ACT?{verb_word.upper()}'
+                    if act_const_name not in verb_constants:
+                        verb_constants[act_const_name] = current_action_num
 
             if preaction_routine and preaction_routine not in preactions:
                 # Preactions share action numbers with their main action
