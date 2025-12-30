@@ -7956,7 +7956,30 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+        operand = operands[0]
+
+        # If operand is a nested expression, evaluate it first (result goes to stack)
+        if isinstance(operand, FormNode):
+            # Generate code for the expression (pushes result to stack)
+            expr_code = self.generate_form(operand)
+            code.extend(expr_code)
+            # Now print from stack (variable 0)
+            op_type = 1  # Variable
+            op_val = 0   # Stack
+        elif isinstance(operand, CondNode):
+            # Generate COND code (result goes to stack)
+            expr_code = self.generate_cond(operand)
+            code.extend(expr_code)
+            op_type = 1  # Variable
+            op_val = 0   # Stack
+        elif isinstance(operand, GlobalVarNode) and self.is_funny_global(operand.name):
+            # Funny global - generate GET from SOFT-GLOBALS table
+            read_code = self.gen_read_funny_global(operand.name)
+            code.extend(read_code)
+            op_type = 1  # Variable
+            op_val = 0   # Stack
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operand)
 
         # PRINT_OBJ (1OP opcode 0x0A)
         # 1OP short form: 0x80 = large const, 0x90 = small const, 0xA0 = variable
