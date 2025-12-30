@@ -3089,6 +3089,12 @@ class ZILCompiler:
         # Each entry is (word, property_offset) - to be resolved during assembly
         dict_word_fixups = []
 
+        # Track property routine fixups for object properties
+        # Maps placeholder_idx -> routine_name for assembly-time resolution
+        # Placeholders are 0xFA00 | idx values stored in property data
+        property_routine_map = {}  # placeholder_idx -> routine_name
+        next_routine_placeholder_idx = 0
+
         # Build sets for property value validation
         global_names = {g.name for g in program.globals}
         constant_names = {c.name for c in program.constants}
@@ -3405,9 +3411,11 @@ class ZILCompiler:
             1. Flag bit assignments (NONLANDBIT, TOUCHBIT, etc.)
             2. Object/room names
             3. Constants
+            4. Routine names (returns placeholder for later fixup)
 
-            Returns the numeric value or None if not found.
+            Returns the numeric value, a placeholder for routines, or None if not found.
             """
+            nonlocal next_routine_placeholder_idx
             # Check if it's a flag name
             if atom_name in flag_bit_map:
                 return flag_bit_map[atom_name]
@@ -3419,6 +3427,14 @@ class ZILCompiler:
                 val = codegen.constants[atom_name]
                 if isinstance(val, int):
                     return val
+            # Check if it's a routine name - create placeholder for later fixup
+            if atom_name in routine_names:
+                # Create a placeholder value: 0xFA00 | idx
+                # The assembler will replace this with the actual packed routine address
+                placeholder_idx = next_routine_placeholder_idx
+                next_routine_placeholder_idx += 1
+                property_routine_map[placeholder_idx] = atom_name
+                return 0xFA00 | placeholder_idx
             # Not found
             return None
 
@@ -3677,6 +3693,21 @@ class ZILCompiler:
 
         self.log(f"  Registered {len(flag_bit_map)} flags, {len(obj_name_to_num)} objects")
 
+        # Build property routine fixups from property_routine_map
+        # Maps placeholder_idx -> routine_byte_offset for assembler to patch
+        property_routine_fixups = []  # List of (placeholder_idx, routine_byte_offset)
+        for placeholder_idx, routine_name in property_routine_map.items():
+            if routine_name in codegen.routines:
+                routine_offset = codegen.routines[routine_name]
+                property_routine_fixups.append((placeholder_idx, routine_offset))
+            else:
+                # Missing routine - use offset 0 (will become 0x0000)
+                self.log(f"  WARNING: Property references missing routine '{routine_name}'")
+                property_routine_fixups.append((placeholder_idx, 0))
+
+        if property_routine_fixups:
+            self.log(f"  {len(property_routine_fixups)} property routine fixups")
+
         # Now build vocab_fixups after object table (PROPDEF may have added vocab placeholders)
         # Merge in any new placeholders from codegen (e.g., from LONG-WORD-TABLE)
         # Keep existing PROPDEF placeholders and add new ones from codegen
@@ -3815,6 +3846,7 @@ class ZILCompiler:
             tables_with_placeholders=tables_with_placeholders,
             routine_fixups=routine_fixups,
             table_routine_fixups=table_routine_fixups,
+            property_routine_fixups=property_routine_fixups,
             extension_table=extension_table,
             string_placeholders=string_placeholders,
             tell_string_placeholders=tell_string_placeholders,

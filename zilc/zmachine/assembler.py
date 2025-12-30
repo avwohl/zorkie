@@ -586,6 +586,113 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_property_routine_placeholders(self, objects_data: bytes,
+                                                property_routine_fixups: list,
+                                                high_mem_base: int,
+                                                prop_defaults_size: int) -> bytes:
+        """
+        Resolve routine address placeholders in object property tables.
+
+        Scans property DATA for values marked with 0xFA00 prefix and replaces
+        them with packed routine addresses.
+
+        Args:
+            objects_data: Object table data with property tables
+            property_routine_fixups: List of (placeholder_idx, routine_byte_offset) tuples
+            high_mem_base: Base address of high memory where routines start
+            prop_defaults_size: Size of property defaults table in bytes
+
+        Returns:
+            Modified object data with routine addresses resolved
+        """
+        if not property_routine_fixups:
+            return objects_data
+
+        result = bytearray(objects_data)
+
+        # Build lookup: placeholder_idx -> packed_routine_address
+        fixup_map = {}
+        for placeholder_idx, routine_offset in property_routine_fixups:
+            # Calculate actual byte address of routine
+            actual_addr = high_mem_base + routine_offset
+
+            # Convert to packed address based on version
+            if self.version <= 3:
+                packed_addr = actual_addr // 2
+            elif self.version <= 5:
+                packed_addr = actual_addr // 4
+            elif self.version <= 7:
+                # V6-7 use routines_offset (assume 0 for now)
+                packed_addr = actual_addr // 4
+            else:
+                packed_addr = actual_addr // 8
+
+            fixup_map[placeholder_idx] = packed_addr
+
+        # Property tables start after property defaults and object entries
+        if self.version <= 3:
+            obj_entry_size = 9
+        else:
+            obj_entry_size = 14
+
+        if len(result) <= prop_defaults_size + obj_entry_size:
+            return bytes(result)
+
+        # Get first property table address
+        prop_addr_offset = prop_defaults_size + obj_entry_size - 2
+        first_prop_offset = struct.unpack('>H', result[prop_addr_offset:prop_addr_offset+2])[0]
+
+        # Scan property tables for 0xFA placeholders
+        i = first_prop_offset
+        while i < len(result) - 1:
+            if i >= len(result):
+                break
+
+            # Check for property header (size/number byte)
+            size_num = result[i]
+            if size_num == 0x00:
+                # End of properties for this object, move to next
+                i += 1
+                continue
+
+            # Parse property header based on version
+            if self.version <= 3:
+                prop_size = ((size_num >> 5) & 0x07) + 1
+                prop_start = i + 1
+                prop_end = prop_start + prop_size
+            else:
+                if size_num & 0x80:
+                    # Two-byte header
+                    if i + 1 >= len(result):
+                        break
+                    size_byte = result[i + 1]
+                    prop_size = size_byte & 0x3F
+                    if prop_size == 0:
+                        prop_size = 64
+                    prop_start = i + 2
+                else:
+                    # One-byte header
+                    prop_size = ((size_num >> 6) & 0x01) + 1
+                    prop_start = i + 1
+                prop_end = prop_start + prop_size
+
+            # Scan property data for 0xFA placeholders (word-aligned)
+            j = prop_start
+            while j < prop_end - 1 and j < len(result) - 1:
+                if result[j] == 0xFA:
+                    placeholder_idx = result[j + 1]
+                    if placeholder_idx in fixup_map:
+                        packed_addr = fixup_map[placeholder_idx]
+                        result[j] = (packed_addr >> 8) & 0xFF
+                        result[j + 1] = packed_addr & 0xFF
+                        j += 2  # Skip the word we just patched
+                        continue
+                j += 1
+
+            i = prop_end
+
+        return bytes(result)
+
     def build_story_file(self, routines: bytes, objects: bytes = b'',
                         dictionary: bytes = b'', globals_data: bytes = b'',
                         abbreviations_table=None, string_table=None,
@@ -594,6 +701,7 @@ class ZAssembler:
                         tables_with_placeholders: list = None,
                         routine_fixups: list = None,
                         table_routine_fixups: list = None,
+                        property_routine_fixups: list = None,
                         extension_table: bytes = b'',
                         string_placeholders: dict = None,
                         tell_string_placeholders: dict = None,
@@ -615,6 +723,7 @@ class ZAssembler:
             tables_with_placeholders: List of (start, end) byte ranges containing table address placeholders
             routine_fixups: List of (code_offset, routine_offset) for call address patching
             table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
+            property_routine_fixups: List of (placeholder_idx, routine_offset) for object property routine addresses
             extension_table: Header extension table bytes (V5+)
             string_placeholders: Dict mapping placeholder index to string text for operand resolution (0xFC format)
             tell_string_placeholders: Dict mapping placeholder index to string text for TELL resolution (0x8D format)
@@ -941,6 +1050,42 @@ class ZAssembler:
                 if story_offset + 1 < len(story):
                     story[story_offset] = (packed_addr >> 8) & 0xFF
                     story[story_offset + 1] = packed_addr & 0xFF
+
+        # Resolve property routine placeholders in object data
+        # Now that we know high_mem_base, we can patch 0xFA00 | idx values
+        # with actual packed routine addresses
+        if property_routine_fixups and objects:
+            # Build lookup: placeholder_idx -> packed_routine_address
+            fixup_map = {}
+            for placeholder_idx, routine_offset in property_routine_fixups:
+                # Calculate actual byte address of routine
+                actual_addr = self.high_mem_base + routine_offset
+
+                # Convert to packed address based on version
+                if self.version <= 3:
+                    packed_addr = actual_addr // 2
+                elif self.version <= 5:
+                    packed_addr = actual_addr // 4
+                elif self.version <= 7:
+                    # V6-7 use routines_offset, with 4-byte padding before first routine
+                    packed_addr = (4 + routine_offset) // 4
+                else:
+                    packed_addr = actual_addr // 8
+
+                fixup_map[placeholder_idx] = packed_addr
+
+            # Scan object data section in story for 0xFA placeholders
+            obj_len = len(objects)
+            obj_end = objects_addr + obj_len
+            i = objects_addr
+            while i < obj_end - 1:
+                if story[i] == 0xFA:
+                    placeholder_idx = story[i + 1]
+                    if placeholder_idx in fixup_map:
+                        packed_addr = fixup_map[placeholder_idx]
+                        story[i] = (packed_addr >> 8) & 0xFF
+                        story[i + 1] = packed_addr & 0xFF
+                i += 1
 
         # If string table is present, add string table after routines and resolve markers
         if string_table is not None:
