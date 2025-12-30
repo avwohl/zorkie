@@ -2631,12 +2631,15 @@ class ZILCompiler:
         if table_routine_fixups:
             self.log(f"  {len(table_routine_fixups)} table routine fixups")
 
-        # Report missing routines
+        # Report missing routines as errors
         missing_routines = codegen.get_missing_routines()
         if missing_routines:
-            self.log(f"  WARNING: {len(missing_routines)} missing routines (will use null address):")
             for routine_name in sorted(missing_routines):
-                self.log(f"    - {routine_name}")
+                self.log(f"  ERROR: undefined routine '{routine_name}'")
+            raise SyntaxError(
+                f"ZIL0415: {len(missing_routines)} undefined routine(s): " +
+                ", ".join(sorted(missing_routines))
+            )
 
         # Report codegen warnings and add to compiler warnings
         codegen_warnings = codegen.get_warnings()

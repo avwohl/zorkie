@@ -1,5 +1,14 @@
 # Instructions for Claude Code
 
+## Work Focus
+
+**IMPORTANT:** Only work on tests pointed to by `todo.txt`. This means:
+- Focus on ZILF integration tests (`tests/zilf/`)
+- Focus on ZILF interpreter tests
+- Do NOT debug Infocom games (Zork1, Zork2, Zork3, Enchanter, etc.)
+- Do NOT investigate game runtime hangs or gameplay issues
+- If a test needs a game to compile, that's fine, but don't go down rabbit holes debugging game behavior
+
 ## Tone and Reporting Style
 
 ### DO NOT:

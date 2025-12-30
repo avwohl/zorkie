@@ -3090,6 +3090,8 @@ class ImprovedCodeGenerator:
             return self.gen_not_predicate(form.operands)
         elif op_name == 'TRUE?' or op_name == 'T?':
             return self.gen_true_predicate(form.operands)
+        elif op_name == 'FALSE?' or op_name == 'F?':
+            return self.gen_false_predicate(form.operands)
         elif op_name == 'IGRTR?':
             return self.gen_igrtr(form.operands)
         elif op_name == 'DLESS?':
@@ -14117,6 +14119,61 @@ class ImprovedCodeGenerator:
             # Branch encoding: 0xC0 = branch on true, offset 0 = RFALSE
             # If value is zero, branch to return false; else fall through to return true
             code.append(0xC0)  # Branch on true (if zero), return false
+            code.append(0xB0)  # RTRUE - fall through
+
+        return bytes(code)
+
+    def gen_false_predicate(self, operands: List[ASTNode]) -> bytes:
+        """Generate FALSE? / F? (test if value is zero/false).
+
+        <FALSE? value> or <F? value> tests if a value is zero (false).
+        This is the same as ZERO?/NOT?
+
+        Args:
+            operands[0]: Value to test
+
+        Returns:
+            bytes: Z-machine code (JZ instruction)
+        """
+        if not operands:
+            return b''
+
+        code = bytearray()
+
+        # Handle FormNode by generating inner expression first
+        if isinstance(operands[0], FormNode):
+            inner_code = self.generate_form(operands[0])
+            code.extend(inner_code)
+            # Result is on stack, use JZ on variable 0
+            code.append(0xA0)  # 1OP:JZ with variable
+            code.append(0x00)  # Variable 0 = stack
+            # JZ condition = "value == 0"
+            # For FALSE?, we want: return true if zero, false if non-zero
+            # So: if value IS zero (JZ condition true), fall through to RTRUE
+            #     if value is non-zero (JZ condition false), branch to RFALSE
+            code.append(0x40)  # Branch on false (if non-zero), return false
+            code.append(0xB0)  # RTRUE - fall through means value was zero
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
+
+            # JZ is 1OP opcode 0x00 (branch instruction)
+            # JZ condition = "value == 0"
+            # For FALSE?, we want: return true if zero, false if non-zero
+            if op_type == 0:  # Constant
+                val = op_val & 0xFFFF
+                if -128 <= val <= 255:
+                    code.append(0x90)  # 1OP:JZ with small constant
+                    code.append(val & 0xFF)
+                else:
+                    code.append(0x80)  # 1OP:JZ with large constant
+                    code.append((val >> 8) & 0xFF)
+                    code.append(val & 0xFF)
+            else:  # Variable
+                code.append(0xA0)  # 1OP:JZ with variable
+                code.append(op_val & 0xFF)
+            # Branch encoding: 0x40 = branch on false (if non-zero), offset 0 = RFALSE
+            # If value is non-zero, branch to return false; else fall through to return true
+            code.append(0x40)  # Branch on false (if non-zero), return false
             code.append(0xB0)  # RTRUE - fall through
 
         return bytes(code)
