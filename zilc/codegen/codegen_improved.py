@@ -3528,6 +3528,16 @@ class ImprovedCodeGenerator:
         elif op_name == 'ZREST':
             return self.gen_rest(form.operands)
 
+        # QUOTE form - returns its argument unevaluated
+        # In ZIL, 'EXPR becomes <QUOTE EXPR>
+        # As a statement, QUOTE is a no-op (it just evaluates to its quoted content)
+        # The value extraction is handled by _get_operand_type_and_value
+        elif op_name == 'QUOTE':
+            # As a statement, QUOTE has no side effects - it's a no-op
+            # When used as a value (e.g., in <FSET? ,OBJ 'FLAG>), the quoted
+            # atom is extracted by _get_operand_type_and_value
+            return b''
+
         # DEFINE-GLOBALS accessor - check before routine calls
         elif op_name in self.define_globals_entries:
             return self.gen_define_globals_access(op_name, form.operands)
@@ -3608,6 +3618,25 @@ class ImprovedCodeGenerator:
         if isinstance(val, list) and len(val) == 1:
             return val[0]
         return val
+
+    def _is_quote_form(self, node: ASTNode) -> bool:
+        """Check if a node is a QUOTE form (<QUOTE ...> or 'EXPR)."""
+        return (isinstance(node, FormNode) and
+                isinstance(node.operator, AtomNode) and
+                node.operator.value.upper() == 'QUOTE')
+
+    def _unwrap_quote(self, node: ASTNode) -> ASTNode:
+        """Unwrap a QUOTE form to get the quoted content.
+
+        If the node is <QUOTE X>, return X.
+        Otherwise return the node unchanged.
+        """
+        if self._is_quote_form(node):
+            if node.operands:
+                return node.operands[0]
+            else:
+                return NumberNode(0)  # Empty QUOTE = 0
+        return node
 
     def _get_table_value_int(self, val) -> int:
         """Get integer value from a table element AST node.
@@ -5877,6 +5906,15 @@ class ImprovedCodeGenerator:
             self._warn(f"Unknown identifier '{node.value}' - using 0")
             return (0, 0)
         elif isinstance(node, FormNode):
+            # Check for QUOTE form - 'EXPR becomes <QUOTE EXPR>
+            # QUOTE is a compile-time construct that returns its argument unevaluated
+            # We need to unwrap it and process the quoted content
+            if isinstance(node.operator, AtomNode) and node.operator.value.upper() == 'QUOTE':
+                if node.operands:
+                    # Recursively process the quoted content
+                    return self._get_operand_type_and_value(node.operands[0])
+                else:
+                    return (0, 0)  # Empty QUOTE = 0
             # FormNode as operand - this typically means the calling code
             # should have evaluated it first. Return 0 (stack) since the
             # result should have been pushed to the stack.
@@ -14497,11 +14535,16 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
+        # Unwrap QUOTE forms - 'FLAG becomes <QUOTE FLAG> which should be unwrapped
+        op_obj = self._unwrap_quote(operands[0])
+        op_attr = self._unwrap_quote(operands[1])
+
         # Handle nested form operands - generate their code first
         # Since FSET uses operands twice (TEST_ATTR + SET_ATTR), we need to save
         # nested form results to temp variables
-        if isinstance(operands[0], FormNode):
-            inner_code = self.generate_form(operands[0])
+        # But skip QUOTE forms (already unwrapped above)
+        if isinstance(op_obj, FormNode) and not self._is_quote_form(operands[0]):
+            inner_code = self.generate_form(op_obj)
             code.extend(inner_code)
             # Save stack to temp global (0x10) using ADD sp, 0 -> temp
             code.append(0xD4)  # VAR form ADD
@@ -14512,10 +14555,10 @@ class ImprovedCodeGenerator:
             op1_type = 1  # Variable
             op1_val = 0x10  # Temp global
         else:
-            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+            op1_type, op1_val = self._get_operand_type_and_value(op_obj)
 
-        if isinstance(operands[1], FormNode):
-            inner_code = self.generate_form(operands[1])
+        if isinstance(op_attr, FormNode) and not self._is_quote_form(operands[1]):
+            inner_code = self.generate_form(op_attr)
             code.extend(inner_code)
             # Save stack to temp global (0x11) using ADD sp, 0 -> temp
             code.append(0xD4)  # VAR form ADD
@@ -14526,7 +14569,7 @@ class ImprovedCodeGenerator:
             op2_type = 1  # Variable
             op2_val = 0x11  # Temp global
         else:
-            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+            op2_type, op2_val = self._get_operand_type_and_value(op_attr)
 
         # First, test the attribute to get the previous value
         # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
@@ -14570,11 +14613,16 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
+        # Unwrap QUOTE forms - 'FLAG becomes <QUOTE FLAG> which should be unwrapped
+        op_obj = self._unwrap_quote(operands[0])
+        op_attr = self._unwrap_quote(operands[1])
+
         # Handle nested form operands - generate their code first
         # Since FCLEAR uses operands twice (TEST_ATTR + CLEAR_ATTR), we need to save
         # nested form results to temp variables
-        if isinstance(operands[0], FormNode):
-            inner_code = self.generate_form(operands[0])
+        # But skip QUOTE forms (already unwrapped above)
+        if isinstance(op_obj, FormNode) and not self._is_quote_form(operands[0]):
+            inner_code = self.generate_form(op_obj)
             code.extend(inner_code)
             # Save stack to temp global (0x10) using ADD sp, 0 -> temp
             code.append(0xD4)  # VAR form ADD
@@ -14585,10 +14633,10 @@ class ImprovedCodeGenerator:
             op1_type = 1  # Variable
             op1_val = 0x10  # Temp global
         else:
-            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+            op1_type, op1_val = self._get_operand_type_and_value(op_obj)
 
-        if isinstance(operands[1], FormNode):
-            inner_code = self.generate_form(operands[1])
+        if isinstance(op_attr, FormNode) and not self._is_quote_form(operands[1]):
+            inner_code = self.generate_form(op_attr)
             code.extend(inner_code)
             # Save stack to temp global (0x11) using ADD sp, 0 -> temp
             code.append(0xD4)  # VAR form ADD
@@ -14599,7 +14647,7 @@ class ImprovedCodeGenerator:
             op2_type = 1  # Variable
             op2_val = 0x11  # Temp global
         else:
-            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+            op2_type, op2_val = self._get_operand_type_and_value(op_attr)
 
         # First, test the attribute to get the previous value
         # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
@@ -14643,22 +14691,27 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
+        # Unwrap QUOTE forms - 'FLAG becomes <QUOTE FLAG> which should be unwrapped
+        op0 = self._unwrap_quote(operands[0])
+        op1 = self._unwrap_quote(operands[1])
+
         # Handle nested form operands - generate their code first
-        if isinstance(operands[0], FormNode):
-            inner_code = self.generate_form(operands[0])
+        # But skip QUOTE forms (already unwrapped above)
+        if isinstance(op0, FormNode) and not self._is_quote_form(operands[0]):
+            inner_code = self.generate_form(op0)
             code.extend(inner_code)
             op1_type = 1  # Variable
             op1_val = 0   # Stack
         else:
-            op1_type, op1_val = self._get_operand_type_and_value(operands[0])
+            op1_type, op1_val = self._get_operand_type_and_value(op0)
 
-        if isinstance(operands[1], FormNode):
-            inner_code = self.generate_form(operands[1])
+        if isinstance(op1, FormNode) and not self._is_quote_form(operands[1]):
+            inner_code = self.generate_form(op1)
             code.extend(inner_code)
             op2_type = 1  # Variable
             op2_val = 0   # Stack
         else:
-            op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+            op2_type, op2_val = self._get_operand_type_and_value(op1)
 
         # TEST_ATTR is 2OP opcode 0x0A (branch)
         opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
