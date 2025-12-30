@@ -42,6 +42,10 @@ class ZTextEncoder:
         self.crlf_character = crlf_character
         # Whether to preserve multiple spaces (default: collapse after periods)
         self.preserve_spaces = preserve_spaces
+        # Track Unicode characters used (for V5+ unicode table)
+        self.unicode_chars_used: set = set()
+        # Maximum Unicode table size (V5+)
+        self.max_unicode_table_size = 97
 
     def char_to_zchar(self, ch: str, current_alphabet: int = 0) -> Tuple[List[int], int]:
         """
@@ -180,9 +184,45 @@ class ZTextEncoder:
             if idx >= 6:
                 return ([5, idx], 0)
 
-        # Character not in any alphabet - use ZSCII escape
-        # Shift to A2 (z-char 5), then z-char 6 (escape), then two 5-bit values
+        # Character not in any alphabet - need ZSCII escape or Unicode
         zscii_code = ord(ch)
+
+        # Validate character is representable in this version
+        # ZSCII escape uses 10 bits, so max representable is 1023
+        if zscii_code > 1023:
+            # Character can't be encoded in Z-machine at all (too large for 10-bit escape)
+            if self.version <= 4:
+                # V1-V4: No Unicode support
+                raise ValueError(
+                    f"ZIL0414: Character U+{zscii_code:04X} ({repr(ch)}) cannot be "
+                    f"represented in V{self.version} Z-machine (only standard ZSCII supported)"
+                )
+            else:
+                # V5+: Can use Unicode extension table for extended characters
+                self.unicode_chars_used.add(zscii_code)
+                # Check if we've exceeded the Unicode table limit
+                if len(self.unicode_chars_used) > self.max_unicode_table_size:
+                    raise ValueError(
+                        f"ZIL0415: Too many unique Unicode characters ({len(self.unicode_chars_used)}) - "
+                        f"Z-machine Unicode table only supports {self.max_unicode_table_size} entries"
+                    )
+        elif zscii_code > 255 and self.version <= 4:
+            # Characters 256-1023 can be encoded with ZSCII escape but are non-standard
+            # In V1-V4, these are usually errors since there's no Unicode table
+            raise ValueError(
+                f"ZIL0414: Character U+{zscii_code:04X} ({repr(ch)}) cannot be "
+                f"represented in V{self.version} Z-machine (only standard ZSCII supported)"
+            )
+        elif zscii_code > 155 and self.version >= 5:
+            # V5+: Characters > 155 use the Unicode extension table
+            self.unicode_chars_used.add(zscii_code)
+            if len(self.unicode_chars_used) > self.max_unicode_table_size:
+                raise ValueError(
+                    f"ZIL0415: Too many unique Unicode characters ({len(self.unicode_chars_used)}) - "
+                    f"Z-machine Unicode table only supports {self.max_unicode_table_size} entries"
+                )
+
+        # Encode using ZSCII escape (10 bits)
         high = (zscii_code >> 5) & 0x1F
         low = zscii_code & 0x1F
         return ([5, 6, high, low], 0)

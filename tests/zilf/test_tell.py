@@ -331,7 +331,6 @@ class TestUnicode:
             .without_warnings() \
             .outputs("the em dash\u2014nature\u2019s most dramatic symbol")
 
-    @pytest.mark.xfail(reason="Unicode error detection not implemented")
     def test_unicode_characters_outside_standard_should_error_in_v3(self):
         """Test Unicode characters outside standard error in V3."""
         AssertRoutine("", '<TELL "bad\u2014news">') \
@@ -345,7 +344,6 @@ class TestUnicode:
             .without_warnings() \
             .generates_code_matching(r'\.UNICHR "U\+2014".*\.UNICHR "U\+263A"')
 
-    @pytest.mark.xfail(reason="Unicode table overflow detection not implemented")
     def test_unicode_table_should_report_overflow_when_full(self):
         """Test Unicode table reports overflow when full."""
         chars = "".join(chr(0x0100 + i) for i in range(98))
