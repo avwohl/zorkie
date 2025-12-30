@@ -3500,8 +3500,12 @@ class ZILCompiler:
         self.log(f"  Registered {len(flag_bit_map)} flags, {len(obj_name_to_num)} objects")
 
         # Now build vocab_fixups after object table (PROPDEF may have added vocab placeholders)
-        # Also includes vocab placeholders from LONG-WORD-TABLE if enabled
-        vocab_placeholders = codegen.get_vocab_placeholders()  # Re-fetch to include all sources
+        # Merge in any new placeholders from codegen (e.g., from LONG-WORD-TABLE)
+        # Keep existing PROPDEF placeholders and add new ones from codegen
+        codegen_vocab_placeholders = codegen.get_vocab_placeholders()
+        for idx, word in codegen_vocab_placeholders.items():
+            if idx not in vocab_placeholders:
+                vocab_placeholders[idx] = word
         vocab_fixups = []  # List of (placeholder_idx, word_offset)
         missing_vocab_words = []
 
