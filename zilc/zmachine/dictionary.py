@@ -43,6 +43,10 @@ class Dictionary:
         # Verb number is stored in dictionary byte 5 for parser lookups
         self.verb_numbers: Dict[str, int] = {}
 
+        # Track preposition numbers: prep_word -> preposition_number (1, 2, ...)
+        # Preposition number is stored in dictionary byte 5 for parser lookups
+        self.preposition_numbers: Dict[str, int] = {}
+
         # Collision warnings generated during build
         self.collision_warnings: List[tuple] = []  # List of (code, message)
 
@@ -143,6 +147,20 @@ class Dictionary:
             self.word_types[word_lower] = set()
         self.word_types[word_lower].add('direction')
         self.word_objects[word_lower] = prop_num
+
+    def add_preposition(self, word: str, prep_number: int):
+        """Add a preposition word with its preposition number (PR? value).
+
+        The preposition number is stored in dictionary byte 5 and is used
+        by the parser to match syntax patterns.
+
+        Args:
+            word: The preposition word (e.g., 'ON', 'IN', 'WITH')
+            prep_number: The preposition number (1, 2, 3, ...)
+        """
+        word_lower = word.lower()
+        self.add_word(word_lower, 'preposition')
+        self.preposition_numbers[word_lower] = prep_number
 
     def _compute_type_byte(self, word_types: Set[str]) -> int:
         """Compute the type byte for a set of word types.
@@ -276,6 +294,13 @@ class Dictionary:
                     verb_num = self.verb_numbers[w]
                     break
 
+            # Find preposition number from colliding words
+            prep_num = 0
+            for w in encoded_words:
+                if w in self.preposition_numbers:
+                    prep_num = self.preposition_numbers[w]
+                    break
+
             # Get object/property number
             obj_num = self.word_objects.get(word, 0)
             for w in encoded_words:
@@ -326,6 +351,9 @@ class Dictionary:
                     result.append(0)
                 elif 'verb' in word_types and verb_num > 0:
                     result.append(verb_num & 0xFF)
+                    result.append(0)
+                elif ('preposition' in word_types or 'prep' in word_types) and prep_num > 0:
+                    result.append(prep_num & 0xFF)
                     result.append(0)
                 else:
                     result.extend(struct.pack('>H', obj_num & 0xFFFF))

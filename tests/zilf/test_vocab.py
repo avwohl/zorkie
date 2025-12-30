@@ -370,7 +370,6 @@ class TestNewParser:
                 "<=? <GETB ,W?BAR 8> 0>"
             )
 
-    @pytest.mark.xfail(reason="Preposition synonym handling not implemented")
     def test_synonym_used_as_preposition_should_copy_preposition_number(self):
         """Test synonym used as preposition copies preposition number."""
         AssertGlobals(

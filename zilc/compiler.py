@@ -2042,7 +2042,17 @@ class ZILCompiler:
         # They can be BEFORE the first OBJECT (e.g., LOOK THROUGH OBJECT)
         # or BETWEEN OBJECT slots (e.g., PUT OBJECT IN OBJECT)
         prepositions = {}  # word -> PR? number
+        canonical_prepositions = set()  # only canonical prepositions (not synonyms)
         prep_num = 1  # Start from 1
+
+        # Build synonym -> canonical mapping for preposition synonym handling
+        # When SYNONYM declares words, they should share the same preposition number
+        synonym_to_canonical = {}  # word -> canonical word (first in group)
+        for group in program.verb_synonym_groups:
+            if len(group) >= 2:
+                canonical = group[0].upper()
+                for word in group:
+                    synonym_to_canonical[word.upper()] = canonical
 
         for syntax_def in program.syntax:
             if not syntax_def.pattern:
@@ -2064,10 +2074,20 @@ class ZILCompiler:
                 if word_upper not in ('=', 'OBJECT'):
                     # This is a preposition (or particle, treated the same)
                     if word_upper not in prepositions:
-                        prepositions[word_upper] = prep_num
-                        prep_num += 1
+                        # Check if this word is a synonym of an existing preposition
+                        canonical = synonym_to_canonical.get(word_upper, word_upper)
+                        if canonical in prepositions:
+                            # Use the canonical word's prep number (synonym)
+                            prepositions[word_upper] = prepositions[canonical]
+                            # Note: word_upper is a synonym, NOT added to canonical_prepositions
+                        else:
+                            # Assign a new prep number (canonical)
+                            prepositions[word_upper] = prep_num
+                            canonical_prepositions.add(word_upper)
+                            prep_num += 1
 
         # Add PR? constants to verb_constants
+        # For synonyms, create PR? constants pointing to the canonical word's number
         for prep_word, prep_number in prepositions.items():
             const_name = f'PR?{prep_word}'
             verb_constants[const_name] = prep_number
@@ -2141,7 +2161,8 @@ class ZILCompiler:
             'preactions': [(num, name) for name, num in sorted(preactions.items(), key=lambda x: x[1])],
             'verb_constants': verb_constants,
             'action_to_routine': {v: k for k, v in actions.items()},
-            'prepositions': prepositions,  # word -> number mapping
+            'prepositions': prepositions,  # word -> number mapping (all prepositions)
+            'canonical_prepositions': canonical_prepositions,  # only canonical (not synonyms)
             # New mappings for action name overrides - maps action_num to routine/preaction
             'action_num_to_routine': action_num_to_routine,  # action_num -> routine_name
             'action_num_to_preaction': action_num_to_preaction,  # action_num -> preaction_routine (or None)
@@ -2451,10 +2472,16 @@ class ZILCompiler:
             dictionary.add_words(program.buzz_words, 'buzz')
 
         # Add standalone SYNONYM words (excluding removed ones)
+        # But skip words that are actually used as prepositions (not object synonyms)
         if program.synonym_words:
             # Filter out words that were removed via REMOVE-SYNONYM
             removed = set(w.upper() for w in program.removed_synonyms)
-            filtered_synonyms = [w for w in program.synonym_words if w.upper() not in removed]
+            # Also filter out words that are used as prepositions - they get added later with correct flags
+            preposition_words = set()
+            if action_table_info and 'prepositions' in action_table_info:
+                preposition_words = set(action_table_info['prepositions'].keys())
+            filtered_synonyms = [w for w in program.synonym_words
+                                 if w.upper() not in removed and w.upper() not in preposition_words]
             if filtered_synonyms:
                 dictionary.add_words(filtered_synonyms, 'synonym')
 
@@ -2563,6 +2590,12 @@ class ZILCompiler:
         if action_table_info and 'verb_numbers' in action_table_info:
             verb_numbers = action_table_info['verb_numbers']
 
+        # Get preposition numbers from action table (if available)
+        # Maps word -> PR? number (e.g., 'ON' -> 1, 'IN' -> 2)
+        prepositions = {}
+        if action_table_info and 'prepositions' in action_table_info:
+            prepositions = action_table_info['prepositions']
+
         # Add words from SYNTAX definitions
         # SYNTAX keywords that are not vocabulary words (except first word = verb)
         syntax_keywords = {'OBJECT', 'FIND', 'HAVE', 'HELD', 'ON-GROUND',
@@ -2584,7 +2617,9 @@ class ZILCompiler:
                         dictionary.add_verb(word_lower, verb_num)
                     elif word_upper not in syntax_keywords:
                         # Non-verb words that aren't syntax keywords are prepositions
-                        dictionary.add_word(word_lower, 'prep')
+                        # Get the preposition number from the collected prepositions
+                        prep_num = prepositions.get(word_upper, 0)
+                        dictionary.add_preposition(word_lower, prep_num)
 
             # Process verb synonyms from SYNTAX like <SYNTAX TOSS (CHUCK) ...>
             # Verb synonyms are words that share the same dictionary data as the main verb
@@ -2599,6 +2634,7 @@ class ZILCompiler:
         # Process standalone SYNONYM verb groups like <SYNONYM TAKE GET GRAB>
         # The first word is the main verb, others are synonyms (unless removed)
         # Skip groups that contain direction words - those are direction synonyms, not verb synonyms
+        # Skip groups where the main word is not a verb (e.g., preposition synonyms like <SYNONYM ON ONTO>)
         removed_set = set(w.upper() for w in program.removed_synonyms)
         for group in program.verb_synonym_groups:
             if len(group) < 2:
@@ -2608,6 +2644,9 @@ class ZILCompiler:
                 continue
             main_verb = group[0]
             main_verb_num = verb_numbers.get(main_verb.upper(), 0)
+            # Skip if main word is not actually a verb (no verb number = not used at position 0 in SYNTAX)
+            if main_verb_num == 0:
+                continue
             for synonym in group[1:]:
                 syn_upper = synonym.upper()
                 # Skip if this synonym was removed via REMOVE-SYNONYM
@@ -2666,7 +2705,9 @@ class ZILCompiler:
             elif pos_type == 'NOUN':
                 dictionary.add_word(word, 'noun')
             elif pos_type == 'PREP':
-                dictionary.add_word(word, 'preposition')
+                # Get preposition number if available
+                prep_num = prepositions.get(word.upper(), 0)
+                dictionary.add_preposition(word, prep_num)
             elif pos_type == 'DIR':
                 dictionary.add_word(word, 'direction')
             elif pos_type == 'BUZZ':

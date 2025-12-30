@@ -1744,18 +1744,23 @@ class ImprovedCodeGenerator:
         # Generate PREPOSITIONS table if we have prepositions
         if 'prepositions' in self.action_table and self.action_table['prepositions']:
             prepositions = self.action_table['prepositions']
+            # Only include canonical prepositions in the table (not synonyms)
+            canonical_prepositions = self.action_table.get('canonical_prepositions', set(prepositions.keys()))
 
             # Table format: [count, word1, prep1, word2, prep2, ...]
-            # count = number of word/prep pairs
+            # count = number of word/prep pairs (only canonical, not synonyms)
             table_data = bytearray()
 
+            # Filter to only canonical prepositions
+            canonical_entries = {w: n for w, n in prepositions.items() if w in canonical_prepositions}
+
             # Write count (number of entries)
-            count = len(prepositions)
+            count = len(canonical_entries)
             table_data.append((count >> 8) & 0xFF)
             table_data.append(count & 0xFF)
 
             # Write word/prep pairs - sorted by prep number for consistency
-            for word, prep_num in sorted(prepositions.items(), key=lambda x: x[1]):
+            for word, prep_num in sorted(canonical_entries.items(), key=lambda x: x[1]):
                 # Word address placeholder (0xFB00 | index)
                 placeholder_idx = self._next_vocab_placeholder_index
                 self._vocab_placeholders[placeholder_idx] = word.lower()
