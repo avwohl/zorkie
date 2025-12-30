@@ -33,6 +33,8 @@ class TokenType(Enum):
     # Variable prefixes
     LOCAL_VAR = auto()   # .VAR
     GLOBAL_VAR = auto()  # ,VAR
+    CHAR_GLOBAL_VAR = auto()  # %,VAR (print as character in TELL)
+    CHAR_LOCAL_VAR = auto()   # %.VAR (print as character in TELL)
 
     # Special
     COMMA = auto()       # ,
@@ -500,11 +502,13 @@ class Lexer:
             line = self.line
             col = self.column
 
-            # Compile-time evaluation: %,VAR, %.VAR - skip the %
+            # Compile-time evaluation: %,VAR, %.VAR - these become CHAR_GLOBAL_VAR/CHAR_LOCAL_VAR
             # Note: %<...> forms are handled by compiler preprocessing, not lexer
+            percent_prefix = False
             if ch == '%':
                 next_ch = self.peek(1)
                 if next_ch in (',', '.'):
+                    percent_prefix = True
                     self.advance()  # Skip %
                     # Fall through to handle the next character
                     ch = self.peek()
@@ -556,7 +560,9 @@ class Lexer:
                     while self.peek() and self.peek() in ' \t':
                         self.advance()
                     name = self.read_atom()
-                    self.tokens.append(Token(TokenType.LOCAL_VAR, name, line, col))
+                    # Use CHAR_LOCAL_VAR if we had % prefix (for %.VAR in TELL)
+                    token_type = TokenType.CHAR_LOCAL_VAR if percent_prefix else TokenType.LOCAL_VAR
+                    self.tokens.append(Token(token_type, name, line, col))
                 else:
                     # Just a period token
                     self.advance()
@@ -578,7 +584,9 @@ class Lexer:
                     while self.peek() and self.peek() in ' \t':
                         self.advance()
                     name = self.read_atom()
-                    self.tokens.append(Token(TokenType.GLOBAL_VAR, name, line, col))
+                    # Use CHAR_GLOBAL_VAR if we had % prefix (for %,VAR in TELL)
+                    token_type = TokenType.CHAR_GLOBAL_VAR if percent_prefix else TokenType.GLOBAL_VAR
+                    self.tokens.append(Token(token_type, name, line, col))
                 else:
                     # Just a comma token
                     self.advance()

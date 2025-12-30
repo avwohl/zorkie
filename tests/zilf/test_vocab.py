@@ -160,7 +160,6 @@ class TestLanguage:
 class TestPunctuationWords:
     """Tests for punctuation and symbol word handling."""
 
-    @pytest.mark.xfail(reason="Punctuation word handling not implemented")
     def test_punctuation_symbol_words_should_work_with_definitions(self):
         """Test punctuation symbol words work when given definitions."""
         AssertRoutine(
@@ -170,7 +169,6 @@ class TestPunctuationWords:
             .with_global("<OBJECT FOO (SYNONYM \\,)>") \
             .outputs(", , ,")
 
-    @pytest.mark.xfail(reason="Punctuation word handling not implemented")
     def test_punctuation_name_words_should_split_from_symbol_words(self):
         """Test punctuation name words split from symbol words."""
         AssertRoutine(

@@ -17,6 +17,8 @@ class NodeType(Enum):
     STRING = auto()
     LOCAL_VAR = auto()
     GLOBAL_VAR = auto()
+    CHAR_LOCAL_VAR = auto()   # %.VAR (print as character in TELL)
+    CHAR_GLOBAL_VAR = auto()  # %,VAR (print as character in TELL)
 
     # Forms
     FORM = auto()          # <func arg1 arg2 ...>
@@ -122,6 +124,26 @@ class GlobalVarNode(ASTNode):
 
     def __repr__(self):
         return f"GlobalVar(,{self.name})"
+
+
+class CharLocalVarNode(ASTNode):
+    """Local variable reference for character printing (%.VAR)."""
+    def __init__(self, name: str, line: int = 0, column: int = 0):
+        super().__init__(NodeType.CHAR_LOCAL_VAR, line, column)
+        self.name = name
+
+    def __repr__(self):
+        return f"CharLocalVar(%.{self.name})"
+
+
+class CharGlobalVarNode(ASTNode):
+    """Global variable reference for character printing (%,VAR)."""
+    def __init__(self, name: str, line: int = 0, column: int = 0):
+        super().__init__(NodeType.CHAR_GLOBAL_VAR, line, column)
+        self.name = name
+
+    def __repr__(self):
+        return f"CharGlobalVar(%,{self.name})"
 
 
 class FormNode(ASTNode):

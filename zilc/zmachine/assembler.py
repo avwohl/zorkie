@@ -393,6 +393,45 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_vocab_placeholders_in_story(self, story: bytearray,
+                                              vocab_fixups: list,
+                                              dict_addr: int,
+                                              start_offset: int,
+                                              length: int) -> None:
+        """
+        Resolve vocabulary word placeholders in a section of the story file.
+
+        Scans the specified range for 0xFB00 | index values and replaces them
+        with actual dictionary word addresses. Modifies story in place.
+
+        Args:
+            story: Story bytearray to modify in place
+            vocab_fixups: List of (placeholder_idx, word_offset) tuples
+            dict_addr: Base address of dictionary in story file
+            start_offset: Start offset in story to scan
+            length: Number of bytes to scan
+        """
+        if not vocab_fixups:
+            return
+
+        # Build a map from placeholder_idx to word address
+        fixup_map = {}
+        for placeholder_idx, word_offset in vocab_fixups:
+            word_addr = dict_addr + word_offset
+            fixup_map[placeholder_idx] = word_addr
+
+        # Scan for 0xFB00 | index patterns (16-bit values)
+        end_offset = min(start_offset + length, len(story) - 1)
+        i = start_offset
+        while i < end_offset:
+            if story[i] == 0xFB:
+                placeholder_idx = story[i + 1]
+                if placeholder_idx in fixup_map:
+                    word_addr = fixup_map[placeholder_idx]
+                    story[i] = (word_addr >> 8) & 0xFF
+                    story[i + 1] = word_addr & 0xFF
+            i += 1
+
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
                                      prop_defaults_size: int,
                                      vocab_fixups: list = None) -> bytes:
@@ -605,8 +644,9 @@ class ZAssembler:
         )
 
         globals_addr = current_addr
+        globals_len = len(globals_data)
         story.extend(globals_data)
-        current_addr += len(globals_data)
+        current_addr += globals_len
 
         # Pad to word boundary
         while len(story) % 2 != 0:
@@ -773,6 +813,13 @@ class ZAssembler:
         if dictionary:
             story.extend(dictionary)
             current_addr += len(dictionary)
+
+        # Resolve vocab placeholders in globals data now that dict_addr is known
+        # (vocab placeholders are 0xFB00 | index, need to be patched to actual addresses)
+        if vocab_fixups and globals_len > 0:
+            self._resolve_vocab_placeholders_in_story(
+                story, vocab_fixups, dict_addr, globals_addr, globals_len
+            )
 
         # Align to even boundary
         while len(story) % 2 != 0:

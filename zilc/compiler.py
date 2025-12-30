@@ -52,6 +52,18 @@ class ZILCompiler:
         if "'" in word:
             self.warn("MDL0429", f"{prop_type} word '{word}' in {obj_name} contains apostrophe")
 
+    def _unescape_vocab_word(self, word: str) -> str:
+        """Unescape a vocab word by stripping backslash escapes.
+
+        In ZIL, backslash is used to escape special characters in vocab words:
+        - \\, becomes ,
+        - \\. becomes .
+        - \\" becomes "
+        """
+        if word.startswith('\\') and len(word) == 2:
+            return word[1]  # Single escaped character
+        return word
+
     def compile_file(self, input_path: str, output_path: Optional[str] = None) -> bool:
         """
         Compile a ZIL source file to Z-machine bytecode.
@@ -1286,6 +1298,24 @@ class ZILCompiler:
                 return None
             return args[0] << args[1]
 
+        # Handle ASCII - convert character to ASCII code
+        elif op == 'ASCII':
+            args_str = args_str.strip()
+            # Handle character literal like !\A or !\ (space)
+            if args_str.startswith('!\\'):
+                char = args_str[2:3]  # Get the character after !\
+                if char:
+                    return ord(char)
+                elif len(args_str) == 2:
+                    # !\  followed by nothing - space character
+                    return 32
+            # Handle numeric argument directly
+            args = self._parse_compile_args(args_str)
+            if args is not None and len(args) >= 1:
+                # If given a number, just return it (ASCII 32 -> 32)
+                return args[0]
+            return None
+
         # Handle LENGTH - we can't evaluate this without knowing the table
         # Return None to indicate we can't evaluate
 
@@ -2472,9 +2502,11 @@ class ZILCompiler:
                             if isinstance(val, (int, float)):
                                 val = str(val)
                             self._check_vocab_word_apostrophe(val, 'SYNONYM', obj_name)
+                            val = self._unescape_vocab_word(val)
                             dictionary.add_synonym(val, obj_num)
                         elif isinstance(syn, str):
                             self._check_vocab_word_apostrophe(syn, 'SYNONYM', obj_name)
+                            syn = self._unescape_vocab_word(syn)
                             dictionary.add_synonym(syn, obj_num)
                         elif isinstance(syn, (int, float)):
                             dictionary.add_synonym(str(syn), obj_num)
@@ -2483,6 +2515,7 @@ class ZILCompiler:
                     if isinstance(val, (int, float)):
                         val = str(val)
                     self._check_vocab_word_apostrophe(val, 'SYNONYM', obj_name)
+                    val = self._unescape_vocab_word(val)
                     dictionary.add_synonym(val, obj_num)
 
             if 'ADJECTIVE' in obj.properties:
@@ -2588,12 +2621,38 @@ class ZILCompiler:
                 dictionary.add_verb(synonym.lower(), main_verb_num)
                 dictionary.add_verb_synonym(synonym, main_verb)
 
+        # Get initial vocab placeholders from codegen (will be updated during object table build)
+        vocab_placeholders = codegen.get_vocab_placeholders()
+        # Also get VOC words - these have proper part-of-speech and should NOT be pre-added as buzz
+        voc_words_set = set(codegen.get_voc_words().keys())
+
+        # Pre-add W?* words that can't be resolved via aliases.
+        # This ensures dict_word_offsets are stable when SYNONYM properties are stored.
+        # Punctuation word aliases allow W?COMMA to fall back to "," if "comma" isn't defined
+        # Skip words that are in voc_words - they'll be added with proper part-of-speech later
+        punct_aliases = {
+            'comma': [','],
+            'period': ['.'],
+            'quote': ['"'],
+        }
+        for placeholder_idx, word in vocab_placeholders.items():
+            # Skip if word is in VOC words - it will get proper part-of-speech later
+            if word.lower() in voc_words_set:
+                continue
+            if word not in dictionary.words:
+                # Check if this word has an alias that exists in dictionary
+                if word in punct_aliases:
+                    found_alias = any(alias in dictionary.words for alias in punct_aliases[word])
+                    if not found_alias:
+                        # No alias found, need to add the word itself
+                        dictionary.add_word(word, 'buzz')
+                else:
+                    # No aliases defined for this word, add it directly
+                    dictionary.add_word(word, 'buzz')
+
         # Get word offsets for SYNONYM property fixups
         dict_word_offsets = dictionary.get_word_offsets()
         self.log(f"  Dictionary contains {len(dictionary.words)} words")
-
-        # Get initial vocab placeholders from codegen (will be updated during object table build)
-        vocab_placeholders = codegen.get_vocab_placeholders()
 
         # Add VOC words with their part-of-speech to dictionary
         voc_words = codegen.get_voc_words()
@@ -3094,7 +3153,9 @@ class ZILCompiler:
                         first_word = synonyms.value
 
                     if first_word:
-                        word_lower = str(first_word).lower()
+                        # Unescape the word (e.g., \, -> ,) before lookup
+                        unescaped_word = self._unescape_vocab_word(str(first_word))
+                        word_lower = unescaped_word.lower()
                         if word_lower in dict_word_offsets:
                             # Store placeholder: word_offset | 0x8000 (high bit marks as fixup needed)
                             # The assembler will add dictionary base address
@@ -3119,7 +3180,9 @@ class ZILCompiler:
                         first_word = adjectives.value
 
                     if first_word:
-                        word_lower = str(first_word).lower()
+                        # Unescape the word (e.g., \, -> ,) before lookup
+                        unescaped_word = self._unescape_vocab_word(str(first_word))
+                        word_lower = unescaped_word.lower()
                         if word_lower in dict_word_offsets:
                             word_offset = dict_word_offsets[word_lower]
                             props[prop_num] = 0xFE00 | (word_offset & 0xFF)
@@ -3339,9 +3402,34 @@ class ZILCompiler:
         # Now build vocab_fixups after object table (PROPDEF may have added vocab placeholders)
         vocab_fixups = []  # List of (placeholder_idx, word_offset)
         missing_vocab_words = []
+
+        # Punctuation word aliases: word name -> symbol (one-way)
+        # W?COMMA can match either "comma" or "," in dictionary
+        # W?\, should ONLY match "," (no fallback to "comma")
+        # Dictionary stores unescaped chars (e.g., "," not "\,")
+        punctuation_aliases = {
+            'comma': [','],
+            'period': ['.'],
+            'quote': ['"'],
+            # Symbols don't have aliases (exact match only)
+        }
+
         for placeholder_idx, word in vocab_placeholders.items():
+            # First, try exact match
             if word in dict_word_offsets:
                 vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
+                continue
+
+            # Second, try punctuation aliases (comma <-> , or \,)
+            found_alias = None
+            if word in punctuation_aliases:
+                for alias in punctuation_aliases[word]:
+                    if alias in dict_word_offsets:
+                        found_alias = alias
+                        break
+
+            if found_alias:
+                vocab_fixups.append((placeholder_idx, dict_word_offsets[found_alias]))
             else:
                 # Word not in dictionary - try to add it
                 dictionary.add_word(word, 'buzz')  # PROPDEF VOC uses BUZZ type

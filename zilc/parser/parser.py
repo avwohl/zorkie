@@ -700,6 +700,14 @@ class Parser:
             self.advance()
             return GlobalVarNode(token.value, line, col)
 
+        elif token.type == TokenType.CHAR_LOCAL_VAR:
+            self.advance()
+            return CharLocalVarNode(token.value, line, col)
+
+        elif token.type == TokenType.CHAR_GLOBAL_VAR:
+            self.advance()
+            return CharGlobalVarNode(token.value, line, col)
+
         elif token.type == TokenType.LPAREN:
             # Parse list literal (parameters, etc.)
             return self.parse_list()

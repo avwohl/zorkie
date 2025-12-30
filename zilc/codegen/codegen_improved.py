@@ -616,6 +616,10 @@ class ImprovedCodeGenerator:
                         elif form_op == 'ZREST':
                             # Compile-time ZREST - store reference to table at offset
                             self._store_zrest_reference(global_node.name, global_node.initial_value.operands)
+                        elif form_op == 'VOC':
+                            # <VOC "word" pos> - vocabulary word reference
+                            voc_val = self._handle_voc_form(global_node.initial_value)
+                            self.global_values[global_node.name] = voc_val
                 elif isinstance(global_node.initial_value, GlobalVarNode):
                     # Reference to another global - copy its initial value
                     # (could be scalar or table reference marker like 0xFF00 | idx)
@@ -2041,6 +2045,25 @@ class ImprovedCodeGenerator:
                             return (values[0] << shift) & 0xFFFF
                         else:
                             return (values[0] >> (-shift)) & 0xFFFF
+                elif op == 'ASCII':
+                    # ASCII converts a character to its ASCII code
+                    if len(node.operands) == 1:
+                        operand = node.operands[0]
+                        # Handle numeric operand (just returns the value)
+                        if isinstance(operand, NumberNode):
+                            return operand.value
+                        # Handle character operand
+                        if isinstance(operand, AtomNode):
+                            # Check for character literal like !\A
+                            char_val = operand.value
+                            if char_val.startswith('!\\') and len(char_val) >= 3:
+                                return ord(char_val[2])
+                            elif char_val.startswith('!') and len(char_val) >= 2:
+                                return ord(char_val[1])
+                        # Handle CharNode if we have one
+                        if hasattr(operand, 'char_value'):
+                            return ord(operand.char_value) if isinstance(operand.char_value, str) else operand.char_value
+                    return None
         return None
 
     def _find_undeclared_set_vars(self, node, declared: set, found: set):
@@ -4052,8 +4075,8 @@ class ImprovedCodeGenerator:
                     code.extend(char_code)
                     i += 1
 
-                elif atom_name == 'P' and i + 1 < len(operands):
-                    # P ,address - print from packed address
+                elif atom_name in ('P', 'B') and i + 1 < len(operands):
+                    # P/B ,address - print from packed address (PRINTB)
                     i += 1
                     paddr_code = self.gen_printb([operands[i]])
                     code.extend(paddr_code)
@@ -4134,6 +4157,17 @@ class ImprovedCodeGenerator:
                 # The variable contains a packed address pointing to a string
                 var_code = self._gen_tell_operand_code(op, 0x0D)  # PRINT_PADDR
                 code.extend(var_code)
+                i += 1
+
+            elif isinstance(op, CharGlobalVarNode) or isinstance(op, CharLocalVarNode):
+                # %,VAR or %.VAR - print the character whose ASCII code is in the variable
+                # Use PRINT_CHAR (VAR opcode 0xE5)
+                op_type, op_val = self._get_operand_type_and_value(op)
+                code.append(0xE5)  # VAR opcode for PRINT_CHAR
+                # Type byte: 01 for small constant, 10 for variable
+                type_byte = 0x01 if op_type == 0 else 0x02
+                code.append((type_byte << 6) | 0x3F)  # type in bits 7-6, rest omitted
+                code.append(op_val & 0xFF)
                 i += 1
 
             else:
@@ -5357,7 +5391,27 @@ class ImprovedCodeGenerator:
             else:
                 return (0, val)  # Large constant
         elif isinstance(node, GlobalVarNode):
-            if node.name in self.globals:
+            # Check W?* vocabulary word constants FIRST, before constants dict
+            # This is because W?* constants may be in the constants dict as placeholders (0)
+            # but we want to generate proper vocab placeholders for dictionary resolution
+            if node.name.startswith('W?'):
+                # W?* vocabulary word constant - emit placeholder for later resolution
+                # Special mapping for punctuation words (W?COMMA -> ",", W?PERIOD -> ".", etc.)
+                name_part = node.name[2:]  # Extract name (W?COMMA -> "COMMA")
+                # Handle escaped punctuation characters (W?\, -> ",")
+                # Only escaped single characters become the literal character
+                if name_part.startswith('\\') and len(name_part) == 2:
+                    word = name_part[1]  # Strip the backslash, e.g., \, -> ,
+                else:
+                    # Word names like COMMA -> "comma"
+                    word = name_part.lower()
+                placeholder_idx = self._next_vocab_placeholder_index
+                self._vocab_placeholders[placeholder_idx] = word
+                self._next_vocab_placeholder_index += 1
+                # Track position for resolution (will be filled in during code generation)
+                # Return large constant placeholder (0xFB00 | index)
+                return (0, 0xFB00 | placeholder_idx)
+            elif node.name in self.globals:
                 return (2, self.globals[node.name])  # Variable
             elif node.name in self.objects:
                 obj_num = self.objects[node.name]
@@ -5371,15 +5425,6 @@ class ImprovedCodeGenerator:
                     return (1, const_val)
                 else:
                     return (0, const_val)
-            elif node.name.startswith('W?'):
-                # W?* vocabulary word constant - emit placeholder for later resolution
-                word = node.name[2:].lower()  # Extract word name (W?RUN -> "run")
-                placeholder_idx = self._next_vocab_placeholder_index
-                self._vocab_placeholders[placeholder_idx] = word
-                self._next_vocab_placeholder_index += 1
-                # Track position for resolution (will be filled in during code generation)
-                # Return large constant placeholder (0xFB00 | index)
-                return (0, 0xFB00 | placeholder_idx)
             elif hasattr(self, '_routine_names') and node.name in self._routine_names:
                 # Routine address reference (e.g., ,V-FOO)
                 # Get or create placeholder value for this routine
@@ -5394,7 +5439,7 @@ class ImprovedCodeGenerator:
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (2, 0x10)
-        elif isinstance(node, LocalVarNode):
+        elif isinstance(node, LocalVarNode) or isinstance(node, CharLocalVarNode):
             var_num = self.locals.get(node.name)
             if var_num is not None:
                 # Mark local as used (for ZIL0210 warning tracking)
@@ -5425,6 +5470,25 @@ class ImprovedCodeGenerator:
             else:
                 self._warn(f"Unknown variable '{node.name}' - using default")
                 return (2, 1)
+        elif isinstance(node, CharGlobalVarNode):
+            # %,VARNAME syntax - same as ,VARNAME
+            if node.name in self.globals:
+                return (2, self.globals[node.name])
+            elif node.name in self.objects:
+                obj_num = self.objects[node.name]
+                if 0 <= obj_num <= 255:
+                    return (1, obj_num)
+                else:
+                    return (0, obj_num)
+            elif node.name in self.constants:
+                const_val = self.constants[node.name]
+                if 0 <= const_val <= 255:
+                    return (1, const_val)
+                else:
+                    return (0, const_val)
+            else:
+                self._warn(f"Unknown global/object '{node.name}' - using default")
+                return (2, 0x10)
         elif isinstance(node, TableNode):
             table_id = self._add_table(node)
             return (0, table_id)  # Table addresses are typically large
@@ -5458,7 +5522,25 @@ class ImprovedCodeGenerator:
             return (0, node.value)  # Small constant
         elif isinstance(node, GlobalVarNode):
             # ,VARNAME syntax - can be global variable, object, constant, or routine
-            if node.name in self.globals:
+            # Check W?* vocabulary word constants FIRST before constants dict
+            # This is because W?* constants may be in constants dict as placeholders (0)
+            if node.name.startswith('W?'):
+                # W?* vocabulary word constant - emit placeholder for later resolution
+                # Special mapping for punctuation words (W?COMMA -> ",", W?PERIOD -> ".", etc.)
+                name_part = node.name[2:]  # Extract name (W?COMMA -> "COMMA")
+                # Handle escaped punctuation characters (W?\, -> ",")
+                # Only escaped single characters become the literal character
+                if name_part.startswith('\\') and len(name_part) == 2:
+                    word = name_part[1]  # Strip the backslash, e.g., \, -> ,
+                else:
+                    # Word names like COMMA -> "comma"
+                    word = name_part.lower()
+                placeholder_idx = self._next_vocab_placeholder_index
+                self._vocab_placeholders[placeholder_idx] = word
+                self._next_vocab_placeholder_index += 1
+                # Return large constant placeholder (0xFB00 | index)
+                return (0, 0xFB00 | placeholder_idx)
+            elif node.name in self.globals:
                 return (1, self.globals[node.name])  # Global variable
             elif node.name in self.objects:
                 return (0, self.objects[node.name])  # Object number (constant)
@@ -5470,14 +5552,6 @@ class ImprovedCodeGenerator:
                 placeholder_val = self._get_routine_placeholder(node.name)
                 # Return the 16-bit placeholder value (will be resolved by get_routine_fixups)
                 return (0, placeholder_val)
-            elif node.name.startswith('W?'):
-                # W?* vocabulary word constant - emit placeholder for later resolution
-                word = node.name[2:].lower()  # Extract word name (W?RUN -> "run")
-                placeholder_idx = self._next_vocab_placeholder_index
-                self._vocab_placeholders[placeholder_idx] = word
-                self._next_vocab_placeholder_index += 1
-                # Return large constant placeholder (0xFB00 | index)
-                return (0, 0xFB00 | placeholder_idx)
             elif node.name.startswith('ACT?'):
                 # ACT?* action constant - should be in constants
                 self._warn(f"Unknown action constant '{node.name}' - using default")
@@ -5485,8 +5559,8 @@ class ImprovedCodeGenerator:
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (1, 0x10)  # Default to variable 0x10
-        elif isinstance(node, LocalVarNode):
-            # .VARNAME syntax - local variable reference, falls back to global
+        elif isinstance(node, LocalVarNode) or isinstance(node, CharLocalVarNode):
+            # .VARNAME or %.VARNAME syntax - local variable reference, falls back to global
             var_num = self.locals.get(node.name)
             if var_num is not None:
                 # Mark local as used (for ZIL0210 warning tracking)
@@ -5509,6 +5583,17 @@ class ImprovedCodeGenerator:
             else:
                 self._warn(f"Unknown variable '{node.name}' - using default")
                 return (1, 1)  # Variable
+        elif isinstance(node, CharGlobalVarNode):
+            # %,VARNAME syntax - same as ,VARNAME (global variable reference)
+            if node.name in self.globals:
+                return (1, self.globals[node.name])
+            elif node.name in self.objects:
+                return (0, self.objects[node.name])
+            elif node.name in self.constants:
+                return (0, self.constants[node.name])
+            else:
+                self._warn(f"Unknown global/object '{node.name}' - using default")
+                return (1, 0x10)
         elif isinstance(node, TableNode):
             # Table literal - generate table and return placeholder address
             table_id = self._add_table(node)
@@ -5542,7 +5627,15 @@ class ImprovedCodeGenerator:
             # Check for W?* vocabulary word constants
             elif node.value.startswith('W?'):
                 # W?WORD vocabulary word constant - emit placeholder for later resolution
-                word = node.value[2:].lower()  # Extract word name (W?COLUMN -> "column")
+                # Special mapping for punctuation words (W?COMMA -> ",", W?PERIOD -> ".", etc.)
+                name_part = node.value[2:]  # Extract name (W?COLUMN -> "COLUMN")
+                # Handle escaped punctuation characters (W?\, -> ",")
+                # Only escaped single characters become the literal character
+                if name_part.startswith('\\') and len(name_part) == 2:
+                    word = name_part[1]  # Strip the backslash, e.g., \, -> ,
+                else:
+                    # Word names like COMMA -> "comma"
+                    word = name_part.lower()
                 placeholder_idx = self._next_vocab_placeholder_index
                 self._vocab_placeholders[placeholder_idx] = word
                 self._next_vocab_placeholder_index += 1
