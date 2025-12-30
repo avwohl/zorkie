@@ -11,13 +11,16 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-30)
-- **Tests:** 648 passed, 0 failed, 23 xfailed
+- **Tests:** 648 passed, 0 failed, 29 xfailed
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - **Zork1 compiles** to 103KB (runtime issues remain - likely parser-related)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-30)
+- **Added 6 PROPDEF/PROPSPEC tests** from ZILF (all xfailed):
+  - PROPDEF for implicit directions, DIRECTIONS property suppression
+  - VOC in PROPDEF, PROPSPEC with vocab/routines, ROOM type optimization
 - **Property routine placeholder fixups** - Object properties referencing routines now work:
   - Compiler detects routine names in `resolve_atom_value()`
   - Creates 0xFA00 | idx placeholders in property data
