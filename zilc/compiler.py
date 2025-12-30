@@ -26,6 +26,7 @@ class ZILCompiler:
         self.verbose = verbose
         self.enable_string_dedup = enable_string_dedup
         self.compilation_flags = {}  # ZILF compilation flags
+        self.file_flags = set()  # FILE-FLAGS like SENTENCE-ENDS?
         self.include_paths = include_paths or []  # Additional paths to search for includes
         self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
         self.override_version = override_version  # If True, ignore source VERSION directive
@@ -341,6 +342,22 @@ class ZILCompiler:
             return ''  # Remove the directive from source
 
         source = re.sub(flag_pattern, extract_flag, source, flags=re.IGNORECASE)
+
+        # Extract FILE-FLAGS directives
+        # <FILE-FLAGS FLAG1 FLAG2 ...> - set file-level flags like SENTENCE-ENDS?
+        file_flags_pattern = r'<\s*FILE-FLAGS\s+([^>]+)>'
+
+        def extract_file_flags(match):
+            flags_str = match.group(1)
+            # Parse individual flags (space-separated atoms)
+            for flag in flags_str.split():
+                flag = flag.strip().upper()
+                if flag:
+                    self.file_flags.add(flag)
+                    self.log(f"  FILE-FLAG: {flag}")
+            return ''  # Remove the directive from source
+
+        source = re.sub(file_flags_pattern, extract_file_flags, source, flags=re.IGNORECASE)
 
         # Extract SUPPRESS-WARNINGS? directives
         # <SUPPRESS-WARNINGS? "ZIL0204"> - suppress specific warning
@@ -2466,8 +2483,11 @@ class ZILCompiler:
         crlf_char = self.compile_globals.get('CRLF-CHARACTER', '|')
         # Get PRESERVE-SPACES? from compile_globals (defaults to False)
         preserve_spaces = self.compile_globals.get('PRESERVE-SPACES?', False)
+        # Get SENTENCE-ENDS? from file_flags
+        sentence_ends = 'SENTENCE-ENDS?' in self.file_flags
         text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table,
-                                    crlf_character=crlf_char, preserve_spaces=preserve_spaces)
+                                    crlf_character=crlf_char, preserve_spaces=preserve_spaces,
+                                    sentence_ends=sentence_ends)
         string_table = StringTable(text_encoder, version=self.version)
         if self.enable_string_dedup:
             self.log("String table deduplication enabled")

@@ -31,7 +31,7 @@ class ZTextEncoder:
     """Encodes text to Z-machine format."""
 
     def __init__(self, version: int = 3, abbreviations_table=None, crlf_character: str = '|',
-                 preserve_spaces: bool = False):
+                 preserve_spaces: bool = False, sentence_ends: bool = False):
         self.version = version
         self.alphabet_a0 = ALPHABET_A0
         self.alphabet_a1 = ALPHABET_A1
@@ -42,6 +42,9 @@ class ZTextEncoder:
         self.crlf_character = crlf_character
         # Whether to preserve multiple spaces (default: collapse after periods)
         self.preserve_spaces = preserve_spaces
+        # SENTENCE-ENDS? flag: convert ". " or "! " or "? " followed by another space
+        # into sentence-ending punctuation followed by sentence space (0x0B)
+        self.sentence_ends = sentence_ends
         # Track Unicode characters used (for V5+ unicode table)
         self.unicode_chars_used: set = set()
         # Maximum Unicode table size (V5+)
@@ -253,15 +256,34 @@ class ZTextEncoder:
             crlf_escaped = re.escape(crlf)
             # Step 1: Absorb newlines immediately after CRLF character
             text = re.sub(crlf_escaped + r'(?:\r\n|\r|\n)', crlf, text)
+            # Step 1.5: For SENTENCE-ENDS? mode, mark punctuation + space before newline
+            # These should become two regular spaces, not sentence space
+            # Use \x00 as a placeholder marker (will be restored after SENTENCE-ENDS?)
+            if self.sentence_ends:
+                text = re.sub(r'([.!?]) (?=\r\n|\r|\n)', lambda m: m.group(1) + '\x00', text)
             # Step 2: Replace remaining literal newlines with space
             text = re.sub(r'\r\n|\r|\n', ' ', text)
             # Step 3: Replace CRLF character with newline
             text = text.replace(crlf, '\n')
-            # Step 4: Collapse multiple spaces after periods (and after newlines from CRLF)
-            # unless PRESERVE-SPACES? is set
-            # The rule is: reduce runs of 2+ spaces after periods/newlines by 1
-            # e.g., 2 spaces → 1, 3 spaces → 2
-            if not self.preserve_spaces:
+            # Step 4: Handle SENTENCE-ENDS? or collapse multiple spaces
+            if self.sentence_ends:
+                # SENTENCE-ENDS? mode: Two spaces after sentence-ending punctuation
+                # (.!?) become a sentence space (0x0B = vertical tab)
+                # More than two spaces: sentence space + remaining spaces minus 2
+                def convert_sentence_space(m):
+                    punct = m.group(1)
+                    spaces = m.group(2)
+                    if len(spaces) >= 2:
+                        # Convert to sentence space (0x0B) + any extra spaces beyond 2
+                        return punct + '\x0b' + spaces[2:]
+                    return m.group(0)  # Keep as-is if less than 2 spaces
+                text = re.sub(r'([.!?])( {2,})', convert_sentence_space, text)
+                # Restore marked patterns: \x00 + space -> two regular spaces
+                text = text.replace('\x00 ', '  ')
+            elif not self.preserve_spaces:
+                # Collapse multiple spaces after periods (and after newlines from CRLF)
+                # The rule is: reduce runs of 2+ spaces after periods/newlines by 1
+                # e.g., 2 spaces → 1, 3 spaces → 2
                 # After period followed by 2+ spaces, reduce by removing one space
                 def reduce_period_spaces(m):
                     spaces = m.group(1)

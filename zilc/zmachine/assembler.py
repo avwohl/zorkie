@@ -896,9 +896,10 @@ class ZAssembler:
 
         # High memory must be aligned for packed addresses:
         # V1-3: 2-byte alignment (packed = byte / 2)
-        # V4-7: 4-byte alignment (packed = byte / 4)
+        # V4-5: 4-byte alignment (packed = byte / 4)
+        # V6-7: 8-byte alignment (routines_offset = byte / 8)
         # V8: 8-byte alignment (packed = byte / 8)
-        if self.version >= 8:
+        if self.version >= 6:
             alignment = 8
         elif self.version >= 4:
             alignment = 4

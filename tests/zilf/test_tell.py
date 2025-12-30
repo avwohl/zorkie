@@ -201,14 +201,19 @@ class TestSpaceHandling:
             .with_global("<SETG PRESERVE-SPACES? T>") \
             .outputs("Hi.  Hi.   Hi.\n  Hi!  Hi?  \n")
 
-    @pytest.mark.xfail(reason="SENTENCE-ENDS? not implemented")
     def test_two_spaces_after_period_bang_or_question_should_become_sentence_space(self):
-        """Test sentence endings with SENTENCE-ENDS? flag."""
+        """Test sentence endings with SENTENCE-ENDS? flag.
+
+        SENTENCE-ENDS? converts two spaces after .!? to ZSCII 11 (sentence space).
+        Interpreters render ZSCII 11 as a regular space, so we test for that.
+        The embedded newline after '. ' produces two regular spaces (not sentence space).
+        """
         # Note: a space followed by embedded newline will produce two spaces instead of collapsing.
+        # Interpreters render ZSCII 11 (sentence space) as a regular space character.
         AssertRoutine("", '<TELL "Hi.  Hi.   Hi.|  Hi!  Hi?  Hi. \nHi." CR>') \
             .in_v6() \
             .with_global("<FILE-FLAGS SENTENCE-ENDS?>") \
-            .outputs("Hi.\u000bHi.\u000b Hi.\n  Hi!\u000bHi?\u000bHi.  Hi.\n")
+            .outputs("Hi. Hi.  Hi.\n  Hi! Hi? Hi.  Hi.\n")
 
 
 class TestUnprintableCharacters:
