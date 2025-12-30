@@ -10,12 +10,23 @@ Focus areas for next session:
 2. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
-## Current Status (2025-12-27)
-- **Tests:** 585 passed, 0 failed, 1 skipped, 70 xfailed
+## Current Status (2025-12-30)
+- **Tests:** 643 passed, 0 failed, 23 xfailed
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - **Zork1 compiles** to 103KB but has runtime issues (missing parser features)
-- All tests passing (excluding skips/xfails for unimplemented ZILF features)
+- All tests passing (excluding xfails for unimplemented ZILF features)
+
+## Recent Changes (2025-12-30)
+- Added ZILF-derived tests for codegen, pruning, and quirks:
+  - TestSimpleOR_2 (OR with FIRST? temp vars)
+  - test_properties_containing_backslash
+  - test_branch_to_same_condition
+  - 5 routine pruning tests (all passing)
+  - 2 GVAL/LVAL quirk tests (xfailed - need compiler work)
+  - test_map_contents_with_next_and_end_empty
+- Test count improved from 630 to 643 passing tests
+- Test coverage vs ZILF now at 93-100% for most test files
 
 ## Zork1 Compilation Status
 - **Zork1 compiles** to a 103KB story file
