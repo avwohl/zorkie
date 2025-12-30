@@ -11,13 +11,19 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-30)
-- **Tests:** 650 passed, 0 failed, 27 xfailed
+- **Tests:** 645 passed, 0 failed, 28 xfailed
+- **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
-- **Zork1 compiles** to 103KB (runtime issues remain - likely parser-related)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-30)
+- **F?/FALSE? predicate** - Added opposite of T?/TRUE?:
+  - `<F? value>` returns true if value is zero (false), false otherwise
+  - Fixes test_constant_comparisons_folded test
+- **Undefined routine errors** - Changed from warning to error (ZIL0415):
+  - `<THIS-IS-UNDEFINED>` now fails compilation instead of silently using null address
+  - Exposed LOWCORE-TABLE test needed to be xfailed
 - **PRINTD with nested expressions** - `<PRINTD <FIRST? obj>>` now works correctly:
   - gen_printobj now evaluates FormNode operands before printing
   - Fixes garbage output when using FIRST?/NEXT?/LOC as PRINTD argument
