@@ -18,6 +18,9 @@ Focus areas for next session:
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-30)
+- **PRINTD with nested expressions** - `<PRINTD <FIRST? obj>>` now works correctly:
+  - gen_printobj now evaluates FormNode operands before printing
+  - Fixes garbage output when using FIRST?/NEXT?/LOC as PRINTD argument
 - **GVAL/LVAL quirk handling** - Using ,X with local or .X with global now works:
   - Falls back to correct scope with warning (ZIL0205/ZIL0204)
   - 2 more tests pass (648 -> 650)
