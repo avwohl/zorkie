@@ -75,7 +75,6 @@ class TestObjectNumberingAndOrdering:
             ["RAINBOW", "RED", "BLUE", "GREEN", "YELLOW"]
         ))
 
-    @pytest.mark.xfail(reason="ZILF object ordering algorithm needs investigation")
     def test_house_default_order(self):
         """Test default object ordering with house example."""
         AssertGlobals(
@@ -98,7 +97,6 @@ class TestObjectNumberingAndOrdering:
             ["LOCAL-GLOBALS", "FLOOR", "CEILING"]
         ))
 
-    @pytest.mark.xfail(reason="ORDER-OBJECTS? not implemented")
     def test_house_objects_rooms_first(self):
         """Test object ordering with ROOMS-FIRST."""
         AssertGlobals(

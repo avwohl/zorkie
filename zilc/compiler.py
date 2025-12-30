@@ -65,6 +65,157 @@ class ZILCompiler:
             return word[1]  # Single escaped character
         return word
 
+    def _compute_object_ordering(self, program) -> dict:
+        """Compute ZILF-compatible object ordering.
+
+        ZILF orders objects based on "mention order" - the order in which objects
+        are first seen, whether by definition or by reference (IN/LOC/GLOBAL).
+
+        For DEFAULT ordering (reverse mention order):
+        - The last object mentioned gets object number 1
+        - Earlier mentioned objects get higher numbers
+
+        Returns:
+            Dict mapping object name to object number (1-indexed)
+        """
+        from .parser.ast_nodes import AtomNode, FormNode
+
+        # Collect all objects and rooms, sorted by definition line
+        all_items = []
+        for obj in program.objects:
+            all_items.append({
+                'name': obj.name,
+                'node': obj,
+                'is_room': False,
+                'line': getattr(obj, 'line', 0),
+                'properties': obj.properties
+            })
+        for room in program.rooms:
+            all_items.append({
+                'name': room.name,
+                'node': room,
+                'is_room': True,
+                'line': getattr(room, 'line', 0),
+                'properties': room.properties
+            })
+
+        # Sort by definition line to process in source order
+        all_items.sort(key=lambda x: x['line'])
+
+        # Track mention order for each object name
+        # mention_order[name] = order in which this name was first seen
+        mention_order = {}
+        current_mention = 0
+
+        def mention(name):
+            """Record that an object name was mentioned (if not already seen)."""
+            nonlocal current_mention
+            if name not in mention_order:
+                mention_order[name] = current_mention
+                current_mention += 1
+
+        def extract_referenced_objects(properties):
+            """Extract object names referenced in IN/LOC/GLOBAL properties."""
+            refs = []
+
+            # Check IN property (parent container)
+            in_val = properties.get('IN')
+            if in_val is not None:
+                if isinstance(in_val, AtomNode):
+                    refs.append(in_val.value)
+                elif isinstance(in_val, str):
+                    refs.append(in_val)
+
+            # Check LOC property (alternative to IN)
+            loc_val = properties.get('LOC')
+            if loc_val is not None:
+                if isinstance(loc_val, AtomNode):
+                    refs.append(loc_val.value)
+                elif isinstance(loc_val, str):
+                    refs.append(loc_val)
+
+            # Check GLOBAL property (global objects visible in this room)
+            global_val = properties.get('GLOBAL')
+            if global_val is not None:
+                if isinstance(global_val, list):
+                    for item in global_val:
+                        if isinstance(item, AtomNode):
+                            refs.append(item.value)
+                        elif isinstance(item, str):
+                            refs.append(item)
+                elif isinstance(global_val, AtomNode):
+                    refs.append(global_val.value)
+                elif isinstance(global_val, str):
+                    refs.append(global_val)
+
+            return refs
+
+        # First pass: process objects in definition order, tracking mention order
+        for item in all_items:
+            # First, mention this object (it's being defined)
+            mention(item['name'])
+
+            # Then mention any objects referenced in properties
+            refs = extract_referenced_objects(item['properties'])
+            for ref in refs:
+                mention(ref)
+
+        # Build set of actual object names (to filter out undefined references)
+        defined_names = {item['name'] for item in all_items}
+
+        # Track which objects are rooms and which are local-globals
+        is_room = {}
+        is_local_global = {}
+        parent_name = {}
+
+        for item in all_items:
+            name = item['name']
+            is_room[name] = item['is_room']
+
+            # Check if parent is ROOMS (makes it a room even if defined with OBJECT)
+            refs = extract_referenced_objects(item['properties'])
+            if refs:
+                parent_name[name] = refs[0]  # First ref is IN/LOC parent
+                if refs[0] == 'ROOMS':
+                    is_room[name] = True
+                if refs[0] == 'LOCAL-GLOBALS':
+                    is_local_global[name] = True
+
+        # Handle ORDER-OBJECTS? directive
+        order_mode = getattr(program, 'order_objects', None)
+
+        # Build sorted list based on ordering mode
+        # Only include actually defined objects
+        ordered_names = [name for name in mention_order.keys() if name in defined_names]
+
+        if order_mode == 'DEFINED':
+            # Definition order, then mention order for undefined
+            def_order = {item['name']: i for i, item in enumerate(all_items)}
+            ordered_names.sort(key=lambda n: (def_order.get(n, float('inf')), mention_order[n]))
+        elif order_mode == 'ROOMS-FIRST':
+            # Rooms first (by mention order), then others (by mention order)
+            ordered_names.sort(key=lambda n: (not is_room.get(n, False), mention_order[n]))
+        elif order_mode == 'ROOMS-AND-LOCAL-GLOBALS-FIRST':
+            # Rooms and local-globals first, then others
+            def priority(n):
+                if is_room.get(n, False) or is_local_global.get(n, False):
+                    return 0
+                return 1
+            ordered_names.sort(key=lambda n: (priority(n), mention_order[n]))
+        elif order_mode == 'ROOMS-LAST':
+            # Non-rooms first, then rooms
+            ordered_names.sort(key=lambda n: (is_room.get(n, False), mention_order[n]))
+        else:
+            # DEFAULT: reverse mention order (last mentioned = lowest number)
+            ordered_names.sort(key=lambda n: mention_order[n], reverse=True)
+
+        # Assign object numbers (1-indexed)
+        obj_name_to_num = {}
+        for i, name in enumerate(ordered_names):
+            obj_name_to_num[name] = i + 1
+
+        return obj_name_to_num
+
     def compile_file(self, input_path: str, output_path: Optional[str] = None) -> bool:
         """
         Compile a ZIL source file to Z-machine bytecode.
@@ -1868,40 +2019,15 @@ class ZILCompiler:
         # SYNONYM and ADJECTIVE ARE properties if P?SYNONYM/P?ADJECTIVE exist
         reserved_props = {'FLAGS', 'IN', 'LOC'}
 
-        # Build object list in same order as compile_string's object building:
-        # 1. Combine objects and rooms
-        # 2. Sort by source line number
-        # 3. Handle ORDER-OBJECTS? directive if present
-        # 4. Reverse for object numbering (last defined = lowest number)
-        # 5. Then sort by object number for property extraction
+        # Use ZILF-compatible object ordering algorithm
+        obj_name_to_num = self._compute_object_ordering(program)
+
+        # Build object list for property extraction
         all_items = [(obj.name, obj, False, getattr(obj, 'line', 0)) for obj in program.objects]
         all_items.extend([(room.name, room, True, getattr(room, 'line', 0)) for room in program.rooms])
-        all_items.sort(key=lambda x: x[3])
-
-        # Handle ORDER-OBJECTS? directive
-        order_objects_mode = getattr(program, 'order_objects', None)
-        if order_objects_mode == 'ROOMS-FIRST':
-            # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
-            # Both rooms and objects are in definition order (not reverse)
-            rooms_list = [(n, o, r, l) for n, o, r, l in all_items if r]
-            objs_list = [(n, o, r, l) for n, o, r, l in all_items if not r]
-            # Rooms first (lowest numbers), then objects, all in definition order
-            all_items = rooms_list + objs_list
-
-        # Assign object numbers
-        total_objects = len(all_items)
-        obj_name_to_num = {}
-        for i, (name, node, is_room, _) in enumerate(all_items):
-            if order_objects_mode == 'ROOMS-FIRST':
-                # Forward numbering: first in list = lowest number
-                obj_num = i + 1
-            else:
-                # Reverse: last defined = lowest number
-                obj_num = total_objects - i
-            obj_name_to_num[name] = obj_num
 
         # Sort by object number (same order as extract_properties is called)
-        all_items_sorted = sorted(all_items, key=lambda x: obj_name_to_num[x[0]])
+        all_items_sorted = sorted(all_items, key=lambda x: obj_name_to_num.get(x[0], 0))
 
         # Now iterate in the same order as object building
         for name, obj, is_room, _ in all_items_sorted:
@@ -1961,33 +2087,8 @@ class ZILCompiler:
 
         # Pre-assign object numbers for code generation
         # This allows object references like ,FOO to be resolved during codegen
-        # ZILF numbers objects in reverse definition order (last defined = lowest number)
-        # Combine objects and rooms, sort by source line, then reverse
-        objects = {}
-        all_items = [(obj, False, getattr(obj, 'line', 0)) for obj in program.objects]
-        all_items.extend([(room, True, getattr(room, 'line', 0)) for room in program.rooms])
-        # Sort by line number to get original definition order
-        all_items.sort(key=lambda x: x[2])
-
-        # Handle ORDER-OBJECTS? directive
-        order_objects_mode = getattr(program, 'order_objects', None)
-        if order_objects_mode == 'ROOMS-FIRST':
-            # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
-            # Both rooms and objects are in definition order (not reverse)
-            rooms_list = [(o, r, l) for o, r, l in all_items if r]
-            objs_list = [(o, r, l) for o, r, l in all_items if not r]
-            # Rooms first (lowest numbers), then objects, all in definition order
-            all_items = rooms_list + objs_list
-
-        # Assign object numbers
-        total_objects = len(all_items)
-        for i, (item, _, _) in enumerate(all_items):
-            if order_objects_mode == 'ROOMS-FIRST':
-                # Forward numbering: first in list = lowest number
-                objects[item.name] = i + 1
-            else:
-                # Reverse: last defined = lowest number
-                objects[item.name] = total_objects - i
+        # Uses ZILF-compatible mention order algorithm
+        objects = self._compute_object_ordering(program)
 
         return {
             'flags': flags,
@@ -3455,38 +3556,16 @@ class ZILCompiler:
 
             return props
 
-        # Build object name -> number mapping first (objects are 1-indexed)
+        # Build object name -> number mapping using ZILF-compatible ordering
         # Rooms and objects share the same number space
-        # ZILF numbers objects in reverse definition order (last defined = lowest number)
-        # Combine objects and rooms, sort by source line to get original interleaved order
-        all_items = [(obj.name, obj, False, getattr(obj, 'line', 0)) for obj in program.objects]
-        all_items.extend([(room.name, room, True, getattr(room, 'line', 0)) for room in program.rooms])
-        # Sort by line number to get original definition order
-        all_items.sort(key=lambda x: x[3])
+        obj_name_to_num = self._compute_object_ordering(program)
 
-        # Handle ORDER-OBJECTS? directive
-        order_objects_mode = getattr(program, 'order_objects', None)
-        if order_objects_mode == 'ROOMS-FIRST':
-            # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
-            # Both rooms and objects are in definition order (not reverse)
-            rooms_list = [(n, o, r, l) for n, o, r, l in all_items if r]
-            objs_list = [(n, o, r, l) for n, o, r, l in all_items if not r]
-            # Rooms first (lowest numbers), then objects, all in definition order
-            all_items = rooms_list + objs_list
-
+        # Build list of all objects for iteration
         all_objects = []  # List of (name, node, is_room)
-        obj_name_to_num = {}
-        total_objects = len(all_items)
-
-        for i, (name, node, is_room, _) in enumerate(all_items):
-            if order_objects_mode == 'ROOMS-FIRST':
-                # Forward numbering: first in list = lowest number
-                obj_num = i + 1
-            else:
-                # Reverse: first defined (low line) gets high number, last defined gets low number
-                obj_num = total_objects - i
-            obj_name_to_num[name] = obj_num
-            all_objects.append((name, node, is_room))
+        for obj in program.objects:
+            all_objects.append((obj.name, obj, False))
+        for room in program.rooms:
+            all_objects.append((room.name, room, True))
 
         self.log(f"  {len(all_objects)} objects/rooms total")
 
