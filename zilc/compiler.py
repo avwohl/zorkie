@@ -1865,16 +1865,22 @@ class ZILCompiler:
         order_objects_mode = getattr(program, 'order_objects', None)
         if order_objects_mode == 'ROOMS-FIRST':
             # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
-            # Since we number in reverse (last in list = lowest number), rooms go at END of list
+            # Both rooms and objects are in definition order (not reverse)
             rooms_list = [(n, o, r, l) for n, o, r, l in all_items if r]
             objs_list = [(n, o, r, l) for n, o, r, l in all_items if not r]
-            all_items = objs_list + list(reversed(rooms_list))
+            # Rooms first (lowest numbers), then objects, all in definition order
+            all_items = rooms_list + objs_list
 
-        # Assign object numbers (reverse order: last defined = lowest number)
+        # Assign object numbers
         total_objects = len(all_items)
         obj_name_to_num = {}
         for i, (name, node, is_room, _) in enumerate(all_items):
-            obj_num = total_objects - i
+            if order_objects_mode == 'ROOMS-FIRST':
+                # Forward numbering: first in list = lowest number
+                obj_num = i + 1
+            else:
+                # Reverse: last defined = lowest number
+                obj_num = total_objects - i
             obj_name_to_num[name] = obj_num
 
         # Sort by object number (same order as extract_properties is called)
@@ -1950,16 +1956,21 @@ class ZILCompiler:
         order_objects_mode = getattr(program, 'order_objects', None)
         if order_objects_mode == 'ROOMS-FIRST':
             # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
-            # Since we number in reverse (last in list = lowest number), rooms go at END of list
+            # Both rooms and objects are in definition order (not reverse)
             rooms_list = [(o, r, l) for o, r, l in all_items if r]
             objs_list = [(o, r, l) for o, r, l in all_items if not r]
-            all_items = objs_list + list(reversed(rooms_list))
+            # Rooms first (lowest numbers), then objects, all in definition order
+            all_items = rooms_list + objs_list
 
-        # Assign numbers in reverse order (last defined = lowest number)
+        # Assign object numbers
         total_objects = len(all_items)
         for i, (item, _, _) in enumerate(all_items):
-            # Reverse: first defined (low line) gets high number, last defined gets low number
-            objects[item.name] = total_objects - i
+            if order_objects_mode == 'ROOMS-FIRST':
+                # Forward numbering: first in list = lowest number
+                objects[item.name] = i + 1
+            else:
+                # Reverse: last defined = lowest number
+                objects[item.name] = total_objects - i
 
         return {
             'flags': flags,
@@ -3437,19 +3448,23 @@ class ZILCompiler:
         order_objects_mode = getattr(program, 'order_objects', None)
         if order_objects_mode == 'ROOMS-FIRST':
             # ROOMS-FIRST means rooms get lower object numbers (appear first in object table)
-            # Since we number in reverse (last in list = lowest number), rooms go at END of list
-            # Rooms are also reversed so first-defined room gets lowest number
+            # Both rooms and objects are in definition order (not reverse)
             rooms_list = [(n, o, r, l) for n, o, r, l in all_items if r]
             objs_list = [(n, o, r, l) for n, o, r, l in all_items if not r]
-            all_items = objs_list + list(reversed(rooms_list))
+            # Rooms first (lowest numbers), then objects, all in definition order
+            all_items = rooms_list + objs_list
 
         all_objects = []  # List of (name, node, is_room)
         obj_name_to_num = {}
         total_objects = len(all_items)
 
         for i, (name, node, is_room, _) in enumerate(all_items):
-            # Reverse: first defined (low line) gets high number, last defined gets low number
-            obj_num = total_objects - i
+            if order_objects_mode == 'ROOMS-FIRST':
+                # Forward numbering: first in list = lowest number
+                obj_num = i + 1
+            else:
+                # Reverse: first defined (low line) gets high number, last defined gets low number
+                obj_num = total_objects - i
             obj_name_to_num[name] = obj_num
             all_objects.append((name, node, is_room))
 
