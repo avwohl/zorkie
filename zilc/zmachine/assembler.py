@@ -591,6 +591,7 @@ class ZAssembler:
                         abbreviations_table=None, string_table=None,
                         table_data: bytes = b'',
                         table_offsets: dict = None,
+                        tables_with_placeholders: list = None,
                         routine_fixups: list = None,
                         table_routine_fixups: list = None,
                         extension_table: bytes = b'',
@@ -611,6 +612,7 @@ class ZAssembler:
             string_table: StringTable instance (optional, for deduplication)
             table_data: TABLE/LTABLE/ITABLE data (optional)
             table_offsets: Dict mapping table index to offset within table_data
+            tables_with_placeholders: List of (start, end) byte ranges containing table address placeholders
             routine_fixups: List of (code_offset, routine_offset) for call address patching
             table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
             extension_table: Header extension table bytes (V5+)
@@ -626,6 +628,10 @@ class ZAssembler:
         # Initialize table_offsets if not provided
         if table_offsets is None:
             table_offsets = {}
+
+        # Initialize tables_with_placeholders if not provided
+        if tables_with_placeholders is None:
+            tables_with_placeholders = []
 
         # Start with header
         story = self.create_header()
@@ -818,6 +824,22 @@ class ZAssembler:
                 table_data = self._resolve_table_vocab_placeholders(
                     table_data, vocab_fixups, dict_addr_for_tables
                 )
+
+            # Resolve table address placeholders within VERBS table data
+            # (VERBS table contains pointers to syntax entry tables)
+            # Only apply to tables known to contain placeholders to avoid corrupting
+            # user data that happens to contain 0xFF bytes
+            if table_offsets and tables_with_placeholders:
+                # Only resolve for tables that explicitly contain placeholders
+                for table_start, table_end in tables_with_placeholders:
+                    if table_start < len(table_data):
+                        segment = bytearray(table_data[table_start:table_end])
+                        segment = self._resolve_table_placeholders(
+                            segment, table_base_addr, table_offsets, dict_addr_for_tables
+                        )
+                        table_data = bytearray(table_data)
+                        table_data[table_start:table_end] = segment
+                        table_data = bytes(table_data)
 
             # Track table data position for later string placeholder resolution
             table_data_start = len(story)

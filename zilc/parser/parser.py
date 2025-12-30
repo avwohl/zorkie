@@ -1063,11 +1063,17 @@ class Parser:
         Supports verb synonyms in parentheses after the verb:
         <SYNTAX TOSS (CHUCK) OBJECT AT OBJECT = V-TOSS>
         creates synonyms CHUCK -> TOSS
+
+        Supports scope flags after OBJECT:
+        <SYNTAX FOO OBJECT (HAVE) = V-FOO>
+        <SYNTAX BAR OBJECT (HAVE OPTIONAL) = V-BAR>
         """
-        # <SYNTAX verb [(synonym ...)] object-type ... = V-ROUTINE>
+        # <SYNTAX verb [(synonym ...)] OBJECT [(flags...)] ... = V-ROUTINE>
 
         pattern = []
         verb_synonyms = []
+        object_flags = []  # List of flag lists, one per OBJECT
+        last_was_object = False
 
         # Parse pattern until =
         while self.current_token.type != TokenType.ATOM or self.current_token.value != "=":
@@ -1075,7 +1081,13 @@ class Parser:
                 self.error("Expected = in SYNTAX")
 
             if self.current_token.type == TokenType.ATOM:
+                atom_val = self.current_token.value.upper()
                 pattern.append(self.current_token.value)
+                # Track if this is OBJECT for scope flag parsing
+                last_was_object = (atom_val == 'OBJECT')
+                if last_was_object:
+                    # Add empty flags list for this object, may be filled by following parens
+                    object_flags.append([])
                 self.advance()
             elif self.current_token.type == TokenType.LPAREN:
                 # Check if this is verb synonyms (right after verb, before OBJECT)
@@ -1090,7 +1102,7 @@ class Parser:
                     while self.current_token.type != TokenType.RPAREN:
                         if self.current_token.type == TokenType.ATOM:
                             # Check if this looks like object spec keywords
-                            if self.current_token.value.upper() in ('FIND', 'HAVE', 'MANY', 'TAKE', 'HELD', 'CARRIED', 'ON-GROUND', 'IN-ROOM'):
+                            if self.current_token.value.upper() in ('FIND', 'HAVE', 'MANY', 'TAKE', 'HELD', 'CARRIED', 'ON-GROUND', 'IN-ROOM', 'OPTIONAL', 'STANDARD'):
                                 is_verb_synonyms = False
                                 break
                             synonyms.append(self.current_token.value)
@@ -1117,8 +1129,25 @@ class Parser:
                             elif self.current_token.type == TokenType.EOF:
                                 self.error("Unclosed parenthesis in SYNTAX")
                             self.advance()
+                elif last_was_object and object_flags:
+                    # Scope flags after OBJECT - capture them
+                    self.advance()  # Skip LPAREN
+                    flags = []
+                    while self.current_token.type != TokenType.RPAREN:
+                        if self.current_token.type == TokenType.ATOM:
+                            flags.append(self.current_token.value.upper())
+                            self.advance()
+                        elif self.current_token.type == TokenType.EOF:
+                            self.error("Unclosed parenthesis in SYNTAX")
+                        else:
+                            # Skip non-atom tokens (like FIND with bit names)
+                            self.advance()
+                    # Update the last object's flags
+                    object_flags[-1] = flags
+                    self.advance()  # Skip RPAREN
+                    last_was_object = False
                 else:
-                    # Object specification forms like (FIND ACTORBIT) (HAVE)
+                    # Other parenthetical forms - skip
                     paren_depth = 0
                     while True:
                         if self.current_token.type == TokenType.LPAREN:
@@ -1131,6 +1160,7 @@ class Parser:
                         elif self.current_token.type == TokenType.EOF:
                             self.error("Unclosed parenthesis in SYNTAX")
                         self.advance()
+                    last_was_object = False
             else:
                 self.error("Expected atom or form in SYNTAX pattern")
 
@@ -1181,7 +1211,7 @@ class Parser:
         # Join routine parts with space so compiler can split them
         routine = ' '.join(routine_parts)
 
-        return SyntaxNode(pattern, routine, verb_synonyms, line, col)
+        return SyntaxNode(pattern, routine, verb_synonyms, object_flags, line, col)
 
     def parse_global(self, line: int, col: int) -> GlobalNode:
         """Parse GLOBAL definition."""

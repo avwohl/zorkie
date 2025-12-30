@@ -213,18 +213,23 @@ class SyntaxNode(ASTNode):
         pattern: List of words in the syntax pattern (e.g., ['TOSS', 'OBJECT', 'AT', 'OBJECT'])
         routine: Action routine specification (e.g., 'V-TOSS PRE-TOSS')
         verb_synonyms: List of verb synonyms (e.g., ['CHUCK'] for <SYNTAX TOSS (CHUCK) ...>)
+        object_flags: List of scope flag lists for each OBJECT in pattern
+                      e.g., [['HAVE'], ['MANY']] for two OBJECTs with different flags
     """
     def __init__(self, pattern: List[Any] = None, routine: str = "",
                  verb_synonyms: List[str] = None,
+                 object_flags: List[List[str]] = None,
                  line: int = 0, column: int = 0):
         super().__init__(NodeType.SYNTAX, line, column)
         self.pattern = pattern or []
         self.routine = routine
         self.verb_synonyms = verb_synonyms or []
+        self.object_flags = object_flags or []
 
     def __repr__(self):
         syns = f" ({', '.join(self.verb_synonyms)})" if self.verb_synonyms else ""
-        return f"Syntax({self.pattern}{syns} = {self.routine})"
+        flags = f" flags={self.object_flags}" if self.object_flags else ""
+        return f"Syntax({self.pattern}{syns} = {self.routine}{flags})"
 
 
 class CondNode(ASTNode):

@@ -285,6 +285,26 @@ class ZILCompiler:
             self.log(f"  Global: {var_name} = {self.compile_globals.get(var_name)}")
             return match.group(0)  # Keep the SET/SETG in source
 
+        # Handle SETG NEW-SFLAGS specially - it has a vector value
+        # Format: <SETG NEW-SFLAGS ["FLAG1" ,CONST1 "FLAG2" ,CONST2 ...]>
+        def extract_new_sflags(match):
+            vector_content = match.group(1)
+            # Parse the vector: alternating "FLAG" ,CONSTANT pairs
+            # Extract strings and constant refs
+            new_sflags = {}
+            # Find all "string" ,CONSTANT pairs
+            pair_pattern = r'"([^"]+)"\s+,([A-Z0-9\-]+)'
+            for pair_match in re.finditer(pair_pattern, vector_content, re.IGNORECASE):
+                flag_name = pair_match.group(1).upper()
+                const_name = pair_match.group(2).upper()
+                new_sflags[flag_name] = const_name
+            self.compile_globals['NEW-SFLAGS'] = new_sflags
+            self.log(f"  NEW-SFLAGS: {new_sflags}")
+            return match.group(0)  # Keep in source
+
+        new_sflags_pattern = r'<\s*SETG\s+NEW-SFLAGS\s+\[([^\]]*)\]\s*>'
+        source = re.sub(new_sflags_pattern, extract_new_sflags, source, flags=re.IGNORECASE)
+
         # Handle SETG
         # Variable names can include MDL special suffixes like !- (unbind)
         # Value can be: integer, T, <>, character literal (!\X), or quoted string ("text")
@@ -2019,13 +2039,15 @@ class ZILCompiler:
                     action_num_to_preaction[action_num] = None
                     action_num += 1
 
-            # Get or create action number for this routine
+            # Each verb word gets its own action number for syntax table lookup
+            # The action routine may be shared by multiple actions
+            current_action_num = action_num
+            action_num_to_routine[action_num] = action_routine
+            action_num_to_preaction[action_num] = preaction_routine
+
+            # Track first action number for each routine (for legacy lookups)
             if action_routine and action_routine not in actions:
                 actions[action_routine] = action_num
-                action_num_to_routine[action_num] = action_routine
-                # Store first preaction for this action (may be None)
-                action_num_to_preaction[action_num] = preaction_routine
-                current_action_num = action_num
 
                 # Create ACT?ACTION and V?ACTION constants from action routine name
                 # E.g., V-WALK -> ACT?WALK and V?WALK, V-ALARM -> ACT?ALARM and V?ALARM
@@ -2039,13 +2061,10 @@ class ZILCompiler:
                     if v_const_name not in verb_constants:
                         verb_constants[v_const_name] = action_num
 
-                action_num += 1
-            else:
-                current_action_num = actions.get(action_routine, 0)
+            action_num += 1
 
             # Always create V?VERB and ACT?VERB constants from verb pattern
-            # This ensures each verb word (FOO, BAR, BAZ) gets its own ACT?VERB constant
-            # even when they share the same action routine (V-DUMMY)
+            # Each verb word gets its own action number for proper syntax entry lookup
             if action_routine and syntax_def.pattern:
                 verb_word = syntax_def.pattern[0]
                 if isinstance(verb_word, str):
@@ -2196,6 +2215,28 @@ class ZILCompiler:
                         # Non-removed synonym shares main verb's number
                         verb_numbers[syn_upper] = main_verb_num
 
+        # Build syntax_entries with scope flags for VERBS table generation
+        # Each entry: (verb_word, action_num, object_flags)
+        syntax_entries = []
+        for syntax_def in program.syntax:
+            if not syntax_def.pattern or not syntax_def.routine:
+                continue
+            verb_word = syntax_def.pattern[0] if syntax_def.pattern else None
+            if not verb_word or not isinstance(verb_word, str):
+                continue
+            verb_upper = verb_word.upper()
+            # Get action number for this verb
+            action_num = verb_constants.get(f'V?{verb_upper}', 0)
+            if action_num == 0:
+                action_num = verb_constants.get(f'ACT?{verb_upper}', 0)
+            # Get object flags from syntax definition
+            object_flags = syntax_def.object_flags if hasattr(syntax_def, 'object_flags') else []
+            syntax_entries.append({
+                'verb': verb_upper,
+                'action_num': action_num,
+                'object_flags': object_flags,
+            })
+
         # Store for later use during code generation
         self._action_table = {
             'actions': [(num, name) for name, num in sorted(actions.items(), key=lambda x: x[1])],
@@ -2210,6 +2251,8 @@ class ZILCompiler:
             # Verb number mappings for VTBL lookup
             'verb_numbers': verb_numbers,  # verb_word -> verb_number (255, 254, ...)
             'verb_word_order': verb_word_order,  # ordered list of verb words
+            # Syntax entries with scope flags for VERBS table
+            'syntax_entries': syntax_entries,
         }
 
         return self._action_table
@@ -2482,6 +2525,7 @@ class ZILCompiler:
         # Get table data and offsets
         table_data = codegen.get_table_data() if codegen.tables else b''
         table_offsets = codegen.get_table_offsets() if codegen.tables else {}
+        tables_with_placeholders = codegen.get_tables_with_placeholders() if codegen.tables else []
         if table_data:
             self.log(f"  {len(codegen.tables)} tables ({len(table_data)} bytes)")
 
@@ -3652,6 +3696,7 @@ class ZILCompiler:
             string_table=string_table,
             table_data=table_data,
             table_offsets=table_offsets,
+            tables_with_placeholders=tables_with_placeholders,
             routine_fixups=routine_fixups,
             table_routine_fixups=table_routine_fixups,
             extension_table=extension_table,

@@ -898,6 +898,10 @@ class ImprovedCodeGenerator:
         if 'prepositions' in self.action_table and self.action_table['prepositions']:
             self.globals['PREPOSITIONS'] = self.next_global
             self.next_global += 1
+        # Reserve VERBS global for syntax entries with options bytes
+        if 'syntax_entries' in self.action_table and self.action_table['syntax_entries']:
+            self.globals['VERBS'] = self.next_global
+            self.next_global += 1
 
     def _compile_global_table_node(self, global_name: str, table_node: 'TableNode'):
         """Compile a TableNode initial value for a global.
@@ -1800,6 +1804,141 @@ class ImprovedCodeGenerator:
             # Link PREPOSITIONS global to the table (global was reserved in _setup_action_table_globals)
             if 'PREPOSITIONS' in self.globals:
                 self.global_values['PREPOSITIONS'] = 0xFF00 | table_index
+
+        # Generate VERBS table with syntax entries and options bytes
+        self._generate_verbs_table()
+
+    def _generate_verbs_table(self):
+        """Generate VERBS table with syntax entries for each action.
+
+        The VERBS table is indexed by (255 - action_num) and points to
+        syntax entry structures. Each syntax entry has options byte at offset 6.
+        """
+        if not self.action_table or 'syntax_entries' not in self.action_table:
+            return
+
+        syntax_entries = self.action_table['syntax_entries']
+        if not syntax_entries:
+            return
+
+        # Reserve VERBS global
+        if 'VERBS' not in self.globals:
+            self.globals['VERBS'] = self.next_global
+            self.next_global += 1
+
+        # Get NEW-SFLAGS mapping if available
+        new_sflags = {}
+        if self.compiler and hasattr(self.compiler, 'compile_globals'):
+            new_sflags = self.compiler.compile_globals.get('NEW-SFLAGS', {})
+
+        # Get constant values for NEW-SFLAGS lookups
+        sflags_values = {}
+        for flag_name, const_name in new_sflags.items():
+            # Look up constant value
+            if const_name in self.constants:
+                sflags_values[flag_name] = self.constants[const_name]
+
+        # Built-in scope flag values
+        SEARCH_DO_TAKE = 1
+        SEARCH_MUST_HAVE = 2
+        SEARCH_MANY = 4
+        SEARCH_STANDARD = 8
+
+        # Group syntax entries by action number
+        action_to_entry = {}
+        for entry in syntax_entries:
+            action_num = entry['action_num']
+            if action_num not in action_to_entry:
+                action_to_entry[action_num] = entry
+            # Keep first entry for each action
+
+        if not action_to_entry:
+            return
+
+        max_action = max(action_to_entry.keys())
+
+        # Create individual syntax entry tables for each action
+        # Then create VERBS as a table of pointers
+        entry_table_indices = {}  # action_num -> table_index
+
+        for action_num in sorted(action_to_entry.keys()):
+            entry = action_to_entry[action_num]
+            object_flags = entry.get('object_flags', [])
+
+            # Build the syntax entry table
+            # Format: [word0, word1, word2, options_byte, ...]
+            # Byte 6 is the options byte (offset 6 from start)
+            entry_data = bytearray()
+
+            # Words 0-2: verb pointer, obj1 flags, obj2 flags (6 bytes)
+            entry_data.extend([0x00, 0x00])  # verb pointer (unused here)
+            entry_data.extend([0x00, 0x00])  # obj1 flags
+            entry_data.extend([0x00, 0x00])  # obj2 flags
+
+            # Byte 6: options byte - computed from scope flags
+            options = 0
+            has_new_sflag = False
+
+            # Get first object's flags (slot 1 options)
+            slot1_flags = object_flags[0] if object_flags else []
+
+            for flag in slot1_flags:
+                flag_upper = flag.upper()
+                if flag_upper in sflags_values:
+                    # NEW-SFLAGS custom flag
+                    options |= sflags_values[flag_upper]
+                    has_new_sflag = True
+                elif flag_upper == 'HAVE':
+                    options |= SEARCH_MUST_HAVE
+                elif flag_upper == 'TAKE':
+                    options |= SEARCH_DO_TAKE
+                elif flag_upper == 'MANY':
+                    options |= SEARCH_MANY
+
+            # If no NEW-SFLAGS custom flag was used, default is SEARCH-STANDARD
+            # But only if we have any flags at all
+            if slot1_flags and not has_new_sflag:
+                options |= SEARCH_STANDARD
+
+            entry_data.append(options & 0xFF)
+
+            # Padding to make entry 8 bytes (common format)
+            entry_data.append(0x00)
+
+            # Register this entry table
+            table_index = len(self.tables)
+            self.table_offsets[table_index] = self._table_data_size
+            self._table_data_size += len(entry_data)
+
+            table_name = f'_SYNTAX_ENTRY_{action_num}'
+            self.tables.append((table_name, bytes(entry_data), True))
+            entry_table_indices[action_num] = table_index
+
+        # Now build VERBS table: array of pointers indexed by (255 - action_num)
+        # VERBS[255 - action_num] = pointer to syntax entry
+        verbs_data = bytearray()
+
+        for i in range(256):
+            action_num = 255 - i
+            if action_num in entry_table_indices:
+                # Use table placeholder format (0xFF00 | index)
+                table_idx = entry_table_indices[action_num]
+                placeholder = 0xFF00 | table_idx
+                verbs_data.append((placeholder >> 8) & 0xFF)
+                verbs_data.append(placeholder & 0xFF)
+            else:
+                # No syntax entry for this action
+                verbs_data.extend([0x00, 0x00])
+
+        # Register VERBS table
+        table_index = len(self.tables)
+        self.table_offsets[table_index] = self._table_data_size
+        self._table_data_size += len(verbs_data)
+
+        self.tables.append(("_VERBS", bytes(verbs_data), True))
+
+        # Link VERBS global to the table
+        self.global_values['VERBS'] = 0xFF00 | table_index
 
     def generate_long_word_table(self, long_words: List[str]):
         """Generate LONG-WORD-TABLE for words exceeding dictionary length limit.
@@ -19162,6 +19301,25 @@ class ImprovedCodeGenerator:
             Dict mapping table index to offset within table data block
         """
         return self.table_offsets.copy()
+
+    def get_tables_with_placeholders(self) -> List[Tuple[int, int]]:
+        """Get byte ranges in table data that contain table address placeholders.
+
+        Tables like _VERBS contain 0xFF00 | table_idx placeholders that need to
+        be resolved to actual addresses. Other tables may contain user data with
+        0xFF bytes that should NOT be treated as placeholders.
+
+        Returns:
+            List of (start, end) byte offsets within combined table data
+        """
+        result = []
+        offset = 0
+        for table_name, data, is_pure in self.tables:
+            # Only _VERBS table contains table address placeholders
+            if table_name == '_VERBS':
+                result.append((offset, offset + len(data)))
+            offset += len(data)
+        return result
 
     def get_tchars_table_idx(self) -> Optional[int]:
         """Get the table index for TCHARS constant, if defined.

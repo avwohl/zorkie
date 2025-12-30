@@ -77,7 +77,6 @@ class TestSyntaxVerbSynonyms:
 class TestNewSflags:
     """Tests for NEW-SFLAGS scope flags."""
 
-    @pytest.mark.xfail(reason="NEW-SFLAGS not implemented")
     def test_new_sflags_defines_new_scope_flags(self):
         """Test NEW-SFLAGS defines new scope flags."""
         AssertGlobals(
