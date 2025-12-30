@@ -3136,6 +3136,8 @@ class ImprovedCodeGenerator:
             return self.gen_putw2(form.operands)
         elif op_name == 'LOWCORE':
             return self.gen_lowcore(form.operands)
+        elif op_name == 'LOWCORE-TABLE':
+            return self.gen_lowcore_table(form.operands)
         elif op_name == 'SCREEN-HEIGHT':
             return self.gen_screen_height(form.operands)
         elif op_name == 'SCREEN-WIDTH':
@@ -9784,6 +9786,132 @@ class ImprovedCodeGenerator:
                 code.append(0x00)  # Store to stack
 
         return bytes(code)
+
+    def gen_lowcore_table(self, operands: List[ASTNode]) -> bytes:
+        """Generate LOWCORE-TABLE (iterate over header bytes calling handler).
+
+        <LOWCORE-TABLE field length handler> iterates over header bytes,
+        calling handler with each byte value.
+
+        Args:
+            operands[0]: Header field name (e.g., ZVERSION)
+            operands[1]: Number of bytes to iterate
+            operands[2]: Handler routine name
+
+        Returns:
+            bytes: Z-machine code that loops over header bytes
+        """
+        if len(operands) < 3:
+            return b''
+
+        code = bytearray()
+
+        # Get field offset
+        field_offset = 0
+        if isinstance(operands[0], AtomNode):
+            name = operands[0].value.upper() if hasattr(operands[0].value, 'upper') else str(operands[0].value)
+            if name in self.LOWCORE_HEADER:
+                field_offset = self.LOWCORE_HEADER[name]
+
+        # Get length
+        length = 1
+        if isinstance(operands[1], NumberNode):
+            length = operands[1].value
+        elif isinstance(operands[1], FormNode):
+            # Evaluate macro/form to get value
+            inner_code = self.generate_form(operands[1])
+            # If the form evaluates to a constant, try to extract it
+            # For now, assume it's evaluable at compile time
+            length = self._try_eval_constant(operands[1])
+            if length is None:
+                length = 1
+
+        # Get handler routine name
+        handler_name = None
+        if isinstance(operands[2], AtomNode):
+            handler_name = operands[2].value
+
+        if handler_name is None:
+            return b''
+
+        # Generate loop:
+        # STORE tmp, field_offset
+        # LOOP:
+        #   CALL handler (GETB 0 tmp)
+        #   INC_CHK tmp, (field_offset + length - 1) ?~LOOP
+        #
+        # We need a temp local. Use the stack cleverly:
+        # 1. Push starting offset to stack
+        # 2. Loop: GETB 0 (stack peek), call handler, INC_CHK stack
+
+        # Use a label for the loop
+        loop_label = f"LOWCORE_TABLE_{self.label_counter}"
+        end_label = f"LOWCORE_TABLE_END_{self.label_counter}"
+        self.label_counter += 1
+
+        # STORE stack, field_offset (push initial offset)
+        code.append(0x0D)  # STORE 2OP
+        code.append(0x00)  # Variable 0 = stack (push)
+        code.append(field_offset)
+
+        # Mark loop start
+        loop_offset = len(code)
+
+        # GETB 0, (stack) -> stack
+        # This reads memory[0 + stack_top] and pushes result
+        # First we need to peek the stack value
+        # Use LOAD to get stack value, then GETB
+
+        # Unroll the loop for small lengths
+        # Since length is typically small (1-4), just emit the handler for each byte
+
+        for i in range(length):
+            # Create a synthetic form: <handler <GETB 0 offset>>
+            # Build the GETB form
+            getb_form = FormNode([
+                AtomNode('GETB'),
+                NumberNode(0),
+                NumberNode(field_offset + i)
+            ])
+
+            # Build the handler form: <handler <GETB 0 offset>>
+            handler_form = FormNode([
+                AtomNode(handler_name),
+                getb_form
+            ])
+
+            # Generate code for the handler form
+            handler_code = self.generate_form(handler_form)
+            code.extend(handler_code)
+
+        # Clean up the stack from the initial push
+        # POP (INC stack to discard)
+        code.append(0xA5)  # INC 1OP var
+        code.append(0x00)  # Variable 0 = stack
+
+        return bytes(code)
+
+    def _try_eval_constant(self, node: ASTNode) -> Optional[int]:
+        """Try to evaluate a node as a compile-time constant."""
+        if isinstance(node, NumberNode):
+            return node.value
+        elif isinstance(node, AtomNode):
+            name = node.value
+            if name in self.constants:
+                return self.constants[name]
+        elif isinstance(node, FormNode):
+            # Try to evaluate simple forms
+            if node.operands:
+                op_name = None
+                if isinstance(node.operands[0], AtomNode):
+                    op_name = node.operands[0].value.upper()
+                # Handle macro expansion - look for the macro definition
+                if op_name and op_name in self.macros:
+                    # Simplified: if macro body is just a number, return it
+                    macro_def = self.macros[op_name]
+                    if hasattr(macro_def, 'body') and isinstance(macro_def.body, NumberNode):
+                        return macro_def.body.value
+        return None
 
     def gen_screen_height(self, operands: List[ASTNode]) -> bytes:
         """Generate SCREEN-HEIGHT (get screen height in lines).

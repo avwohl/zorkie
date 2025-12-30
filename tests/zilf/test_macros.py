@@ -102,7 +102,6 @@ class TestMacrosReturningConstants:
             .with_global('<DEFMAC FOO () "hello world">') \
             .outputs("hello world\n")
 
-    @pytest.mark.xfail(reason="LOWCORE-TABLE not implemented")
     def test_macros_returning_constants_can_be_used_in_lowcore_table(self):
         """Test macros returning numeric constants work in LOWCORE-TABLE."""
         AssertRoutine("", "<LOWCORE-TABLE ZVERSION <FOO> PRINTN>") \
