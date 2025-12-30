@@ -741,7 +741,7 @@ class RoutineAssertion:
         except Exception as e:
             pytest.fail(f"Compilation threw an exception: {e}")
 
-    def gives_number(self, expected: str) -> None:
+    def gives_number(self, expected) -> None:
         """Assert that the routine returns a specific number."""
         compiler = self._get_compiler()
         result = compiler.compile_routine(self.args, self.body, self.call_args)
@@ -756,7 +756,7 @@ class RoutineAssertion:
             # Extract just the last line to get the return value
             lines = exec_result.output.strip().split('\n')
             actual = lines[-1] if lines else ""
-            assert actual == expected, \
+            assert actual == str(expected), \
                 f"Expected {expected}, got {actual}"
 
     def outputs(self, expected: str) -> None:

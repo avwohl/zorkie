@@ -5695,6 +5695,13 @@ class ImprovedCodeGenerator:
                 # For now, emit 0 as placeholder
                 self._warn(f"Unknown action constant '{node.name}' - using default")
                 return (1, 0)
+            elif node.name in self.locals:
+                # ZIL quirk: GVAL with local - should be .X but ,X also works
+                self._warn(f"ZIL0205: no such global variable '{node.name}', using the local instead")
+                # Mark local as used
+                if hasattr(self, 'used_locals'):
+                    self.used_locals.add(node.name)
+                return (2, self.locals[node.name])
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (2, 0x10)
@@ -5745,6 +5752,13 @@ class ImprovedCodeGenerator:
                     return (1, const_val)
                 else:
                     return (0, const_val)
+            elif node.name in self.locals:
+                # ZIL quirk: GVAL with local - should be .X but ,X also works
+                self._warn(f"ZIL0205: no such global variable '{node.name}', using the local instead")
+                # Mark local as used
+                if hasattr(self, 'used_locals'):
+                    self.used_locals.add(node.name)
+                return (2, self.locals[node.name])
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (2, 0x10)
@@ -5815,6 +5829,13 @@ class ImprovedCodeGenerator:
                 # ACT?* action constant - should be in constants
                 self._warn(f"Unknown action constant '{node.name}' - using default")
                 return (0, 0)
+            elif node.name in self.locals:
+                # ZIL quirk: GVAL with local - should be .X but ,X also works
+                self._warn(f"ZIL0205: no such global variable '{node.name}', using the local instead")
+                # Mark local as used
+                if hasattr(self, 'used_locals'):
+                    self.used_locals.add(node.name)
+                return (1, self.locals[node.name])
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (1, 0x10)  # Default to variable 0x10
@@ -5850,6 +5871,13 @@ class ImprovedCodeGenerator:
                 return (0, self.objects[node.name])
             elif node.name in self.constants:
                 return (0, self.constants[node.name])
+            elif node.name in self.locals:
+                # ZIL quirk: GVAL with local - should be .X but ,X also works
+                self._warn(f"ZIL0205: no such global variable '{node.name}', using the local instead")
+                # Mark local as used
+                if hasattr(self, 'used_locals'):
+                    self.used_locals.add(node.name)
+                return (1, self.locals[node.name])
             else:
                 self._warn(f"Unknown global/object '{node.name}' - using default")
                 return (1, 0x10)

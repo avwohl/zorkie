@@ -28,7 +28,6 @@ from .conftest import AssertRoutine
 class TestGVALLVALQuirks:
     """Tests for GVAL/LVAL quirk handling."""
 
-    @pytest.mark.xfail(reason="GVAL/LVAL quirk handling not implemented")
     def test_gval_with_local(self):
         """Test that GVAL with local variable produces correct result with warning.
 
@@ -39,7 +38,6 @@ class TestGVALLVALQuirks:
             .with_warnings() \
             .gives_number(5)
 
-    @pytest.mark.xfail(reason="GVAL/LVAL quirk handling not implemented")
     def test_lval_with_global(self):
         """Test that LVAL with global variable produces correct result with warning.
 
