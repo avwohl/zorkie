@@ -11,13 +11,18 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 653 passed, 0 failed, 20 xfailed
+- **Tests:** 654 passed, 0 failed, 19 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-31)
+- **NEW-ADD-WORD and WORD-FLAG-TABLE** - NEW-PARSER? vocabulary support:
+  - Added NewAddWordNode AST node for `<NEW-ADD-WORD name type value flags>`
+  - Generates WORD-FLAG-TABLE containing word addresses and flags
+  - Pre-registers WORD-FLAG-TABLE global before code generation
+  - 1 test now passes (test_word_flag_table_should_list_words_and_flags)
 - **Error limits implementation** - Compilation stops after 100 errors:
   - Per-call-site error tracking for undefined routines
   - 101st error is "too many errors" message
@@ -31,12 +36,12 @@ Focus areas for next session:
 - **TABLE PATTERN** - Affects element sizes in table generation (1 test passes)
 - **PARSER-TABLE ordering** - Parser tables come before other pure tables (1 test passes)
 
-## Remaining xfailed tests (20)
+## Remaining xfailed tests (19)
 All remaining xfails require substantial work or depend on external factors:
 - **Interpreter issues (6)**: V7 bugs (2), dfrotz trailing spaces (2), Unicode/Glk (2)
 - **Meta-programming (5)**: PROPSPEC (2), IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE
 - **Custom encodings (4)**: CHRSET (2), LANGUAGE (2)
-- **NEW-PARSER? (3)**: Syntax format, WORD-FLAG-TABLE, synonym pointers
+- **NEW-PARSER? (2)**: Syntax format, synonym pointers
 - **Reader macros (1)**: MAKE-PREFIX-MACRO
 - **LANGUAGE lexing (1)**: German character handling
 
@@ -381,11 +386,11 @@ All remaining xfails require substantial work or depend on external factors:
 
 ### Remaining Work
 See "What's Left" section for categorized xfailed tests.
-All 646 passing tests cover basic ZILF functionality.
+All 654 passing tests cover basic ZILF functionality.
 
 ## What's Left
 
-### XFailed Tests (27 remaining)
+### XFailed Tests (19 remaining)
 
 All remaining xfails are for advanced ZILF features not yet implemented:
 
@@ -397,11 +402,10 @@ All remaining xfails are for advanced ZILF features not yet implemented:
 - `test_chrset_should_affect_text_*` (2) - Custom CHRSET encoding
 - `test_language_should_affect_*` (3) - LANGUAGE directive for non-English
 
-**NEW-PARSER Features (4 tests)** - Extended vocabulary format:
-- `test_new_parser_p_should_affect_syntax_format`
-- `test_word_flag_table_should_list_words_and_flags`
-- `test_new_parser_p_synonyms_should_use_pointers`
-- Related vocabulary format tests
+**NEW-PARSER Features (3 tests)** - Extended vocabulary format:
+- `test_new_parser_p_should_affect_syntax_format` - VERB-DATA structure
+- `test_new_parser_p_synonyms_should_use_pointers` - Synonym pointer format
+- `test_language_should_affect_lexing` - LANGUAGE lexing (German ß → ss)
 
 **PROPDEF Advanced Features (6 tests)** - Complex property definitions:
 - `test_propdef_for_directions_can_be_used_for_implicit_directions`
