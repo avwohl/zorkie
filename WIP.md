@@ -11,13 +11,20 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 656 passed, 0 failed, 17 xfailed
+- **Tests:** 657 passed, 0 failed, 16 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-31)
+- **CHRSET custom alphabet support (V5+)** - Custom character set encoding:
+  - Parse `<CHRSET n "alphabet">` directive (n=0,1,2 for A0/A1/A2)
+  - Pass custom alphabets to ZTextEncoder and Dictionary
+  - Build 78-byte alphabet table for story file
+  - Set header 0x34 to point to alphabet table
+  - Interpreter uses alphabet table for Z-text decoding
+  - 1 test now passes (test_chrset_should_affect_text_decoding)
 - **NEW-PARSER? VWORD table generation** - W?* vocabulary word resolution:
   - Fixed gen_get to handle 16-bit W?* vocab placeholders (was truncating to 8 bits)
   - Generate VWORD tables (7 words, 14 bytes) for verbs, NEW-ADD-WORD words, synonyms
@@ -45,11 +52,11 @@ Focus areas for next session:
 - **TABLE PATTERN** - Affects element sizes in table generation (1 test passes)
 - **PARSER-TABLE ordering** - Parser tables come before other pure tables (1 test passes)
 
-## Remaining xfailed tests (17)
+## Remaining xfailed tests (16)
 All remaining xfails require substantial work or depend on external factors:
 - **Interpreter issues (6)**: V7 bugs (2), dfrotz trailing spaces (2), Unicode/Glk (2)
 - **Meta-programming (5)**: PROPSPEC (2), IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE
-- **Custom encodings (4)**: CHRSET (2), LANGUAGE (2)
+- **Custom encodings (3)**: CHRSET encoding (1, needs string constants), LANGUAGE (2)
 - **Reader macros (1)**: MAKE-PREFIX-MACRO
 - **LANGUAGE lexing (1)**: German character handling
 
