@@ -11,13 +11,20 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 657 passed, 0 failed, 16 xfailed
+- **Tests:** 658 passed, 0 failed, 15 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-31)
+- **String constants (`<CONSTANT name "string">`)** - String address constants:
+  - Handle StringNode values in eval_constant
+  - Add string to string_table for encoding
+  - Create 0xFC placeholder for address resolution
+  - Fix _gen_tell_operand_code to handle 16-bit constants
+  - Fix StringTable truthiness checks (`is not None` vs bool)
+  - 1 test now passes (test_chrset_should_affect_text_encoding)
 - **CHRSET custom alphabet support (V5+)** - Custom character set encoding:
   - Parse `<CHRSET n "alphabet">` directive (n=0,1,2 for A0/A1/A2)
   - Pass custom alphabets to ZTextEncoder and Dictionary
@@ -52,11 +59,11 @@ Focus areas for next session:
 - **TABLE PATTERN** - Affects element sizes in table generation (1 test passes)
 - **PARSER-TABLE ordering** - Parser tables come before other pure tables (1 test passes)
 
-## Remaining xfailed tests (16)
+## Remaining xfailed tests (15)
 All remaining xfails require substantial work or depend on external factors:
 - **Interpreter issues (6)**: V7 bugs (2), dfrotz trailing spaces (2), Unicode/Glk (2)
 - **Meta-programming (5)**: PROPSPEC (2), IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE
-- **Custom encodings (3)**: CHRSET encoding (1, needs string constants), LANGUAGE (2)
+- **Custom encodings (2)**: LANGUAGE text/vocab encoding (2)
 - **Reader macros (1)**: MAKE-PREFIX-MACRO
 - **LANGUAGE lexing (1)**: German character handling
 
