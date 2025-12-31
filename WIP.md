@@ -11,17 +11,26 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 670 passed, 0 failed, 3 xfailed
+- **Tests:** 671 passed, 0 failed, 2 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
+- **MAKE-PREFIX-MACRO** now fully working (reader prefix macros like @WORD)
 - **PRE-COMPILE hook** now fully working (symbol introspection and dynamic routine creation)
 - **ROUTINE-REWRITER hook** now fully working
 - **LANGUAGE lexing** now working (German ß character input/vocabulary matching)
 - **Custom TELL macros** now working (arithmetic in macro expansion)
 
 ## Recent Changes (2025-12-31)
+- **MAKE-PREFIX-MACRO reader macros** - Reader-level token transformation:
+  - Updated lexer to handle @ as a prefix character token
+  - Added MAKE-PREFIX-MACRO handling in MDL evaluator
+  - Prefix macros stored in MacroExpander.prefix_macros dictionary
+  - Apply prefix macro transformations during form operand expansion
+  - Added VOC form handling in gen_printb for B operator in TELL
+  - Fixed _make_function to strip type annotations (W:ATOM -> W)
+  - 1 test now passes (test_make_prefix_macro_should_work)
 - **PRE-COMPILE hook and MDL symbol introspection** - Compile-time routine generation:
   - Added AssociationIterator class for MDL ASSOCIATIONS traversal
   - Implemented ASSOCIATIONS to iterate symbol bindings (routines, macros)
