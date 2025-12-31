@@ -231,6 +231,18 @@ class MDLEvaluator:
         elif op_name == 'CHTYPE':
             return self._eval_chtype(operands, env)
 
+        # Arithmetic operators
+        elif op_name == '+':
+            return self._eval_add(operands, env)
+        elif op_name == '-':
+            return self._eval_sub(operands, env)
+        elif op_name == '*':
+            return self._eval_mul(operands, env)
+        elif op_name == '/':
+            return self._eval_div(operands, env)
+        elif op_name == 'MOD':
+            return self._eval_mod(operands, env)
+
         # Unknown form - return as-is (will be processed at runtime)
         return form
 
@@ -852,6 +864,80 @@ class MDLEvaluator:
                     return SpliceResultNode(items, 0, 0)
 
         return value  # Return unchanged if type not recognized
+
+    def _eval_add(self, operands: List[ASTNode], env: Dict[str, Any]) -> int:
+        """Evaluate + (addition)."""
+        result = 0
+        for op in operands:
+            val = self.evaluate(op, env)
+            if isinstance(val, int):
+                result += val
+            elif isinstance(val, NumberNode):
+                result += val.value
+        return result
+
+    def _eval_sub(self, operands: List[ASTNode], env: Dict[str, Any]) -> int:
+        """Evaluate - (subtraction)."""
+        if not operands:
+            return 0
+        first = self.evaluate(operands[0], env)
+        if isinstance(first, NumberNode):
+            first = first.value
+        if not isinstance(first, int):
+            first = 0
+        if len(operands) == 1:
+            return -first  # Unary minus
+        result = first
+        for op in operands[1:]:
+            val = self.evaluate(op, env)
+            if isinstance(val, int):
+                result -= val
+            elif isinstance(val, NumberNode):
+                result -= val.value
+        return result
+
+    def _eval_mul(self, operands: List[ASTNode], env: Dict[str, Any]) -> int:
+        """Evaluate * (multiplication)."""
+        result = 1
+        for op in operands:
+            val = self.evaluate(op, env)
+            if isinstance(val, int):
+                result *= val
+            elif isinstance(val, NumberNode):
+                result *= val.value
+        return result
+
+    def _eval_div(self, operands: List[ASTNode], env: Dict[str, Any]) -> int:
+        """Evaluate / (integer division)."""
+        if len(operands) < 2:
+            return 0
+        first = self.evaluate(operands[0], env)
+        if isinstance(first, NumberNode):
+            first = first.value
+        if not isinstance(first, int):
+            return 0
+        result = first
+        for op in operands[1:]:
+            val = self.evaluate(op, env)
+            if isinstance(val, NumberNode):
+                val = val.value
+            if isinstance(val, int) and val != 0:
+                result //= val
+        return result
+
+    def _eval_mod(self, operands: List[ASTNode], env: Dict[str, Any]) -> int:
+        """Evaluate MOD (modulo)."""
+        if len(operands) < 2:
+            return 0
+        first = self.evaluate(operands[0], env)
+        second = self.evaluate(operands[1], env)
+        if isinstance(first, NumberNode):
+            first = first.value
+        if isinstance(second, NumberNode):
+            second = second.value
+        if isinstance(first, int) and isinstance(second, int) and second != 0:
+            return first % second
+        return 0
 
     def _eval_eval(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate EVAL (compile-time evaluation).
