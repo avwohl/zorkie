@@ -886,6 +886,7 @@ class ZAssembler:
                         table_routine_fixups: list = None,
                         property_routine_fixups: list = None,
                         extension_table: bytes = b'',
+                        alphabet_table: bytes = b'',
                         string_placeholders: dict = None,
                         tell_string_placeholders: dict = None,
                         tell_placeholder_positions: list = None,
@@ -1203,6 +1204,18 @@ class ZAssembler:
                 story.append(0)
                 current_addr += 1
 
+        # Add alphabet table (V5+) in dynamic memory if custom alphabets are used
+        alphabet_table_addr = 0
+        if self.version >= 5 and alphabet_table:
+            alphabet_table_addr = current_addr
+            story.extend(alphabet_table)
+            current_addr += len(alphabet_table)
+
+            # Align to even boundary
+            while len(story) % 2 != 0:
+                story.append(0)
+                current_addr += 1
+
         # Add extension table (V5+) in dynamic memory
         extension_table_addr = 0
         if self.version >= 5:
@@ -1491,6 +1504,10 @@ class ZAssembler:
         struct.pack_into('>H', story, 0x0E, self.static_mem_base)  # Static memory base
         if abbrev_addr > 0:
             struct.pack_into('>H', story, 0x18, abbrev_addr)  # Abbreviations table address
+
+        # V5+ alphabet table address
+        if alphabet_table_addr > 0:
+            struct.pack_into('>H', story, 0x34, alphabet_table_addr)  # Alphabet table address
 
         # V5+ extension table address
         if extension_table_addr > 0:

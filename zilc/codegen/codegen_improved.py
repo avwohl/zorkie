@@ -29,14 +29,18 @@ class ImprovedCodeGenerator:
         crlf_char = '|'
         preserve_spaces = False
         sentence_ends = False
+        custom_alphabets = None
         if compiler and hasattr(compiler, 'compile_globals'):
             crlf_char = compiler.compile_globals.get('CRLF-CHARACTER', '|')
             preserve_spaces = compiler.compile_globals.get('PRESERVE-SPACES?', False)
         if compiler and hasattr(compiler, 'file_flags'):
             sentence_ends = 'SENTENCE-ENDS?' in compiler.file_flags
+        if compiler and hasattr(compiler, 'custom_alphabets'):
+            custom_alphabets = compiler.custom_alphabets
         self.encoder = ZTextEncoder(version, abbreviations_table=abbreviations_table,
                                     crlf_character=crlf_char, preserve_spaces=preserve_spaces,
-                                    sentence_ends=sentence_ends)
+                                    sentence_ends=sentence_ends,
+                                    custom_alphabets=custom_alphabets)
         self.opcodes = OpcodeTable()
 
         # Symbol tables

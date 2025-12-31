@@ -251,7 +251,6 @@ class TestUnprintableCharacters:
 class TestCHRSET:
     """Tests for CHRSET (character set) handling."""
 
-    @pytest.mark.xfail(reason="Custom CHRSET encoding not implemented")
     def test_chrset_should_affect_text_decoding(self):
         """Test CHRSET affects text decoding."""
         #      1         2         3
@@ -266,7 +265,7 @@ class TestCHRSET:
             .in_v5() \
             .outputs("zil")
 
-    @pytest.mark.xfail(reason="Custom CHRSET encoding not implemented")
+    @pytest.mark.xfail(reason="String constants not implemented")
     def test_chrset_should_affect_text_encoding(self):
         """Test CHRSET affects text encoding."""
         AssertRoutine(

@@ -31,12 +31,24 @@ class ZTextEncoder:
     """Encodes text to Z-machine format."""
 
     def __init__(self, version: int = 3, abbreviations_table=None, crlf_character: str = '|',
-                 preserve_spaces: bool = False, sentence_ends: bool = False):
+                 preserve_spaces: bool = False, sentence_ends: bool = False,
+                 custom_alphabets: dict = None):
         self.version = version
-        self.alphabet_a0 = ALPHABET_A0
-        self.alphabet_a1 = ALPHABET_A1
-        # V1 has different A2 (< instead of newline at position 7)
-        self.alphabet_a2 = ALPHABET_A2_V1 if version == 1 else ALPHABET_A2_V2
+        # Use custom alphabets if provided, otherwise use defaults
+        if custom_alphabets and 0 in custom_alphabets:
+            self.alphabet_a0 = custom_alphabets[0]
+        else:
+            self.alphabet_a0 = ALPHABET_A0
+        if custom_alphabets and 1 in custom_alphabets:
+            self.alphabet_a1 = custom_alphabets[1]
+        else:
+            self.alphabet_a1 = ALPHABET_A1
+        if custom_alphabets and 2 in custom_alphabets:
+            self.alphabet_a2 = custom_alphabets[2]
+        else:
+            # V1 has different A2 (< instead of newline at position 7)
+            self.alphabet_a2 = ALPHABET_A2_V1 if version == 1 else ALPHABET_A2_V2
+        self.custom_alphabets = custom_alphabets or {}
         self.abbreviations_table = abbreviations_table
         # Character that gets translated to newline in strings (default |)
         self.crlf_character = crlf_character

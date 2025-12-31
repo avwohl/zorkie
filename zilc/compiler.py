@@ -27,6 +27,7 @@ class ZILCompiler:
         self.enable_string_dedup = enable_string_dedup
         self.compilation_flags = {}  # ZILF compilation flags
         self.file_flags = set()  # FILE-FLAGS like SENTENCE-ENDS?
+        self.custom_alphabets = {}  # CHRSET custom alphabets {0: "...", 1: "...", 2: "..."}
         self.include_paths = include_paths or []  # Additional paths to search for includes
         self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
         self.override_version = override_version  # If True, ignore source VERSION directive
@@ -553,6 +554,31 @@ class ZILCompiler:
             return ''  # Remove the directive from source
 
         source = re.sub(warn_error_pattern, extract_warn_error, source, flags=re.IGNORECASE)
+
+        # Extract CHRSET directives
+        # <CHRSET 0 "abcdefghijklmnopqrstuvwxyz"> - set custom alphabet A0
+        # <CHRSET 1 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"> - set custom alphabet A1
+        # <CHRSET 2 "..."> - set custom alphabet A2
+        chrset_pattern = r'<\s*CHRSET\s+(\d+)\s+"([^"]*)"\s*>'
+
+        def extract_chrset(match):
+            alphabet_num = int(match.group(1))
+            alphabet_str = match.group(2)
+            if alphabet_num in (0, 1, 2):
+                # Alphabet string defines chars for z-chars 6-31 (26 characters)
+                # The first 6 positions (0-5) are special codes
+                if len(alphabet_str) == 26:
+                    # Build full alphabet with special positions
+                    full_alphabet = " \x00\x00\x00\x00\x00" + alphabet_str
+                    self.custom_alphabets[alphabet_num] = full_alphabet
+                    self.log(f"  CHRSET {alphabet_num}: '{alphabet_str}'")
+                else:
+                    self.warn("ZIL0420", f"CHRSET alphabet must be exactly 26 characters, got {len(alphabet_str)}")
+            else:
+                self.warn("ZIL0421", f"CHRSET alphabet number must be 0, 1, or 2, got {alphabet_num}")
+            return ''  # Remove the directive from source
+
+        source = re.sub(chrset_pattern, extract_chrset, source, flags=re.IGNORECASE)
 
         # Second pass: Evaluate IFFLAG conditionals
         # Process manually to handle nested brackets properly
@@ -2662,7 +2688,8 @@ class ZILCompiler:
         sentence_ends = 'SENTENCE-ENDS?' in self.file_flags
         text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table,
                                     crlf_character=crlf_char, preserve_spaces=preserve_spaces,
-                                    sentence_ends=sentence_ends)
+                                    sentence_ends=sentence_ends,
+                                    custom_alphabets=self.custom_alphabets)
         string_table = StringTable(text_encoder, version=self.version)
         if self.enable_string_dedup:
             self.log("String table deduplication enabled")
@@ -2782,7 +2809,8 @@ class ZILCompiler:
             new_parser=new_parser,
             word_flags_in_table=word_flags_in_table,
             one_byte_parts_of_speech=one_byte_parts_of_speech,
-            sibreaks=sibreaks
+            sibreaks=sibreaks,
+            custom_alphabets=self.custom_alphabets
         )
 
         # Add SIBREAKS characters as dictionary words
@@ -4188,6 +4216,11 @@ class ZILCompiler:
         if extension_table:
             self.log(f"  Built extension table: {len(extension_table)} bytes")
 
+        # Build alphabet table if custom alphabets are defined (V5+)
+        alphabet_table = self._build_alphabet_table()
+        if alphabet_table:
+            self.log(f"  Built alphabet table: {len(alphabet_table)} bytes")
+
         # Get string placeholders for resolution
         string_placeholders = codegen.get_string_placeholders()  # For operand format (0xFC)
         tell_string_placeholders = codegen.get_tell_string_placeholders()  # For TELL format (0x8D)
@@ -4225,6 +4258,7 @@ class ZILCompiler:
             table_routine_fixups=table_routine_fixups,
             property_routine_fixups=property_routine_fixups,
             extension_table=extension_table,
+            alphabet_table=alphabet_table,
             string_placeholders=string_placeholders,
             tell_string_placeholders=tell_string_placeholders,
             tell_placeholder_positions=tell_placeholder_positions,
@@ -4234,6 +4268,58 @@ class ZILCompiler:
         )
 
         return story
+
+    def _build_alphabet_table(self) -> bytes:
+        """Build the alphabet table for V5+ if custom alphabets are defined.
+
+        The alphabet table format for V5+ is 78 bytes:
+        - 26 bytes for A0 (z-chars 6-31)
+        - 26 bytes for A1 (z-chars 6-31)
+        - 26 bytes for A2 (z-chars 6-31)
+
+        Each byte is the ZSCII code for that z-character position.
+
+        Returns:
+            bytes: Alphabet table bytes, or empty if no custom alphabets.
+        """
+        if self.version < 5 or not self.custom_alphabets:
+            return b''
+
+        from .zmachine.text_encoding import ALPHABET_A0, ALPHABET_A1, ALPHABET_A2_V2
+
+        # Get alphabets, using custom if defined, otherwise default
+        a0 = self.custom_alphabets.get(0, ALPHABET_A0)
+        a1 = self.custom_alphabets.get(1, ALPHABET_A1)
+        a2 = self.custom_alphabets.get(2, ALPHABET_A2_V2)
+
+        # Build table: extract characters for z-chars 6-31 (26 chars per alphabet)
+        table = bytearray()
+
+        # A0: characters 6-31
+        for i in range(6, 32):
+            if i < len(a0):
+                ch = a0[i]
+                table.append(ord(ch) if ch != '\x00' else 0)
+            else:
+                table.append(0)
+
+        # A1: characters 6-31
+        for i in range(6, 32):
+            if i < len(a1):
+                ch = a1[i]
+                table.append(ord(ch) if ch != '\x00' else 0)
+            else:
+                table.append(0)
+
+        # A2: characters 6-31
+        for i in range(6, 32):
+            if i < len(a2):
+                ch = a2[i]
+                table.append(ord(ch) if ch != '\x00' else 0)
+            else:
+                table.append(0)
+
+        return bytes(table)
 
     def _compile_glulx(self, program) -> bytes:
         """
