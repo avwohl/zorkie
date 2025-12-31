@@ -638,6 +638,7 @@ class RoutineAssertion:
         self.version_directive: Optional[str] = None
         self.call_args: Optional[List[str]] = None
         self.input_queue: List[str] = []
+        self.capture_compile_output: bool = False
 
     def in_v3(self) -> 'RoutineAssertion':
         self.version = ZVersion.V3
@@ -702,6 +703,11 @@ class RoutineAssertion:
         self.input_queue.extend(inputs)
         return self
 
+    def capturing_compile_output(self) -> 'RoutineAssertion':
+        """Capture compile-time output (from PRINC, etc.) and combine with runtime output."""
+        self.capture_compile_output = True
+        return self
+
     def _get_compiler(self) -> ZILCompiler:
         compiler = ZILCompiler(self.version)
         for g in self.globals:
@@ -754,6 +760,9 @@ class RoutineAssertion:
 
         if result.story_file:
             zm = ZMachine(result.story_file, self.version)
+            # Provide any queued input
+            for inp in self.input_queue:
+                zm.provide_input(inp)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
             # The GO routine prints the return value as the last line
@@ -765,9 +774,21 @@ class RoutineAssertion:
 
     def outputs(self, expected: str) -> None:
         """Assert that the routine produces specific output."""
+        import io
+        import contextlib
+
         compiler = self._get_compiler()
-        # Use print_return=False so GO doesn't print the return value
-        result = compiler.compile_routine(self.args, self.body, self.call_args, print_return=False)
+        compile_output = ""
+
+        # Capture compile-time output if requested
+        if self.capture_compile_output:
+            f = io.StringIO()
+            with contextlib.redirect_stdout(f):
+                result = compiler.compile_routine(self.args, self.body, self.call_args, print_return=False)
+            compile_output = f.getvalue()
+        else:
+            result = compiler.compile_routine(self.args, self.body, self.call_args, print_return=False)
+
         assert result.success, f"Compilation failed: {result.errors}"
         self._check_warnings(result)
 
@@ -778,9 +799,10 @@ class RoutineAssertion:
                 zm.provide_input(inp)
             exec_result = zm.execute()
             assert exec_result.success, f"Execution failed: {exec_result.error}"
+            # Combine compile output with runtime output
+            actual = compile_output + exec_result.output
             # Only strip trailing whitespace if expected doesn't end with whitespace
             # This preserves newlines for CRLF testing
-            actual = exec_result.output
             if not expected.endswith(('\n', '\r', ' ', '\t')):
                 actual = actual.rstrip()
             assert actual == expected, \
