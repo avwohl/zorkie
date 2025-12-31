@@ -753,6 +753,12 @@ class Lexer:
                 else:
                     self.tokens.append(Token(TokenType.ATOM, '~', line, col))
 
+            # @ prefix - used for reader macros via MAKE-PREFIX-MACRO
+            # Emit @ as a separate token so the parser/macro expander can handle it
+            elif ch == '@':
+                self.advance()
+                self.tokens.append(Token(TokenType.ATOM, '@', line, col))
+
             # Compile-time conditional: %< ... > (reader macro)
             # This is used for DEBUG-CODE and similar conditionals
             # At top level (angle_depth=0), these conditionally include/exclude code, so skip entirely

@@ -2672,8 +2672,12 @@ class ZILCompiler:
         self.log(f"  {len(program.syntax)} syntax definitions")
         self.log(f"  {len(program.macros)} macro definitions")
 
-        # Macro expansion
-        if program.macros:
+        # Macro expansion and top-level form processing
+        # Always call expand_all to handle:
+        # - DEFMAC macro definitions and their expansion
+        # - Top-level forms like MAKE-PREFIX-MACRO, ROUTINE-REWRITER hooks, etc.
+        # - PRE-COMPILE hooks
+        if program.macros or program.top_level_forms:
             self.log("Expanding macros...")
             expander = MacroExpander()
             program = expander.expand_all(program)

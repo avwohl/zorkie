@@ -112,7 +112,6 @@ class TestMacrosReturningConstants:
 class TestReaderMacros:
     """Tests for reader macros."""
 
-    @pytest.mark.xfail(reason="MAKE-PREFIX-MACRO not implemented")
     def test_make_prefix_macro_should_work(self):
         """Test MAKE-PREFIX-MACRO works."""
         AssertExpr('<TELL B @HELLO " " B @WORLD CR>') \

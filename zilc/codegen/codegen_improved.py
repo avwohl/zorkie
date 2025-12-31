@@ -3729,6 +3729,10 @@ class ImprovedCodeGenerator:
             # atom is extracted by _get_operand_type_and_value
             return b''
 
+        # VOC form - vocabulary word placeholder
+        elif op_name == 'VOC':
+            return self.gen_voc(form.operands)
+
         # DEFINE-GLOBALS accessor - check before routine calls
         elif op_name in self.define_globals_entries:
             return self.gen_define_globals_access(op_name, form.operands)
@@ -3946,6 +3950,25 @@ class ImprovedCodeGenerator:
             return 0  # Placeholder for string
         else:
             return 0
+
+    def _extract_voc_word(self, form: FormNode) -> Optional[str]:
+        """Extract the word string from a VOC form.
+
+        Args:
+            form: The VOC FormNode
+
+        Returns:
+            The word string (lowercase) or None if invalid
+        """
+        if not form.operands:
+            return None
+
+        word_node = form.operands[0]
+        if isinstance(word_node, StringNode):
+            return word_node.value.lower()
+        elif isinstance(word_node, AtomNode):
+            return word_node.value.lower()
+        return None
 
     def _handle_voc_form(self, form: FormNode) -> int:
         """Handle <VOC "word" pos> form - returns vocabulary word placeholder.
@@ -4981,18 +5004,56 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Handle FormNode operands - generate the inner code first
+        # Handle FormNode operands
         if isinstance(operands[0], FormNode):
-            inner_code = self.generate_form(operands[0])
-            code.extend(inner_code)
-            op_type = 2  # Variable
-            op_val = 0   # Stack
+            # Check if it's a VOC form - print the word as a string
+            if isinstance(operands[0].operator, AtomNode) and operands[0].operator.value.upper() == 'VOC':
+                # Extract the word from VOC form
+                word = self._extract_voc_word(operands[0])
+                if word:
+                    # Add word to vocabulary for dictionary building
+                    self._handle_voc_form(operands[0])
+                    # Also add word as a printable string and use TELL string placeholder
+                    if self.string_table is not None:
+                        self.string_table.add_string(word)
+                        if word in self._tell_string_to_placeholder:
+                            placeholder_idx = self._tell_string_to_placeholder[word]
+                        else:
+                            placeholder_idx = self._next_tell_string_index
+                            if placeholder_idx <= self._max_tell_string_index:
+                                self._tell_string_placeholders[placeholder_idx] = word
+                                self._tell_string_to_placeholder[word] = placeholder_idx
+                                self._next_tell_string_index += 1
+                        placeholder_val = self._tell_string_base + placeholder_idx
+                        self._current_stmt_tell_offsets.append((len(code), placeholder_idx))
+                        op_type = 0  # Large constant
+                        op_val = placeholder_val
+                    else:
+                        op_type = 0
+                        op_val = 0
+                else:
+                    op_type = 0
+                    op_val = 0
+            else:
+                # Generate the inner code first for other forms
+                inner_code = self.generate_form(operands[0])
+                code.extend(inner_code)
+                op_type = 2  # Variable
+                op_val = 0   # Stack
         else:
             op_type, op_val = self._get_operand_type_and_value_ext(operands[0])
 
-        # PRINT_ADDR is 1OP:7
-        # Short form: 0x80 + opcode for large, 0x90 for small, 0xA0 for var
-        if op_type == 0:  # Large constant
+        # For TELL string placeholders (0xE000-0xEFFF), use PRINT_PADDR (0x0D) with 0x8D format
+        # Note: 0xFB00+ is used for vocabulary word placeholders (handled by assembler)
+        # For other addresses, use PRINT_ADDR (0x07)
+        is_tell_placeholder = op_type == 0 and op_val >= 0xE000 and op_val < 0xF000
+        if is_tell_placeholder:
+            # PRINT_PADDR 1OP:0D with large constant (short form: 0x8D)
+            code.append(0x8D)  # 1OP:D with large constant
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
+        elif op_type == 0:  # Large constant
+            # PRINT_ADDR is 1OP:7
             code.append(0x87)  # 1OP:7 with large constant
             code.append((op_val >> 8) & 0xFF)
             code.append(op_val & 0xFF)
@@ -5077,6 +5138,18 @@ class ImprovedCodeGenerator:
                 code.append(op_val & 0xFF)
 
         return bytes(code)
+
+    def gen_voc(self, operands: List[ASTNode]) -> bytes:
+        """Generate VOC form - no-op as a statement.
+
+        VOC is typically used as a value (e.g., in TELL with B operator).
+        When used as a value, the caller (like gen_printb) handles it via
+        _handle_voc_form which returns a placeholder value.
+
+        As a standalone statement, VOC has no effect.
+        """
+        # VOC as a statement is a no-op - it's handled inline when used as a value
+        return b''
 
     def gen_string(self, operands: List[ASTNode]) -> bytes:
         """Generate STRING (build string with escape sequences).

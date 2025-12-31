@@ -254,6 +254,13 @@ class MDLEvaluator:
             # VECTOR creates a vector from arguments (same as LIST for our purposes)
             return [self.evaluate(op, env) for op in operands]
 
+        # Reader macro support
+        elif op_name == 'MAKE-PREFIX-MACRO':
+            return self._eval_make_prefix_macro(operands, env)
+        elif op_name == 'VOC':
+            # VOC creates a vocabulary word reference - return a placeholder form
+            return self._eval_voc(operands, env)
+
         # Unknown form - return as-is (will be processed at runtime)
         return form
 
@@ -374,6 +381,9 @@ class MDLEvaluator:
         for p in param_items:
             if isinstance(p, AtomNode):
                 name = p.value.upper()
+                # Strip type annotation (W:ATOM -> W)
+                if ':' in name:
+                    name = name.split(':')[0]
                 if name == '"AUX"' or name == 'AUX':
                     in_aux = True
                 elif in_aux:
@@ -1069,6 +1079,64 @@ class MDLEvaluator:
         except Exception:
             return sequence
 
+    def _eval_make_prefix_macro(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        r"""Evaluate MAKE-PREFIX-MACRO - register a reader prefix macro.
+
+        <MAKE-PREFIX-MACRO !\@ <FUNCTION (W:ATOM) <VOC <SPNAME .W> BUZZ>>>
+
+        Registers a prefix character that transforms following atoms.
+        """
+        if len(operands) < 2:
+            return None
+
+        # Get the prefix character from the first operand
+        # It should be an atom like !\@ (which is the @ character escaped)
+        prefix_arg = operands[0]
+        if isinstance(prefix_arg, AtomNode):
+            # Handle escaped characters like !\@ -> @
+            prefix_char = prefix_arg.value
+            if prefix_char.startswith('!\\'):
+                prefix_char = prefix_char[2:]  # Strip !\
+            elif prefix_char.startswith('\\'):
+                prefix_char = prefix_char[1:]  # Strip \
+        else:
+            return None
+
+        # Get the handler function
+        handler = self.evaluate(operands[1], env)
+
+        # Store the prefix macro in the expander
+        if self.macro_expander:
+            self.macro_expander.prefix_macros[prefix_char] = handler
+
+        return True
+
+    def _eval_voc(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate VOC - create a vocabulary word reference.
+
+        <VOC "HELLO" BUZZ> creates a reference to the vocabulary word "hello".
+        This is used by prefix macros to create vocabulary references.
+        Returns a FormNode that will be processed during compilation.
+        """
+        # Evaluate operands and convert results to ASTNodes
+        evaluated_operands = []
+        for op in operands:
+            val = self.evaluate(op, env)
+            if isinstance(val, str):
+                # Convert string result (e.g., from SPNAME) to StringNode
+                evaluated_operands.append(StringNode(val, 0, 0))
+            elif isinstance(val, ASTNode):
+                evaluated_operands.append(val)
+            else:
+                evaluated_operands.append(op)
+
+        # Return as a form for later processing by compiler
+        return FormNode(
+            AtomNode('VOC', 0, 0),
+            evaluated_operands,
+            0, 0
+        )
+
     def _eval_eval(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate EVAL (compile-time evaluation).
 
@@ -1375,6 +1443,8 @@ class MacroExpander:
         self.compilation_flags: Dict[str, bool] = {}
         # Reference to the program being expanded (for ASSOCIATIONS introspection)
         self.program: Optional['Program'] = None
+        # Prefix macros registered via MAKE-PREFIX-MACRO (char -> function)
+        self.prefix_macros: Dict[str, Any] = {}
 
     def define_macro(self, macro: MacroNode):
         """Store a macro definition."""
@@ -2306,6 +2376,28 @@ class MacroExpander:
 
         return program
 
+    def _apply_prefix_macro(self, handler: Any, atom: AtomNode) -> Optional[ASTNode]:
+        """Apply a prefix macro handler to an atom.
+
+        The handler is a FUNCTION that takes an atom and returns a form.
+        Example: <FUNCTION (W:ATOM) <VOC <SPNAME .W> BUZZ>>
+        When applied to HELLO, returns <VOC "HELLO" BUZZ>.
+        """
+        if handler is None:
+            return None
+
+        # Handler is a callable created by _make_function
+        # It takes (env, *args) - we pass an empty env and the atom as the argument
+        if callable(handler):
+            try:
+                env = {}
+                result = handler(env, atom)
+                return result
+            except Exception:
+                return None
+
+        return None
+
     # Operations handled natively by the code generator - don't expand these macros
     # These macros use MDL compile-time operations (MAPF, FUNCTION, etc.) that
     # we can't execute, so we rely on the code generator's built-in support
@@ -2337,15 +2429,38 @@ class MacroExpander:
 
             # Not a macro, recursively expand operands
             # Handle SpliceResultNode in operands by inlining their items
+            # Also apply prefix macro transformations
             new_operator = self._expand_recursive(node.operator)
             new_operands = []
-            for op in node.operands:
+            i = 0
+            operands = list(node.operands)
+            while i < len(operands):
+                op = operands[i]
+                # Check for prefix macro: @ followed by ATOM
+                if isinstance(op, AtomNode) and op.value in self.prefix_macros:
+                    prefix_char = op.value
+                    if i + 1 < len(operands) and isinstance(operands[i + 1], AtomNode):
+                        # Apply prefix macro transformation
+                        next_atom = operands[i + 1]
+                        handler = self.prefix_macros[prefix_char]
+                        transformed = self._apply_prefix_macro(handler, next_atom)
+                        if transformed is not None:
+                            # Skip both prefix and atom, add transformed result
+                            expanded = self._expand_recursive(transformed)
+                            if isinstance(expanded, SpliceResultNode):
+                                new_operands.extend(expanded.items)
+                            else:
+                                new_operands.append(expanded)
+                            i += 2
+                            continue
+                # Normal operand processing
                 expanded = self._expand_recursive(op)
                 if isinstance(expanded, SpliceResultNode):
                     # Inline the splice items as operands
                     new_operands.extend(expanded.items)
                 else:
                     new_operands.append(expanded)
+                i += 1
             return FormNode(new_operator, new_operands, node.line, node.column)
 
         elif isinstance(node, CondNode):
