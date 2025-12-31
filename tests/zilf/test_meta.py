@@ -188,7 +188,6 @@ class TestRoutineRewriter:
                <FORM BIND ((RES <FORM PROG '() !.BODY>)) <FORM TELL "Return: " N '.RES CR> '.RES>)>
            <LIST .ARGS !.BODY>)>>"""
 
-    @pytest.mark.xfail(reason="ROUTINE-REWRITER not implemented")
     def test_routine_rewriter_can_rewrite_routines(self):
         """Test ROUTINE-REWRITER can rewrite routines."""
         AssertRoutine("NAME", '<TELL "Hello, " .NAME "." CR>') \
@@ -234,11 +233,7 @@ class TestPreCompileHook:
 class TestReleaseid:
     """Tests for RELEASEID handling."""
 
-    @pytest.mark.parametrize("zversion", [
-        3, 4, 5, 6,
-        pytest.param(7, marks=pytest.mark.xfail(reason="V7 has interpreter bugs (bocfel/dfrotz)")),
-        8,
-    ])
+    @pytest.mark.parametrize("zversion", [3, 4, 5, 6, 7, 8])
     def test_releaseid_is_optional(self, zversion):
         """Test RELEASEID is optional for all versions."""
         code = f"<VERSION {zversion}>\n<ROUTINE GO () <PRINTN <GET 2 0>> <CRLF> <QUIT>>"

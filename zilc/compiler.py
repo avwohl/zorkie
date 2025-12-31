@@ -654,8 +654,9 @@ class ZILCompiler:
         # Seventh pass: Process #SPLICE directives (MDL splicing)
         source = self._process_splice(source)
 
-        # Eighth pass: Skip MDL macro definitions (DEFMAC, DEFINE) that we can't process
-        source = self._skip_mdl_macros(source)
+        # Eighth pass: Keep MDL definitions (DEFMAC, DEFINE) - they're now supported
+        # Previously we skipped DEFINE, but we now handle it in the MDL evaluator
+        # source = self._skip_mdl_macros(source)  # Disabled - DEFINE is now handled
 
         # Seventh pass: If lax_brackets enabled, remove extraneous > brackets
         if self.lax_brackets:
@@ -2871,9 +2872,11 @@ class ZILCompiler:
         for char in sibreaks:
             dictionary.add_word(char, 'buzz')  # Add as buzz words so they parse but don't affect actions
 
-        # Add BUZZ words
+        # Add BUZZ words (with escape processing for German, etc.)
         if program.buzz_words:
-            dictionary.add_words(program.buzz_words, 'buzz')
+            for word in program.buzz_words:
+                unescaped = self._unescape_vocab_word(word)
+                dictionary.add_word(unescaped, 'buzz')
 
         # Process NEW-ADD-WORD declarations (NEW-PARSER? mode)
         # Track (word_name, flags) for WORD-FLAG-TABLE generation
@@ -3089,19 +3092,21 @@ class ZILCompiler:
             'quote': ['"'],
         }
         for placeholder_idx, word in vocab_placeholders.items():
+            # Unescape the word (handle \%S -> %S -> ß for German, etc.)
+            unescaped = self._unescape_vocab_word(word)
             # Skip if word is in VOC words - it will get proper part-of-speech later
-            if word.lower() in voc_words_set:
+            if unescaped.lower() in voc_words_set:
                 continue
-            if word not in dictionary.words:
+            if unescaped not in dictionary.words:
                 # Check if this word has an alias that exists in dictionary
-                if word in punct_aliases:
-                    found_alias = any(alias in dictionary.words for alias in punct_aliases[word])
+                if unescaped in punct_aliases:
+                    found_alias = any(alias in dictionary.words for alias in punct_aliases[unescaped])
                     if not found_alias:
                         # No alias found, need to add the word itself
-                        dictionary.add_word(word, 'buzz')
+                        dictionary.add_word(unescaped, 'buzz')
                 else:
                     # No aliases defined for this word, add it directly
-                    dictionary.add_word(word, 'buzz')
+                    dictionary.add_word(unescaped, 'buzz')
 
         # Get word offsets for SYNONYM property fixups
         dict_word_offsets = dictionary.get_word_offsets()
@@ -4165,10 +4170,13 @@ class ZILCompiler:
         self.log(f"    vocab_placeholders: {vocab_placeholders}")
 
         for placeholder_idx, word in vocab_placeholders.items():
+            # Unescape the word (handle \%S -> %S -> ß for German, etc.)
+            unescaped_word = self._unescape_vocab_word(word)
+
             # In NEW-PARSER? mode, check if this word has a VWORD table
             # BUT: internal VWORD placeholders should still resolve to dictionary
-            word_upper = word.upper()
-            self.log(f"    placeholder {placeholder_idx}: word={word}, upper={word_upper}, in_vword={word_upper in vword_tables}, internal={placeholder_idx in vword_internal_placeholders}")
+            word_upper = unescaped_word.upper()
+            self.log(f"    placeholder {placeholder_idx}: word={word}, unescaped={unescaped_word}, upper={word_upper}, in_vword={word_upper in vword_tables}, internal={placeholder_idx in vword_internal_placeholders}")
             if new_parser and word_upper in vword_tables and placeholder_idx not in vword_internal_placeholders:
                 # This word has a VWORD table - use table index for fixup
                 # (only for code references, not internal VWORD table placeholders)
@@ -4176,15 +4184,15 @@ class ZILCompiler:
                 self.log(f"      -> added to vword_fixups: ({placeholder_idx}, {vword_tables[word_upper]})")
                 continue
 
-            # First, try exact match
-            if word in dict_word_offsets:
-                vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
+            # First, try exact match with unescaped word
+            if unescaped_word in dict_word_offsets:
+                vocab_fixups.append((placeholder_idx, dict_word_offsets[unescaped_word]))
                 continue
 
             # Second, try punctuation aliases (comma <-> , or \,)
             found_alias = None
-            if word in punctuation_aliases:
-                for alias in punctuation_aliases[word]:
+            if unescaped_word in punctuation_aliases:
+                for alias in punctuation_aliases[unescaped_word]:
                     if alias in dict_word_offsets:
                         found_alias = alias
                         break
@@ -4192,14 +4200,14 @@ class ZILCompiler:
             if found_alias:
                 vocab_fixups.append((placeholder_idx, dict_word_offsets[found_alias]))
             else:
-                # Word not in dictionary - try to add it
-                dictionary.add_word(word, 'buzz')  # PROPDEF VOC uses BUZZ type
+                # Word not in dictionary - try to add it (unescaped)
+                dictionary.add_word(unescaped_word, 'buzz')  # PROPDEF VOC uses BUZZ type
                 # Re-get offsets to include the new word
                 dict_word_offsets = dictionary.get_word_offsets()
-                if word in dict_word_offsets:
-                    vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
+                if unescaped_word in dict_word_offsets:
+                    vocab_fixups.append((placeholder_idx, dict_word_offsets[unescaped_word]))
                 else:
-                    missing_vocab_words.append(word)
+                    missing_vocab_words.append(unescaped_word)
                     vocab_fixups.append((placeholder_idx, 0))  # Default to 0
 
         if vocab_placeholders:
@@ -4265,7 +4273,15 @@ class ZILCompiler:
             self.log(f"  Encoded {len(abbreviations_table)} optimized abbreviations")
 
         # Build extension table if needed (V5+)
-        extension_table = codegen.build_extension_table()
+        # Get Unicode table from string_table's text encoder (tracks extended characters used during string encoding)
+        # The string_table's encoder is used for TELL strings, so it tracks Unicode characters
+        if string_table and hasattr(string_table, 'text_encoder'):
+            unicode_table = string_table.text_encoder.get_unicode_table()
+        elif hasattr(codegen, 'encoder'):
+            unicode_table = codegen.encoder.get_unicode_table()
+        else:
+            unicode_table = []
+        extension_table = self._build_extension_table(unicode_table, codegen)
         if extension_table:
             self.log(f"  Built extension table: {len(extension_table)} bytes")
 
@@ -4410,6 +4426,74 @@ class ZILCompiler:
         if code < 127:
             return code
         return self.UNICODE_TO_ZSCII.get(code, code)
+
+    def _build_extension_table(self, unicode_table: list, codegen) -> bytes:
+        """Build the header extension table for V5+.
+
+        The extension table format is:
+        - Word 0: Number of extension words following (N)
+        - Word 1: Mouse X coordinate after click (runtime, init to 0)
+        - Word 2: Mouse Y coordinate after click (runtime, init to 0)
+        - Word 3: Address of Unicode translation table (or 0)
+        - Words 4+: Additional extension data
+
+        The Unicode translation table format is:
+        - Byte 0: Number of Unicode entries (N)
+        - Words 1-N: Unicode code points for ZSCII 155, 156, ..., 154+N
+
+        Args:
+            unicode_table: List of Unicode code points from text encoder
+            codegen: Code generator (for extension word tracking)
+
+        Returns:
+            Extension table bytes (header + Unicode table), or empty if not needed.
+        """
+        if self.version < 5:
+            return b''
+
+        # Determine minimum number of extension words needed
+        min_words = 0
+        if codegen:
+            min_words = getattr(codegen, '_max_extension_word', 0)
+
+        # Need at least 3 words if we have a Unicode table
+        if unicode_table:
+            min_words = max(min_words, 3)
+
+        if min_words == 0 and not unicode_table:
+            return b''
+
+        # Build extension header
+        # Word 0 = count, Words 1-N = data
+        num_words = max(min_words, 3)  # At least 3 for Unicode table address
+        header = bytearray((num_words + 1) * 2)
+
+        # Word 0: count of extension words
+        header[0] = (num_words >> 8) & 0xFF
+        header[1] = num_words & 0xFF
+
+        # Words 1-2: mouse coords (init to 0, runtime values)
+        # Already 0 from bytearray initialization
+
+        # Word 3: Unicode table address
+        # Store relative offset - assembler will convert to absolute address
+        if unicode_table:
+            # Unicode table follows immediately after header
+            unicode_table_offset = len(header)
+            header[6] = (unicode_table_offset >> 8) & 0xFF
+            header[7] = unicode_table_offset & 0xFF
+
+        # Build Unicode translation table
+        unicode_bytes = bytearray()
+        if unicode_table:
+            # Byte 0: count
+            unicode_bytes.append(len(unicode_table))
+            # Words 1-N: Unicode code points (big-endian)
+            for code_point in unicode_table:
+                unicode_bytes.append((code_point >> 8) & 0xFF)
+                unicode_bytes.append(code_point & 0xFF)
+
+        return bytes(header) + bytes(unicode_bytes)
 
     def _build_alphabet_table(self) -> bytes:
         """Build the alphabet table for V5+ if custom alphabets are defined.

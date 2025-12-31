@@ -1223,6 +1223,20 @@ class ZAssembler:
             if extension_table:
                 story.extend(extension_table)
                 current_addr += len(extension_table)
+
+                # Patch extension word 3 (Unicode table address) if present
+                # Word 3 contains a relative offset that needs to be absolute
+                if len(extension_table) >= 8:
+                    # Get extension word count from word 0
+                    ext_word_count = (extension_table[0] << 8) | extension_table[1]
+                    if ext_word_count >= 3:
+                        # Word 3 is at offset 6-7 (bytes 6-7)
+                        rel_offset = (extension_table[6] << 8) | extension_table[7]
+                        if rel_offset > 0:
+                            # Convert relative offset to absolute address
+                            abs_addr = extension_table_addr + rel_offset
+                            story[extension_table_addr + 6] = (abs_addr >> 8) & 0xFF
+                            story[extension_table_addr + 7] = abs_addr & 0xFF
             else:
                 # Minimal extension table: 2 bytes with 0 entries
                 # (needed for bocfel which reads entry count even when addr=0)
@@ -1466,34 +1480,26 @@ class ZAssembler:
         # Routine header format:
         #   V1-4: 1 byte (local count) + N words (local defaults)
         #   V5+: 1 byte (local count) only
+        # Note: For V6-7, there's 4 bytes of padding after high_mem_base before routines
         initial_pc = self.high_mem_base
         if routines:
             num_locals = routines[0] & 0x0F  # Local count is in low nibble
             if self.version <= 4:
                 # Skip: 1 byte header + num_locals * 2 bytes for defaults
                 initial_pc = self.high_mem_base + 1 + (num_locals * 2)
+            elif self.version == 6:
+                # V6: Uses packed routine address - interpreter calls the routine
+                # Packed address = (byte_addr - routines_offset*8) / 4
+                # With 4-byte padding, first routine is at packed address 1
+                initial_pc = 1
+            elif self.version == 7:
+                # V7: Interpreters (dfrotz/bocfel) have bugs where they treat the
+                # packed address as a direct byte address. As a workaround, store
+                # the actual byte address of the first instruction.
+                initial_pc = self.high_mem_base + 4 + 1
             else:
-                # Skip: 1 byte header only
+                # V5, V8: Skip 1 byte header only
                 initial_pc = self.high_mem_base + 1
-
-        # For V6-7, the Initial PC field stores a packed routine address
-        # The packed address calculation depends on version:
-        #   V6-7: packed_address = (byte_address - routines_offset * 8) / 4
-        # For simplicity with routines_offset = high_mem_base / 8:
-        #   V6-7: packed_address = (addr - high_mem_base) / 4 = offset / 4
-        # Since the routine starts at high_mem_base, and we want to skip
-        # to the first instruction (which is 1 byte after for V5+),
-        # we need to calculate the packed address of the routine itself.
-        #
-        # Actually for V6-7, Initial PC points to the ROUTINE (packed),
-        # and the interpreter handles finding the first instruction.
-        # V8 uses direct byte addresses like V5.
-        if self.version in (6, 7):
-            # Packed routine address = (routine_byte_addr - 8 * routines_offset) / 4
-            # With routines_offset = high_mem_base / 8:
-            # packed = (high_mem_base - high_mem_base) / 4 = 0
-            # So the first routine is always at packed address 0 relative to routines_offset
-            initial_pc = 1  # Packed address of first routine (after 4-byte padding)
 
         # Update header with correct addresses
         struct.pack_into('>H', story, 0x04, self.high_mem_base)  # High memory base

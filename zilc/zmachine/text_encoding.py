@@ -71,6 +71,10 @@ class ZTextEncoder:
         self.unicode_chars_used: set = set()
         # Maximum Unicode table size (V5+)
         self.max_unicode_table_size = 97
+        # Unicode to ZSCII mapping for characters outside standard range
+        # Maps Unicode code point -> ZSCII code (155-251)
+        self._unicode_to_zscii: dict = {}
+        self._next_zscii_code = 155  # Next available ZSCII code for Unicode mapping
 
     def char_to_zchar(self, ch: str, current_alphabet: int = 0) -> Tuple[List[int], int]:
         """
@@ -210,42 +214,35 @@ class ZTextEncoder:
                 return ([5, idx], 0)
 
         # Character not in any alphabet - need ZSCII escape or Unicode
-        zscii_code = ord(ch)
+        unicode_code = ord(ch)
 
-        # Validate character is representable in this version
-        # ZSCII escape uses 10 bits, so max representable is 1023
-        if zscii_code > 1023:
-            # Character can't be encoded in Z-machine at all (too large for 10-bit escape)
+        # For V5+, characters outside basic ZSCII (> 154) use the Unicode extension table
+        # We map each unique Unicode code point to a ZSCII code in range 155-251
+        if unicode_code > 154:
             if self.version <= 4:
                 # V1-V4: No Unicode support
                 raise ValueError(
-                    f"ZIL0414: Character U+{zscii_code:04X} ({repr(ch)}) cannot be "
+                    f"ZIL0414: Character U+{unicode_code:04X} ({repr(ch)}) cannot be "
                     f"represented in V{self.version} Z-machine (only standard ZSCII supported)"
                 )
             else:
-                # V5+: Can use Unicode extension table for extended characters
-                self.unicode_chars_used.add(zscii_code)
-                # Check if we've exceeded the Unicode table limit
-                if len(self.unicode_chars_used) > self.max_unicode_table_size:
-                    raise ValueError(
-                        f"ZIL0415: Too many unique Unicode characters ({len(self.unicode_chars_used)}) - "
-                        f"Z-machine Unicode table only supports {self.max_unicode_table_size} entries"
-                    )
-        elif zscii_code > 255 and self.version <= 4:
-            # Characters 256-1023 can be encoded with ZSCII escape but are non-standard
-            # In V1-V4, these are usually errors since there's no Unicode table
-            raise ValueError(
-                f"ZIL0414: Character U+{zscii_code:04X} ({repr(ch)}) cannot be "
-                f"represented in V{self.version} Z-machine (only standard ZSCII supported)"
-            )
-        elif zscii_code > 155 and self.version >= 5:
-            # V5+: Characters > 155 use the Unicode extension table
-            self.unicode_chars_used.add(zscii_code)
-            if len(self.unicode_chars_used) > self.max_unicode_table_size:
-                raise ValueError(
-                    f"ZIL0415: Too many unique Unicode characters ({len(self.unicode_chars_used)}) - "
-                    f"Z-machine Unicode table only supports {self.max_unicode_table_size} entries"
-                )
+                # V5+: Map Unicode to ZSCII via extension table
+                if unicode_code not in self._unicode_to_zscii:
+                    # Assign next available ZSCII code
+                    if self._next_zscii_code > 251:
+                        raise ValueError(
+                            f"ZIL0415: Too many unique Unicode characters - "
+                            f"Z-machine Unicode table only supports {self.max_unicode_table_size} entries"
+                        )
+                    self._unicode_to_zscii[unicode_code] = self._next_zscii_code
+                    self.unicode_chars_used.add(unicode_code)
+                    self._next_zscii_code += 1
+
+                # Use the mapped ZSCII code
+                zscii_code = self._unicode_to_zscii[unicode_code]
+        else:
+            # Standard ZSCII range (0-154)
+            zscii_code = unicode_code
 
         # Encode using ZSCII escape (10 bits)
         high = (zscii_code >> 5) & 0x1F
@@ -410,6 +407,36 @@ class ZTextEncoder:
         """
         words = self.encode_string(text, use_abbreviations=use_abbreviations, literal=literal)
         return words_to_bytes(words)
+
+    def get_unicode_table(self) -> List[int]:
+        """Get the Unicode translation table for V5+.
+
+        Returns a list of Unicode code points, where index i corresponds to
+        ZSCII code 155+i. The interpreter uses this table to decode extended
+        ZSCII codes (155-251) to Unicode for output.
+
+        Returns:
+            List of Unicode code points in ZSCII order (155, 156, ...).
+            Empty if no extended characters were used.
+        """
+        if not self._unicode_to_zscii:
+            return []
+
+        # Build table in ZSCII code order
+        max_zscii = max(self._unicode_to_zscii.values()) if self._unicode_to_zscii else 154
+        table_size = max_zscii - 154  # Number of entries (ZSCII 155 = index 0)
+
+        # Create reverse mapping: ZSCII code -> Unicode code point
+        zscii_to_unicode = {v: k for k, v in self._unicode_to_zscii.items()}
+
+        table = []
+        for zscii in range(155, 155 + table_size):
+            if zscii in zscii_to_unicode:
+                table.append(zscii_to_unicode[zscii])
+            else:
+                table.append(0)  # Unused slot
+
+        return table
 
 
 def encode_string(text: str, version: int = 3) -> List[int]:

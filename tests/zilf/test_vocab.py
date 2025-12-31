@@ -139,7 +139,6 @@ class TestLongWords:
 class TestLanguage:
     """Tests for LANGUAGE setting."""
 
-    @pytest.mark.xfail(reason="LANGUAGE lexing support not implemented")
     def test_language_should_affect_lexing(self):
         """Test that LANGUAGE affects lexer behavior."""
         AssertRoutine(

@@ -188,18 +188,28 @@ class TestStringTranslation:
 class TestSpaceHandling:
     """Tests for space handling in strings."""
 
-    @pytest.mark.xfail(reason="dfrotz strips trailing spaces from output")
     def test_two_spaces_after_period_should_collapse_by_default(self):
-        """Test two spaces after period collapse by default."""
-        AssertRoutine("", '<TELL "Hi.  Hi.   Hi.|  Hi!  Hi?  " CR>') \
-            .outputs("Hi. Hi.  Hi.\n Hi!  Hi?  \n")
+        """Test two spaces after period collapse by default.
 
-    @pytest.mark.xfail(reason="dfrotz strips trailing spaces from output")
+        Tests that:
+        - '  ' after period collapses to ' ' (single space)
+        - '   ' (3 spaces) collapses to '  ' (2 spaces - keeps the extra)
+        - Spaces after ! and ? are NOT collapsed (only after .)
+        Note: Interpreters strip trailing spaces at line ends, so we add a char after.
+        """
+        AssertRoutine("", '<TELL "Hi.  Hi.   Hi.|  Hi!  Hi?  x" CR>') \
+            .in_v5() \
+            .outputs("Hi. Hi.  Hi.\n Hi!  Hi?  x\n")
+
     def test_two_spaces_after_period_should_not_collapse_with_preserve_spaces(self):
-        """Test two spaces don't collapse with PRESERVE-SPACES?."""
-        AssertRoutine("", '<TELL "Hi.  Hi.   Hi.|  Hi!  Hi?  " CR>') \
+        """Test two spaces don't collapse with PRESERVE-SPACES?.
+
+        Note: Interpreters strip trailing spaces at line ends, so we add a char after.
+        """
+        AssertRoutine("", '<TELL "Hi.  Hi.   Hi.|  Hi!  Hi?  x" CR>') \
+            .in_v5() \
             .with_global("<SETG PRESERVE-SPACES? T>") \
-            .outputs("Hi.  Hi.   Hi.\n  Hi!  Hi?  \n")
+            .outputs("Hi.  Hi.   Hi.\n  Hi!  Hi?  x\n")
 
     def test_two_spaces_after_period_bang_or_question_should_become_sentence_space(self):
         """Test sentence endings with SENTENCE-ENDS? flag.
@@ -314,7 +324,6 @@ class TestStringOptimization:
 class TestUnicode:
     """Tests for Unicode character support."""
 
-    @pytest.mark.xfail(reason="Unicode support in dfrotz not verified")
     def test_unicode_characters_should_work_in_tell_in_v5(self):
         """Test Unicode characters work in TELL in V5."""
         # U+2014: em dash, U+2019: right single quotation mark
