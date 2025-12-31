@@ -11,16 +11,28 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 669 passed, 0 failed, 4 xfailed
+- **Tests:** 670 passed, 0 failed, 3 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
+- **PRE-COMPILE hook** now fully working (symbol introspection and dynamic routine creation)
 - **ROUTINE-REWRITER hook** now fully working
 - **LANGUAGE lexing** now working (German ß character input/vocabulary matching)
 - **Custom TELL macros** now working (arithmetic in macro expansion)
 
 ## Recent Changes (2025-12-31)
+- **PRE-COMPILE hook and MDL symbol introspection** - Compile-time routine generation:
+  - Added AssociationIterator class for MDL ASSOCIATIONS traversal
+  - Implemented ASSOCIATIONS to iterate symbol bindings (routines, macros)
+  - Implemented NEXT for advancing association iterator
+  - Implemented SORT for compile-time list sorting
+  - Added VECTOR as MAPF collector (alias for LIST)
+  - Added TYPE? support for ROUTINE and MACRO types
+  - Support CHTYPE LIST for AssociationIterator conversion
+  - Handle dynamic ROUTINE creation via EVAL
+  - Fixed FUNCTION AUX parameter initializers with expressions
+  - 1 test now passes (test_pre_compile_hook_can_add_to_compilation_environment)
 - **MDL arithmetic operators** - Added +, -, *, /, MOD to compile-time evaluator:
   - Custom TELL macros like `<DEFMAC TELL ('X) <FORM PRINTN <* .X 2>>>` now work
   - Enables arithmetic expressions in FORM constructor operands
