@@ -30,6 +30,7 @@ class ImprovedCodeGenerator:
         preserve_spaces = False
         sentence_ends = False
         custom_alphabets = None
+        language = None
         if compiler and hasattr(compiler, 'compile_globals'):
             crlf_char = compiler.compile_globals.get('CRLF-CHARACTER', '|')
             preserve_spaces = compiler.compile_globals.get('PRESERVE-SPACES?', False)
@@ -37,10 +38,13 @@ class ImprovedCodeGenerator:
             sentence_ends = 'SENTENCE-ENDS?' in compiler.file_flags
         if compiler and hasattr(compiler, 'custom_alphabets'):
             custom_alphabets = compiler.custom_alphabets
+        if compiler and hasattr(compiler, 'language'):
+            language = compiler.language
         self.encoder = ZTextEncoder(version, abbreviations_table=abbreviations_table,
                                     crlf_character=crlf_char, preserve_spaces=preserve_spaces,
                                     sentence_ends=sentence_ends,
-                                    custom_alphabets=custom_alphabets)
+                                    custom_alphabets=custom_alphabets,
+                                    language=language)
         self.opcodes = OpcodeTable()
 
         # Symbol tables
@@ -5874,6 +5878,9 @@ class ImprovedCodeGenerator:
                 else:
                     # Word names like COMMA -> "comma"
                     word = name_part.lower()
+                # Process backslash escapes and German language escapes if compiler available
+                if self.compiler and hasattr(self.compiler, '_unescape_vocab_word'):
+                    word = self.compiler._unescape_vocab_word(word)
                 placeholder_idx = self._next_vocab_placeholder_index
                 self._vocab_placeholders[placeholder_idx] = word
                 self._next_vocab_placeholder_index += 1
@@ -6024,6 +6031,9 @@ class ImprovedCodeGenerator:
                 else:
                     # Word names like COMMA -> "comma"
                     word = name_part.lower()
+                # Process backslash escapes and German language escapes if compiler available
+                if self.compiler and hasattr(self.compiler, '_unescape_vocab_word'):
+                    word = self.compiler._unescape_vocab_word(word)
                 placeholder_idx = self._next_vocab_placeholder_index
                 self._vocab_placeholders[placeholder_idx] = word
                 self._next_vocab_placeholder_index += 1

@@ -11,13 +11,20 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 658 passed, 0 failed, 15 xfailed
+- **Tests:** 660 passed, 0 failed, 13 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-31)
+- **LANGUAGE directive for German (V5+)** - German text and vocabulary encoding:
+  - Parse `<LANGUAGE GERMAN>` directive to enable German mode
+  - Set German custom alphabets (A0/A1/A2) with umlauts and special chars
+  - German escape sequences in strings: `%o` → ö, `%a` → ä, `%u` → ü, `%s` → ß, etc.
+  - Unicode to ZSCII mapping for alphabet table (e.g., 'ä' (0xE4) → ZSCII 155)
+  - Vocabulary words process German escapes: `\%A\%S` → `Äß`
+  - 2 tests now pass (test_language_should_affect_text_encoding, test_language_should_affect_vocabulary_encoding)
 - **String constants (`<CONSTANT name "string">`)** - String address constants:
   - Handle StringNode values in eval_constant
   - Add string to string_table for encoding

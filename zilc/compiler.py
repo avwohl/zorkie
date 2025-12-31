@@ -28,6 +28,7 @@ class ZILCompiler:
         self.compilation_flags = {}  # ZILF compilation flags
         self.file_flags = set()  # FILE-FLAGS like SENTENCE-ENDS?
         self.custom_alphabets = {}  # CHRSET custom alphabets {0: "...", 1: "...", 2: "..."}
+        self.language = None  # LANGUAGE directive (e.g., GERMAN)
         self.include_paths = include_paths or []  # Additional paths to search for includes
         self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
         self.override_version = override_version  # If True, ignore source VERSION directive
@@ -60,16 +61,40 @@ class ZILCompiler:
             self.warn("MDL0429", f"{prop_type} word '{word}' in {obj_name} contains apostrophe")
 
     def _unescape_vocab_word(self, word: str) -> str:
-        """Unescape a vocab word by stripping backslash escapes.
+        """Unescape a vocab word by stripping backslash escapes and processing language escapes.
 
         In ZIL, backslash is used to escape special characters in vocab words:
         - \\, becomes ,
         - \\. becomes .
         - \\" becomes "
+        - \\%A becomes %A (then German mode processes to Ä)
+
+        With LANGUAGE GERMAN, percent escapes are also processed:
+        - %a becomes ä, %o becomes ö, etc.
         """
-        if word.startswith('\\') and len(word) == 2:
-            return word[1]  # Single escaped character
-        return word
+        import re
+
+        # Step 1: Process backslash escapes
+        # Replace \X with X for any character X
+        result = re.sub(r'\\(.)', r'\1', word)
+
+        # Step 2: Process German language escapes if enabled
+        if self.language == 'GERMAN':
+            german_escapes = {
+                'a': 'ä', 'o': 'ö', 'u': 'ü', 's': 'ß',
+                'A': 'Ä', 'O': 'Ö', 'U': 'Ü', 'S': 'ß',
+                '<': '«', '>': '»'
+            }
+
+            def replace_escape(m):
+                escape_char = m.group(1)
+                if escape_char in german_escapes:
+                    return german_escapes[escape_char]
+                return m.group(0)
+
+            result = re.sub(r'%([aouAOUSs<>])', replace_escape, result)
+
+        return result
 
     def _compute_object_ordering(self, program) -> dict:
         """Compute ZILF-compatible object ordering.
@@ -579,6 +604,32 @@ class ZILCompiler:
             return ''  # Remove the directive from source
 
         source = re.sub(chrset_pattern, extract_chrset, source, flags=re.IGNORECASE)
+
+        # Extract LANGUAGE directive
+        # <LANGUAGE GERMAN> - set language mode with custom alphabets and escape sequences
+        language_pattern = r'<\s*LANGUAGE\s+(\w+)\s*>'
+
+        def extract_language(match):
+            lang_name = match.group(1).upper()
+            if lang_name == 'GERMAN':
+                self.language = 'GERMAN'
+                # German character sets (from ZILF Language.cs)
+                # Charset0: abcdefghiklmnoprstuwzäöü.,
+                # Charset1: ABCDEFGHIKLMNOPRSTUWZjqvxy
+                # Charset2: 0123456789!?'-:()JÄÖÜß«»
+                # Note: j,q,v,x,y are in A1 for German (lowercase are encoded via A1)
+                self.custom_alphabets[0] = " \x00\x00\x00\x00\x00abcdefghiklmnoprstuwzäöü.,"
+                self.custom_alphabets[1] = " \x00\x00\x00\x00\x00ABCDEFGHIKLMNOPRSTUWZjqvxy"
+                self.custom_alphabets[2] = " \x00\x00\x00\x00\x000123456789!?'-:()JÄÖÜß«»"
+                self.log(f"  LANGUAGE {lang_name}: German mode enabled")
+            elif lang_name == 'DEFAULT':
+                self.language = 'DEFAULT'
+                self.log(f"  LANGUAGE {lang_name}: Default mode")
+            else:
+                self.warn("ZIL0422", f"Unknown LANGUAGE: {lang_name}")
+            return ''  # Remove the directive from source
+
+        source = re.sub(language_pattern, extract_language, source, flags=re.IGNORECASE)
 
         # Second pass: Evaluate IFFLAG conditionals
         # Process manually to handle nested brackets properly
@@ -2689,7 +2740,8 @@ class ZILCompiler:
         text_encoder = ZTextEncoder(self.version, abbreviations_table=abbreviations_table,
                                     crlf_character=crlf_char, preserve_spaces=preserve_spaces,
                                     sentence_ends=sentence_ends,
-                                    custom_alphabets=self.custom_alphabets)
+                                    custom_alphabets=self.custom_alphabets,
+                                    language=self.language)
         string_table = StringTable(text_encoder, version=self.version)
         if self.enable_string_dedup:
             self.log("String table deduplication enabled")
@@ -2810,7 +2862,8 @@ class ZILCompiler:
             word_flags_in_table=word_flags_in_table,
             one_byte_parts_of_speech=one_byte_parts_of_speech,
             sibreaks=sibreaks,
-            custom_alphabets=self.custom_alphabets
+            custom_alphabets=self.custom_alphabets,
+            language=self.language
         )
 
         # Add SIBREAKS characters as dictionary words
@@ -4269,6 +4322,95 @@ class ZILCompiler:
 
         return story
 
+    # Default Unicode to ZSCII mapping (Z-machine spec section 3.8.5.3)
+    # ZSCII codes 155-223 map to specific Unicode code points
+    DEFAULT_UNICODE_TABLE = [
+        0x00e4,  # 155 = ä
+        0x00f6,  # 156 = ö
+        0x00fc,  # 157 = ü
+        0x00c4,  # 158 = Ä
+        0x00d6,  # 159 = Ö
+        0x00dc,  # 160 = Ü
+        0x00df,  # 161 = ß
+        0x00bb,  # 162 = »
+        0x00ab,  # 163 = «
+        0x00eb,  # 164 = ë
+        0x00ef,  # 165 = ï
+        0x00ff,  # 166 = ÿ
+        0x00cb,  # 167 = Ë
+        0x00cf,  # 168 = Ï
+        0x00e1,  # 169 = á
+        0x00e9,  # 170 = é
+        0x00ed,  # 171 = í
+        0x00f3,  # 172 = ó
+        0x00fa,  # 173 = ú
+        0x00fd,  # 174 = ý
+        0x00c1,  # 175 = Á
+        0x00c9,  # 176 = É
+        0x00cd,  # 177 = Í
+        0x00d3,  # 178 = Ó
+        0x00da,  # 179 = Ú
+        0x00dd,  # 180 = Ý
+        0x00e0,  # 181 = à
+        0x00e8,  # 182 = è
+        0x00ec,  # 183 = ì
+        0x00f2,  # 184 = ò
+        0x00f9,  # 185 = ù
+        0x00c0,  # 186 = À
+        0x00c8,  # 187 = È
+        0x00cc,  # 188 = Ì
+        0x00d2,  # 189 = Ò
+        0x00d9,  # 190 = Ù
+        0x00e2,  # 191 = â
+        0x00ea,  # 192 = ê
+        0x00ee,  # 193 = î
+        0x00f4,  # 194 = ô
+        0x00fb,  # 195 = û
+        0x00c2,  # 196 = Â
+        0x00ca,  # 197 = Ê
+        0x00ce,  # 198 = Î
+        0x00d4,  # 199 = Ô
+        0x00db,  # 200 = Û
+        0x00e5,  # 201 = å
+        0x00c5,  # 202 = Å
+        0x00f8,  # 203 = ø
+        0x00d8,  # 204 = Ø
+        0x00e3,  # 205 = ã
+        0x00f1,  # 206 = ñ
+        0x00f5,  # 207 = õ
+        0x00c3,  # 208 = Ã
+        0x00d1,  # 209 = Ñ
+        0x00d5,  # 210 = Õ
+        0x00e6,  # 211 = æ
+        0x00c6,  # 212 = Æ
+        0x00e7,  # 213 = ç
+        0x00c7,  # 214 = Ç
+        0x00fe,  # 215 = þ
+        0x00f0,  # 216 = ð
+        0x00de,  # 217 = Þ
+        0x00d0,  # 218 = Ð
+        0x00a3,  # 219 = £
+        0x0153,  # 220 = œ
+        0x0152,  # 221 = Œ
+        0x00a1,  # 222 = ¡
+        0x00bf,  # 223 = ¿
+    ]
+
+    # Build reverse mapping (Unicode -> ZSCII)
+    UNICODE_TO_ZSCII = {code: 155 + i for i, code in enumerate(DEFAULT_UNICODE_TABLE)}
+
+    def _unicode_to_zscii(self, ch: str) -> int:
+        """Convert a Unicode character to its ZSCII code.
+
+        For ASCII (32-126), returns the same code.
+        For extended characters (155-223), looks up in the mapping table.
+        For other characters, returns the raw code point (may not work correctly).
+        """
+        code = ord(ch)
+        if code < 127:
+            return code
+        return self.UNICODE_TO_ZSCII.get(code, code)
+
     def _build_alphabet_table(self) -> bytes:
         """Build the alphabet table for V5+ if custom alphabets are defined.
 
@@ -4299,7 +4441,7 @@ class ZILCompiler:
         for i in range(6, 32):
             if i < len(a0):
                 ch = a0[i]
-                table.append(ord(ch) if ch != '\x00' else 0)
+                table.append(self._unicode_to_zscii(ch) if ch != '\x00' else 0)
             else:
                 table.append(0)
 
@@ -4307,7 +4449,7 @@ class ZILCompiler:
         for i in range(6, 32):
             if i < len(a1):
                 ch = a1[i]
-                table.append(ord(ch) if ch != '\x00' else 0)
+                table.append(self._unicode_to_zscii(ch) if ch != '\x00' else 0)
             else:
                 table.append(0)
 
@@ -4315,7 +4457,7 @@ class ZILCompiler:
         for i in range(6, 32):
             if i < len(a2):
                 ch = a2[i]
-                table.append(ord(ch) if ch != '\x00' else 0)
+                table.append(self._unicode_to_zscii(ch) if ch != '\x00' else 0)
             else:
                 table.append(0)
 

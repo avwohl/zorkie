@@ -281,7 +281,6 @@ class TestCHRSET:
 class TestLanguage:
     """Tests for LANGUAGE setting on text encoding."""
 
-    @pytest.mark.xfail(reason="LANGUAGE directive not fully implemented")
     def test_language_should_affect_text_encoding(self):
         """Test LANGUAGE affects text encoding."""
         AssertRoutine("", '<TELL "%>M%obeltr%agerf%u%se%<">') \
@@ -289,7 +288,6 @@ class TestLanguage:
             .in_v5() \
             .outputs("\u00bbM\u00f6beltr\u00e4gerf\u00fc\u00dfe\u00ab")
 
-    @pytest.mark.xfail(reason="LANGUAGE directive not fully implemented")
     def test_language_should_affect_vocabulary_encoding(self):
         """Test LANGUAGE affects vocabulary encoding."""
         AssertRoutine("", r"<PRINTB ,W?\%A\%S>") \

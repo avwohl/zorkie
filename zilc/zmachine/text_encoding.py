@@ -30,9 +30,17 @@ ALPHABET_A2_V2 = " \x00\x00\x00\x00\x00\x00\n0123456789.,!?_#'\"/\\-:()"
 class ZTextEncoder:
     """Encodes text to Z-machine format."""
 
+    # German language escape sequences: %X -> character
+    # Note: both 's' and 'S' map to ß (no uppercase ß in traditional German)
+    GERMAN_ESCAPES = {
+        'a': 'ä', 'o': 'ö', 'u': 'ü', 's': 'ß',
+        'A': 'Ä', 'O': 'Ö', 'U': 'Ü', 'S': 'ß',
+        '<': '«', '>': '»'
+    }
+
     def __init__(self, version: int = 3, abbreviations_table=None, crlf_character: str = '|',
                  preserve_spaces: bool = False, sentence_ends: bool = False,
-                 custom_alphabets: dict = None):
+                 custom_alphabets: dict = None, language: str = None):
         self.version = version
         # Use custom alphabets if provided, otherwise use defaults
         if custom_alphabets and 0 in custom_alphabets:
@@ -57,6 +65,8 @@ class ZTextEncoder:
         # SENTENCE-ENDS? flag: convert ". " or "! " or "? " followed by another space
         # into sentence-ending punctuation followed by sentence space (0x0B)
         self.sentence_ends = sentence_ends
+        # Language setting (e.g., 'GERMAN' for German escape sequences)
+        self.language = language
         # Track Unicode characters used (for V5+ unicode table)
         self.unicode_chars_used: set = set()
         # Maximum Unicode table size (V5+)
@@ -257,12 +267,23 @@ class ZTextEncoder:
             List of 16-bit words with Z-characters packed in
         """
         # ZIL string translation (skipped if literal=True):
+        # - Language escape sequences (e.g., %o -> ö for German)
         # - CRLF character (default |) becomes newline in output
         # - Literal newlines immediately after CRLF character are absorbed (ignored)
         # - Other literal newlines (CRLF, CR, LF) become spaces
         # - Unless PRESERVE-SPACES? is set, collapse 2+ spaces after periods to 1 space
         if not literal:
             import re
+
+            # Step 0: Process language-specific escape sequences (e.g., %o -> ö for German)
+            if self.language == 'GERMAN':
+                def replace_german_escape(m):
+                    escape_char = m.group(1)
+                    if escape_char in self.GERMAN_ESCAPES:
+                        return self.GERMAN_ESCAPES[escape_char]
+                    return m.group(0)  # Keep original if not a known escape
+                text = re.sub(r'%([aouAOUSs<>])', replace_german_escape, text)
+
             crlf = self.crlf_character
             # Escape the character for regex use
             crlf_escaped = re.escape(crlf)
