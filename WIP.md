@@ -11,13 +11,28 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 660 passed, 0 failed, 13 xfailed
+- **Tests:** 669 passed, 0 failed, 4 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
+- **ROUTINE-REWRITER hook** now fully working
+- **LANGUAGE lexing** now working (German ß character input/vocabulary matching)
+- **Custom TELL macros** now working (arithmetic in macro expansion)
 
 ## Recent Changes (2025-12-31)
+- **MDL arithmetic operators** - Added +, -, *, /, MOD to compile-time evaluator:
+  - Custom TELL macros like `<DEFMAC TELL ('X) <FORM PRINTN <* .X 2>>>` now work
+  - Enables arithmetic expressions in FORM constructor operands
+  - Fixes test_tell_macro_should_be_used_if_defined
+- **PROPSPEC table resolution** - Fixed table address placeholders in object properties:
+  - Table offsets now refreshed after object building (PROPSPEC creates tables during extract_properties)
+  - Added _resolve_property_table_placeholders call in assembler
+  - Fixes test_vocab_created_by_propspec_should_work_correctly
+- **RETURN inside PROG/BIND** - Fixed implicit return for blocks containing RETURN:
+  - Added _prog_contains_return to detect RETURN anywhere in PROG/BIND body
+  - Uses RET_POPPED when RETURN leaves value on stack instead of RET 1
+  - Fixes test_return_in_bind_should_return_from_prog
 - **LANGUAGE directive for German (V5+)** - German text and vocabulary encoding:
   - Parse `<LANGUAGE GERMAN>` directive to enable German mode
   - Set German custom alphabets (A0/A1/A2) with umlauts and special chars
@@ -66,13 +81,12 @@ Focus areas for next session:
 - **TABLE PATTERN** - Affects element sizes in table generation (1 test passes)
 - **PARSER-TABLE ordering** - Parser tables come before other pure tables (1 test passes)
 
-## Remaining xfailed tests (15)
+## Remaining xfailed tests (4)
 All remaining xfails require substantial work or depend on external factors:
-- **Interpreter issues (6)**: V7 bugs (2), dfrotz trailing spaces (2), Unicode/Glk (2)
-- **Meta-programming (5)**: PROPSPEC (2), IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE
-- **Custom encodings (2)**: LANGUAGE text/vocab encoding (2)
-- **Reader macros (1)**: MAKE-PREFIX-MACRO
-- **LANGUAGE lexing (1)**: German character handling
+- **Glulx/Glk (1)**: test_unicode_characters_should_work_in_tell_in_glulx
+- **PROPSPEC (1)**: test_routines_created_by_propspec_should_work_correctly
+- **PRE-COMPILE hook (1)**: test_pre_compile_hook_can_add_to_compilation_environment
+- **Reader macros (1)**: test_make_prefix_macro_should_work
 
 ## Recent Changes (2025-12-30)
 - **LOWCORE-TABLE builtin** - Iterate over header bytes calling a handler:
@@ -415,42 +429,27 @@ All remaining xfails require substantial work or depend on external factors:
 
 ### Remaining Work
 See "What's Left" section for categorized xfailed tests.
-All 656 passing tests cover basic ZILF functionality.
+All 669 passing tests cover basic ZILF functionality.
 
 ## What's Left
 
-### XFailed Tests (17 remaining)
+### XFailed Tests (4 remaining)
 
-All remaining xfails are for advanced ZILF features not yet implemented:
+All remaining xfails require advanced ZILF features:
 
-**Interpreter Limitations (4 tests)** - Cannot fix in compiler:
-- `test_two_spaces_after_period_*` (2) - dfrotz strips trailing spaces
-- `test_unicode_characters_*` (2) - dfrotz/Glulx unicode handling
+**Glulx/Glk (1 test)**:
+- `test_unicode_characters_should_work_in_tell_in_glulx` - Glulx requires Glk library integration
 
-**CHRSET/LANGUAGE Encoding (4 tests)** - Custom character set support:
-- `test_chrset_should_affect_text_*` (2) - Custom CHRSET encoding
-- `test_language_should_affect_*` (2) - LANGUAGE directive for non-English
+**PROPSPEC Routine Creation (1 test)**:
+- `test_routines_created_by_propspec_should_work_correctly` - Needs ROUTINE evaluation at compile time
 
-**LANGUAGE Lexing (1 test)**:
-- `test_language_should_affect_lexing` - German character handling (ß → ss)
-
-**PROPSPEC Features (2 tests)** - Property specification clearing:
-- `test_vocab_created_by_propspec_should_work_correctly`
-- `test_routines_created_by_propspec_should_work_correctly`
-
-**Meta/Hooks (3 tests)**:
-- `test_in_zilch_indicates_macro_expansion_context` - IN-ZILCH flag
-- `test_routine_rewriter_can_rewrite_routines` - ROUTINE-REWRITER
-- `test_pre_compile_hook_can_add_to_compilation_environment` - PRE-COMPILE
-
-**V7 Interpreter (2 tests)**:
-- V7 hello world tests - bocfel/dfrotz interpreter bugs
+**PRE-COMPILE Hook (1 test)**:
+- `test_pre_compile_hook_can_add_to_compilation_environment` - Requires ASSOCIATIONS, NEXT, SORT
 
 **Reader Macros (1 test)**:
-- `test_make_prefix_macro_should_work` - MAKE-PREFIX-MACRO
+- `test_make_prefix_macro_should_work` - Requires lexer-level reader macro support
 
 ### Priority Items for Future Work
-1. PROPSPEC clearing support (override default PROPDEF patterns)
-2. CHRSET/LANGUAGE encoding support
-3. Meta/hooks (IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE)
-4. Object ordering for complex mixed object/room definitions
+1. Object ordering for complex mixed object/room definitions
+2. PROPSPEC routine creation (compile-time ROUTINE evaluation)
+3. PRE-COMPILE hook (ASSOCIATIONS, NEXT, SORT MDL functions)
