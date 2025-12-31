@@ -2674,6 +2674,13 @@ class ZILCompiler:
                 codegen.globals['LONG-WORD-TABLE'] = codegen.next_global
                 codegen.next_global += 1
 
+        # Pre-register WORD-FLAG-TABLE global if there are NEW-ADD-WORD entries
+        # This must happen before routine generation so code can reference the global
+        if program.new_add_words:
+            if 'WORD-FLAG-TABLE' not in codegen.globals:
+                codegen.globals['WORD-FLAG-TABLE'] = codegen.next_global
+                codegen.next_global += 1
+
         routines_code = codegen.generate(program)
         self.log(f"  {len(routines_code)} bytes of routines")
 
@@ -2770,6 +2777,16 @@ class ZILCompiler:
         # Add BUZZ words
         if program.buzz_words:
             dictionary.add_words(program.buzz_words, 'buzz')
+
+        # Process NEW-ADD-WORD declarations (NEW-PARSER? mode)
+        # Track (word_name, flags) for WORD-FLAG-TABLE generation
+        word_flag_entries = []
+        if program.new_add_words:
+            for naw in program.new_add_words:
+                # Add word to dictionary
+                dictionary.add_word(naw.name, 'buzz')  # Add as generic word
+                # Track for WORD-FLAG-TABLE
+                word_flag_entries.append((naw.name, naw.flags))
 
         # Add standalone SYNONYM words (excluding removed ones)
         # But skip words that are actually used as prepositions (not object synonyms)
@@ -3039,6 +3056,41 @@ class ZILCompiler:
                 table_offsets = codegen.get_table_offsets()
                 # Rebuild globals_data to include LONG-WORD-TABLE value
                 globals_data = codegen.build_globals_data()
+
+        # Generate WORD-FLAG-TABLE if there are NEW-ADD-WORD entries (NEW-PARSER? mode)
+        if word_flag_entries:
+            self.log(f"  Generating WORD-FLAG-TABLE with {len(word_flag_entries)} entries")
+            # Table format: [count, word1, flags1, word2, flags2, ...]
+            # Count is 2 * number of entries (word + flags per entry)
+            table_data_wft = bytearray()
+            count = len(word_flag_entries) * 2
+            table_data_wft.extend([(count >> 8) & 0xFF, count & 0xFF])
+
+            for word_name, flags in word_flag_entries:
+                # Add vocabulary word placeholder (0xFB00 | index)
+                placeholder_idx = codegen._next_vocab_placeholder_index
+                codegen._vocab_placeholders[placeholder_idx] = word_name.lower()
+                codegen._next_vocab_placeholder_index += 1
+                placeholder_val = 0xFB00 | placeholder_idx
+                table_data_wft.extend([(placeholder_val >> 8) & 0xFF, placeholder_val & 0xFF])
+                # Add flags
+                table_data_wft.extend([(flags >> 8) & 0xFF, flags & 0xFF])
+
+            # Add as impure table (needs word placeholder resolution)
+            table_index = len(codegen.tables)
+            codegen.tables.append(("_WORD_FLAG_TABLE", bytes(table_data_wft), False, False))
+
+            # Register WORD-FLAG-TABLE as a global pointing to the table
+            if 'WORD-FLAG-TABLE' not in codegen.globals:
+                codegen.globals['WORD-FLAG-TABLE'] = codegen.next_global
+                codegen.next_global += 1
+            # Link global to the table using 0xFF00 | table_index pattern
+            codegen.global_values['WORD-FLAG-TABLE'] = 0xFF00 | table_index
+
+            # Refresh table data and offsets
+            table_data = codegen.get_table_data()
+            table_offsets = codegen.get_table_offsets()
+            globals_data = codegen.build_globals_data()
 
         # Build object table with proper properties
         self.log("Building object table...")

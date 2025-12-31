@@ -330,7 +330,6 @@ class TestNewParser:
                 "<N=? <GET <GET ,W?ATTACK 3> 3> 0>"
             )
 
-    @pytest.mark.xfail(reason="NEW-PARSER? WORD-FLAG-TABLE not implemented")
     def test_word_flag_table_should_list_words_and_flags(self):
         """Test WORD-FLAG-TABLE lists words and flags."""
         AssertGlobals(

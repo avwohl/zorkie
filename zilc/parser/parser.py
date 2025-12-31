@@ -104,6 +104,9 @@ class Parser:
         elif isinstance(node, BuzzNode):
             # Add all buzz words to program's buzz_words list
             program.buzz_words.extend(node.words)
+        elif isinstance(node, NewAddWordNode):
+            # Add NEW-ADD-WORD declaration
+            program.new_add_words.append(node)
         elif isinstance(node, SynonymNode):
             # Add all synonym words to program's synonym_words list
             program.synonym_words.extend(node.words)
@@ -496,6 +499,11 @@ class Parser:
 
             elif op_name == "BUZZ":
                 node = self.parse_buzz(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "NEW-ADD-WORD":
+                node = self.parse_new_add_word(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 
@@ -1607,6 +1615,53 @@ class Parser:
                 self.error(f"Expected word in BUZZ declaration, got {self.current_token.type}")
 
         return BuzzNode(words, line, col)
+
+    def parse_new_add_word(self, line: int, col: int):
+        """Parse NEW-ADD-WORD vocabulary declaration (NEW-PARSER? mode).
+
+        Syntax: <NEW-ADD-WORD name type value flags>
+
+        Example: <NEW-ADD-WORD FOO TOBJECT <> 12345>
+
+        Args:
+            name: Word name (atom)
+            type: Classification type (atom like TOBJECT, TBUZZ, etc.)
+            value: Value (often <> for false)
+            flags: Integer word flags
+        """
+        from .ast_nodes import NewAddWordNode
+
+        # Parse word name
+        if self.current_token.type != TokenType.ATOM:
+            self.error(f"Expected word name in NEW-ADD-WORD, got {self.current_token.type}")
+        name = self.current_token.value.upper()
+        self.advance()
+
+        # Parse word type (optional - could be TOBJECT, TBUZZ, etc.)
+        word_type = None
+        if self.current_token.type == TokenType.ATOM:
+            word_type = self.current_token.value.upper()
+            self.advance()
+
+        # Parse value (often <> for false)
+        value = None
+        if self.current_token.type == TokenType.LANGLE:
+            # Parse a form
+            value = self.parse_form()
+        elif self.current_token.type == TokenType.NUMBER:
+            value = self.current_token.value
+            self.advance()
+        elif self.current_token.type == TokenType.ATOM:
+            value = self.current_token.value
+            self.advance()
+
+        # Parse flags (optional integer)
+        flags = 0
+        if self.current_token.type == TokenType.NUMBER:
+            flags = self.current_token.value
+            self.advance()
+
+        return NewAddWordNode(name, word_type, value, flags, line, col)
 
     def parse_synonym_declaration(self, line: int, col: int):
         """Parse standalone SYNONYM declaration (not in an object).

@@ -31,6 +31,7 @@ class NodeType(Enum):
     CONSTANT = auto()      # <CONSTANT ...>
     PROPDEF = auto()       # <PROPDEF name default>
     BUZZ = auto()          # <BUZZ word1 word2 ...>
+    NEW_ADD_WORD = auto()  # <NEW-ADD-WORD name type value flags> (NEW-PARSER?)
     SYNONYM = auto()       # <SYNONYM word1 word2 ...> (standalone)
     BIT_SYNONYM = auto()   # <BIT-SYNONYM flag1 flag2> (flag alias)
     PREP_SYNONYM = auto()  # <PREP-SYNONYM prep1 prep2> (preposition synonym)
@@ -371,6 +372,20 @@ class BuzzNode(ASTNode):
         return f"Buzz({len(self.words)} words)"
 
 
+class NewAddWordNode(ASTNode):
+    """NEW-ADD-WORD vocabulary addition (NEW-PARSER? mode)."""
+    def __init__(self, name: str, word_type: Optional[str], value: Any, flags: int,
+                 line: int = 0, column: int = 0):
+        super().__init__(NodeType.NEW_ADD_WORD, line, column)
+        self.name = name  # Word name (e.g., "FOO")
+        self.word_type = word_type  # Classification (e.g., "TOBJECT")
+        self.value = value  # Value (often <> for false)
+        self.flags = flags  # Word flags
+
+    def __repr__(self):
+        return f"NewAddWord({self.name}, {self.word_type}, flags={self.flags})"
+
+
 class SynonymNode(ASTNode):
     """Standalone SYNONYM declaration (not in an object)."""
     def __init__(self, words: List[str], line: int = 0, column: int = 0):
@@ -654,6 +669,7 @@ class Program:
     define_globals: List['DefineGlobalsNode'] = field(default_factory=list)  # DEFINE-GLOBALS declarations
     compile_time_ops: List['FormNode'] = field(default_factory=list)  # Compile-time ops: ZPUT, PUTB, ZGET, ZREST
     cleared_propspecs: Set[str] = field(default_factory=set)  # PROPSPEC cleared for atoms (e.g., DIRECTIONS)
+    new_add_words: List['NewAddWordNode'] = field(default_factory=list)  # NEW-ADD-WORD declarations (NEW-PARSER?)
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "
