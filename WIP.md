@@ -10,12 +10,35 @@ Focus areas for next session:
 2. **NEW-PARSER?** - Extended vocabulary format (8 tests)
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
-## Current Status (2025-12-30)
-- **Tests:** 646 passed, 0 failed, 27 xfailed
+## Current Status (2025-12-31)
+- **Tests:** 653 passed, 0 failed, 20 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
+
+## Recent Changes (2025-12-31)
+- **Error limits implementation** - Compilation stops after 100 errors:
+  - Per-call-site error tracking for undefined routines
+  - 101st error is "too many errors" message
+  - `compiler.get_errors()` returns all collected errors
+- **PROPDEF DIRECTIONS fixes** (4 tests now pass):
+  - Skip P?DIRECTIONS creation when PROPDEF DIRECTIONS is defined
+  - Implicit direction detection for PROPDEF patterns (EAST/WEST via GOES TO syntax)
+  - ROOM type optimization for ROOMS-FIRST mode (1 byte vs 2 bytes)
+  - VOC form handling in PROPDEF patterns (extract part-of-speech, register with codegen)
+  - Single-value PROPDEF matching (wrap non-list values for pattern matching)
+- **TABLE PATTERN** - Affects element sizes in table generation (1 test passes)
+- **PARSER-TABLE ordering** - Parser tables come before other pure tables (1 test passes)
+
+## Remaining xfailed tests (20)
+All remaining xfails require substantial work or depend on external factors:
+- **Interpreter issues (6)**: V7 bugs (2), dfrotz trailing spaces (2), Unicode/Glk (2)
+- **Meta-programming (5)**: PROPSPEC (2), IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE
+- **Custom encodings (4)**: CHRSET (2), LANGUAGE (2)
+- **NEW-PARSER? (3)**: Syntax format, WORD-FLAG-TABLE, synonym pointers
+- **Reader macros (1)**: MAKE-PREFIX-MACRO
+- **LANGUAGE lexing (1)**: German character handling
 
 ## Recent Changes (2025-12-30)
 - **LOWCORE-TABLE builtin** - Iterate over header bytes calling a handler:
