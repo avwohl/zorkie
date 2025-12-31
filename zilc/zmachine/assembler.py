@@ -875,6 +875,105 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_property_table_placeholders(self, objects_data: bytes,
+                                              table_offsets: dict,
+                                              tables_base: int,
+                                              prop_defaults_size: int) -> bytes:
+        """
+        Resolve table address placeholders in object property tables.
+
+        Scans property DATA for values marked with 0xFD00 prefix and replaces
+        them with actual table addresses.
+
+        Args:
+            objects_data: Object table data with property tables
+            table_offsets: Dict mapping table index to offset within table data
+            tables_base: Base address of tables in story file
+            prop_defaults_size: Size of property defaults table in bytes
+
+        Returns:
+            Modified object data with table addresses resolved
+        """
+        if not table_offsets:
+            return objects_data
+
+        result = bytearray(objects_data)
+
+        # Property tables start after property defaults and object entries
+        if self.version <= 3:
+            obj_entry_size = 9
+        else:
+            obj_entry_size = 14
+
+        if len(result) <= prop_defaults_size + obj_entry_size:
+            return bytes(result)
+
+        # Get first property table address
+        prop_addr_offset = prop_defaults_size + obj_entry_size - 2
+        first_prop_offset = struct.unpack('>H', result[prop_addr_offset:prop_addr_offset+2])[0]
+
+        # Process each property table by properly parsing its structure
+        i = first_prop_offset
+        while i < len(result):
+            if i >= len(result):
+                break
+
+            # Read name length (in words)
+            name_len = result[i]
+            i += 1
+
+            # Skip over the name bytes (name_len * 2 bytes for 16-bit words)
+            i += name_len * 2
+
+            # Now process properties until terminator (0x00)
+            while i < len(result) and result[i] != 0x00:
+                size_byte = result[i]
+                i += 1
+
+                if self.version <= 3:
+                    # V1-3: size byte = 32 * (len - 1) + prop_num
+                    data_len = (size_byte >> 5) + 1
+                else:
+                    # V4+: more complex encoding
+                    if size_byte & 0x80:
+                        # Two size bytes
+                        if i >= len(result):
+                            break
+                        size_byte2 = result[i]
+                        i += 1
+                        data_len = size_byte2 & 0x3F
+                        if data_len == 0:
+                            data_len = 64  # Special case
+                    else:
+                        # Single size byte
+                        data_len = 2 if (size_byte & 0x40) else 1
+
+                # Scan property DATA for 0xFD00 table address placeholders
+                prop_end = i + data_len
+                j = i
+                while j + 1 < prop_end and j + 1 < len(result):
+                    word = (result[j] << 8) | result[j + 1]
+
+                    # Check for table address placeholder: 0xFD00 | table_idx
+                    if (word & 0xFF00) == 0xFD00:
+                        table_idx = word & 0x00FF
+                        if table_idx in table_offsets:
+                            table_offset = table_offsets[table_idx]
+                            actual_addr = tables_base + table_offset
+                            result[j] = (actual_addr >> 8) & 0xFF
+                            result[j + 1] = actual_addr & 0xFF
+                        j += 2
+                    else:
+                        j += 2  # Move by words in property data
+
+                i = prop_end
+
+            # Skip terminator
+            if i < len(result) and result[i] == 0x00:
+                i += 1
+
+        return bytes(result)
+
     def build_story_file(self, routines: bytes, objects: bytes = b'',
                         dictionary: bytes = b'', globals_data: bytes = b'',
                         abbreviations_table=None, string_table=None,
@@ -1085,6 +1184,12 @@ class ZAssembler:
             objects_fixed = bytearray(self._resolve_dict_placeholders(
                 bytes(objects_fixed), dict_addr_calc, prop_defaults_size, vocab_fixups
             ))
+
+            # Resolve table address placeholders (0xFD00 | table_idx) in property values
+            if table_offsets:
+                objects_fixed = bytearray(self._resolve_property_table_placeholders(
+                    bytes(objects_fixed), table_offsets, table_base_addr, prop_defaults_size
+                ))
 
             # Calculate number of objects
             # Find first property table address to determine where object entries end

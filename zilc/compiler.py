@@ -975,6 +975,34 @@ class ZILCompiler:
 
         return ''.join(result)
 
+    def _is_inside_macro_def(self, source: str, pos: int) -> bool:
+        """
+        Check if position is inside a DEFMAC or DEFINE body.
+
+        Returns True if there are unclosed <DEFMAC or <DEFINE forms
+        before the given position.
+        """
+        import re
+
+        # Find all macro definition starts and their closing brackets
+        macro_starts = []
+        for m in re.finditer(r'<\s*(DEFMAC|DEFINE)\s+', source[:pos], re.IGNORECASE):
+            # Find the matching > for this macro definition
+            _, end = self._extract_balanced_content(source, m.start())
+            if end > pos:
+                # The macro definition closes AFTER our position - we're inside it
+                return True
+
+        return False
+
+    def _is_table_form(self, value) -> bool:
+        """Check if value is a TABLE/ITABLE/LTABLE/PTABLE FormNode."""
+        from .parser.ast_nodes import AtomNode, FormNode
+        if isinstance(value, FormNode) and isinstance(value.operator, AtomNode):
+            op_name = value.operator.value.upper()
+            return op_name in ('TABLE', 'ITABLE', 'LTABLE', 'PTABLE')
+        return False
+
     def _process_ifflag(self, source: str) -> str:
         """Process IFFLAG directives with proper bracket balancing."""
         import re
@@ -990,6 +1018,19 @@ class ZILCompiler:
 
             # Add text before match
             result.append(source[pos:pos + match.start()])
+
+            # Check if this IFFLAG is inside a macro definition
+            ifflag_start = pos + match.start()
+            if self._is_inside_macro_def(source, ifflag_start):
+                # Inside macro definition - preserve the IFFLAG for macro expansion time
+                content, end = self._extract_balanced_content(source, ifflag_start)
+                if content:
+                    result.append(content)
+                    pos = end
+                else:
+                    result.append(match.group(0))
+                    pos += match.end()
+                continue
 
             # Find the matching > for this <IFFLAG
             start = pos + match.start()  # Start of <IFFLAG
@@ -3981,6 +4022,16 @@ class ZILCompiler:
                         else:
                             # Pattern didn't match, fall through to default handling
                             props[prop_num] = value
+                    # Check for TABLE/ITABLE/LTABLE/PTABLE FormNode - compile the table
+                    elif self._is_table_form(value):
+                        op_name = value.operator.value.upper()
+                        # Compile the table and use its address as property value
+                        table_name = f"_PROPSPEC_{obj_node.name}_{key}"
+                        codegen._compile_global_table(table_name, value, op_name)
+                        # Get the table index and create a placeholder
+                        table_idx = len(codegen.tables) - 1
+                        # Store 0xFD00 | idx as placeholder for table address
+                        props[prop_num] = 0xFD00 | table_idx
                     # Extract value from AST node
                     elif hasattr(value, 'value'):
                         # Try to resolve atom values (flags, objects, constants)
@@ -3996,7 +4047,17 @@ class ZILCompiler:
                         self.log(f"  Auto-assigned {key} -> property #{next_prop_num}")
                         next_prop_num += 1
                     prop_num = prop_map[key]
-                    if hasattr(value, 'value'):
+                    # Check for TABLE/ITABLE/LTABLE/PTABLE FormNode - compile the table
+                    if self._is_table_form(value):
+                        op_name = value.operator.value.upper()
+                        # Compile the table and use its address as property value
+                        table_name = f"_PROPSPEC_{obj_node.name}_{key}"
+                        codegen._compile_global_table(table_name, value, op_name)
+                        # Get the table index and create a placeholder
+                        table_idx = len(codegen.tables) - 1
+                        # Store 0xFD00 | idx as placeholder for table address
+                        props[prop_num] = 0xFD00 | table_idx
+                    elif hasattr(value, 'value'):
                         # Try to resolve atom values (flags, objects, constants)
                         str_val = value.value
                         resolved = resolve_atom_value(str_val) if isinstance(str_val, str) else None
@@ -4114,6 +4175,10 @@ class ZILCompiler:
             )
 
         objects_data = obj_table.build()
+
+        # Refresh table data and offsets after object building (PROPSPEC may have created new tables)
+        table_data = codegen.get_table_data()
+        table_offsets = codegen.get_table_offsets()
 
         # Register flag bit assignments with codegen for FSET/FCLEAR/FSET? opcodes
         for flag_name, bit_num in flag_bit_map.items():

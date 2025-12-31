@@ -433,7 +433,6 @@ class TestPropdef:
             "<=? <GETP ,BAR ,P?FOO> ,W?FOO>"
         )
 
-    @pytest.mark.xfail(reason="PROPSPEC not implemented")
     def test_vocab_created_by_propspec_should_work_correctly(self):
         """Test that vocab created by PROPSPEC works correctly."""
         AssertGlobals(

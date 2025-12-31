@@ -162,15 +162,27 @@ class Parser:
                     program.compile_time_ops.append(node)
                 elif op_name == 'PUTPROP':
                     # PUTPROP atom indicator [value]
-                    # Handle PROPSPEC clearing: <PUTPROP DIRECTIONS PROPSPEC>
+                    # Handle PROPSPEC: <PUTPROP DIRECTIONS PROPSPEC> or <PUTPROP FOO PROPSPEC FOO-HANDLER>
                     if len(node.operands) >= 2:
                         item_node = node.operands[0]
                         indicator_node = node.operands[1]
                         has_value = len(node.operands) >= 3
                         if isinstance(item_node, AtomNode) and isinstance(indicator_node, AtomNode):
-                            if indicator_node.value.upper() == 'PROPSPEC' and not has_value:
-                                # Clear PROPSPEC for this atom
-                                program.cleared_propspecs.add(item_node.value.upper())
+                            if indicator_node.value.upper() == 'PROPSPEC':
+                                if not has_value:
+                                    # Clear PROPSPEC for this atom
+                                    program.cleared_propspecs.add(item_node.value.upper())
+                                else:
+                                    # Set PROPSPEC handler for this atom
+                                    value_node = node.operands[2]
+                                    if isinstance(value_node, AtomNode):
+                                        program.propspec_handlers[item_node.value.upper()] = value_node.value
+                else:
+                    # Other top-level forms (potential macro calls) - store for evaluation
+                    program.top_level_forms.append(node)
+            else:
+                # FormNode with non-atom operator - store for evaluation
+                program.top_level_forms.append(node)
 
     def parse_top_level(self) -> ASTNode:
         """Parse a top-level form."""

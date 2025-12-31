@@ -160,7 +160,6 @@ class TestPackageDefinitions:
 class TestInZilch:
     """Tests for IN-ZILCH flag."""
 
-    @pytest.mark.xfail(reason="IN-ZILCH flag not implemented")
     def test_in_zilch_indicates_macro_expansion_context(self):
         """Test IN-ZILCH indicates what macro expansions will be used for."""
         MY_MACRO = """

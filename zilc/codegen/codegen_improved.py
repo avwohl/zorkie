@@ -2810,7 +2810,8 @@ class ImprovedCodeGenerator:
                         'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
                         'QUIT', 'RESTART', 'CLEAR', 'SCREEN', 'ERASE', 'COLOR',
                         'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
-                        'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
+                        'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE',
+                        'BIND', 'PROG'  # Scoping constructs don't push to stack
                     }
                     if routine.name == "GO":
                         # GO routine should QUIT instead of RET
@@ -2821,9 +2822,14 @@ class ImprovedCodeGenerator:
                         routine_code.append(0x9B)  # RET small constant
                         routine_code.append(0x00)  # Return 0 (false)
                     elif op_name in void_ops:
-                        # Void operation - use RET 1 (success/true)
-                        routine_code.append(0x9B)
-                        routine_code.append(0x01)
+                        # Check if PROG/BIND contains RETURN anywhere - if so, use RET_POPPED
+                        # because RETURN pushes its value to the stack before jumping to exit
+                        if op_name in ('PROG', 'BIND', 'REPEAT') and self._prog_contains_return(last_stmt):
+                            routine_code.append(0xB8)  # RET_POPPED
+                        else:
+                            # Void operation - use RET 1 (success/true)
+                            routine_code.append(0x9B)
+                            routine_code.append(0x01)
                     else:
                         # The expression pushed its result to the stack
                         # Use RET_POPPED to return that value
@@ -2989,6 +2995,59 @@ class ImprovedCodeGenerator:
 
         return False
 
+    def _prog_contains_return(self, form: FormNode) -> bool:
+        """Check if a PROG/BIND/REPEAT form contains a RETURN anywhere in its body.
+
+        This is used to determine if PROG leaves a value on the stack that should
+        be returned with RET_POPPED instead of RET 1.
+        """
+        op_name = form.operator.value.upper() if isinstance(form.operator, AtomNode) else ''
+        if op_name not in ('PROG', 'BIND', 'REPEAT'):
+            return False
+
+        # Get the body statements (after bindings)
+        prog_body = list(form.operands)
+        # Check if first operand is activation name (AtomNode)
+        if prog_body and isinstance(prog_body[0], AtomNode):
+            prog_body = prog_body[1:]  # Skip activation name
+        # Skip bindings (usually first list)
+        if prog_body and isinstance(prog_body[0], list):
+            prog_body = prog_body[1:]
+
+        # Recursively check all statements for RETURN
+        return self._body_contains_return(prog_body)
+
+    def _body_contains_return(self, body: list) -> bool:
+        """Check if a list of statements contains a RETURN anywhere."""
+        for stmt in body:
+            if isinstance(stmt, FormNode) and isinstance(stmt.operator, AtomNode):
+                op_name = stmt.operator.value.upper()
+                if op_name == 'RETURN':
+                    return True
+                # Check inside nested PROG/BIND/REPEAT
+                if op_name in ('PROG', 'BIND', 'REPEAT'):
+                    if self._prog_contains_return(stmt):
+                        return True
+                # Check inside COND branches
+                if op_name == 'COND':
+                    for clause in stmt.operands:
+                        if isinstance(clause, list) and len(clause) > 1:
+                            if self._body_contains_return(clause[1:]):
+                                return True
+                # Check inside operands of regular forms (like +, -, etc.)
+                # This handles cases like <+ 3 <PROG () <RETURN 42>>>
+                if stmt.operands:
+                    if self._body_contains_return(list(stmt.operands)):
+                        return True
+            elif isinstance(stmt, CondNode):
+                # Check CondNode branches (clauses are tuples: (condition, *body))
+                for clause in stmt.clauses:
+                    if isinstance(clause, tuple) and len(clause) > 1:
+                        # clause is (condition, body1, body2, ...)
+                        if self._body_contains_return(list(clause[1:])):
+                            return True
+        return False
+
     def generate_statement(self, node: ASTNode) -> bytes:
         """Generate code for a statement."""
         if isinstance(node, FormNode):
@@ -3058,9 +3117,8 @@ class ImprovedCodeGenerator:
                 return self.gen_quit()
             return self.gen_rfatal()
         elif op_name == 'RETURN':
-            # In GO routine, RETURN should become QUIT (returning from GO is undefined)
-            if self._current_routine == "GO":
-                return self.gen_quit()
+            # Let gen_return handle block logic first
+            # GO routine conversion to QUIT happens inside gen_return if needed
             return self.gen_return(form.operands)
         elif op_name == 'QUIT':
             if form.operands:
@@ -4107,6 +4165,20 @@ class ImprovedCodeGenerator:
             # No compiler access - use version default
             use_routine_return = self.version >= 5
 
+        # BIND is a variable scope, not a control flow block
+        # RETURN inside BIND should return from the enclosing PROG/REPEAT
+        if self.block_stack:
+            innermost = self.block_stack[-1]
+            if innermost.get('block_type') == 'BIND':
+                # Find the enclosing non-BIND block (PROG/REPEAT)
+                for idx in range(len(self.block_stack) - 2, -1, -1):
+                    block = self.block_stack[idx]
+                    if block.get('block_type') != 'BIND':
+                        # Found a non-BIND block - return from it
+                        return self._gen_targeted_block_return(
+                            operands[:1] if operands else [], idx)
+                # No enclosing PROG/REPEAT - fall through to routine return
+
         # If using routine return or we're at routine level, skip block handling
         if use_routine_return:
             # RETURN exits routine regardless of block context
@@ -4116,6 +4188,10 @@ class ImprovedCodeGenerator:
             return self._gen_block_return(operands[:1] if operands else [])
 
         # Routine-level return
+        # In GO routine, returning is undefined behavior - use QUIT instead
+        if self._current_routine == "GO":
+            return self.gen_quit()
+
         if not operands:
             return self.gen_rtrue()
 
@@ -4610,13 +4686,26 @@ class ImprovedCodeGenerator:
                     )
 
             elif isinstance(op, FormNode):
-                # Form (likely GVAL or similar) - generate and print result
+                # Form (likely GVAL/LVAL or similar) - generate and print result
                 form_code = self.generate_form(op)
                 code.extend(form_code)
-                # Result is on stack, print it as number
-                code.append(0xE6)  # PRINT_NUM VAR form
-                code.append(0xBF)  # Type: variable (stack), rest omitted
-                code.append(0x00)  # Stack
+                # Check if this is LVAL/GVAL - if so, the result might be a string address
+                # and should be printed with PRINT_PADDR, not PRINT_NUM
+                is_var_form = False
+                if isinstance(op.operator, AtomNode):
+                    op_name = op.operator.value.upper()
+                    if op_name in ('LVAL', 'GVAL'):
+                        is_var_form = True
+                if is_var_form:
+                    # Variable value - print as string using PRINT_PADDR
+                    # 1OP variable form: 0xA0 | 0x0D = 0xAD
+                    code.append(0xAD)  # PRINT_PADDR 1OP variable form
+                    code.append(0x00)  # Stack
+                else:
+                    # Result is on stack, print it as number
+                    code.append(0xE6)  # PRINT_NUM VAR form
+                    code.append(0xBF)  # Type: variable (stack), rest omitted
+                    code.append(0x00)  # Stack
                 i += 1
 
             elif isinstance(op, GlobalVarNode) or isinstance(op, LocalVarNode):
@@ -11904,11 +11993,11 @@ class ImprovedCodeGenerator:
                                 init_code = self.generate_statement(binding[1])
                                 if init_code:
                                     code.extend(init_code)
-                                    # Store stack top (variable 0) to local variable
-                                    # Use 0x4D = 0x0D | 0x40 for variable operand form
-                                    code.append(0x4D)  # STORE from var (2OP:13, small/var)
-                                    code.append(var_num & 0xFF)
-                                    code.append(0x00)  # Stack (variable 0)
+                                    # Use PULL to pop stack into local variable
+                                    # PULL is VAR:9 (0xE9), with small constant type for operand
+                                    code.append(0xE9)  # PULL (VAR:9)
+                                    code.append(0x7F)  # Type: small constant, omit, omit, omit
+                                    code.append(var_num & 0xFF)  # Variable to pull into
                         else:
                             code.append(0x0D)  # STORE
                             code.append(var_num & 0xFF)
@@ -11958,6 +12047,39 @@ class ImprovedCodeGenerator:
                         self._current_stmt_routine_offsets[k] = (stmt_insert_offset + rel_offset, placeholder_val)
 
                     code.extend(stmt_code)
+
+            # PROG should return the value of its last expression
+            # Only push TRUE (1) as default if the body doesn't produce a value
+            # IMPORTANT: Add push 1 BEFORE exit_point so targeted RETURNs jump over it
+            last_stmt = operands[-1] if len(operands) > body_start else None
+
+            # Check if last statement produces a value
+            # FormNode/CondNode/RepeatNode produce values, EXCEPT void operations
+            void_ops = {
+                'PRINTI', 'PRINT', 'PRINTR', 'PRINTC', 'PRINTB', 'PRINTD',
+                'PRINTN', 'PRINTT', 'PRINTU', 'CRLF', 'TELL',
+                'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
+                'QUIT', 'RESTART', 'CLEAR', 'SCREEN', 'ERASE', 'COLOR',
+                'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
+                'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
+            }
+            body_produces_value = False
+            if isinstance(last_stmt, (CondNode, RepeatNode)):
+                body_produces_value = True
+            elif isinstance(last_stmt, FormNode):
+                # Check if it's a void operation
+                if isinstance(last_stmt.operator, AtomNode):
+                    op_name = last_stmt.operator.value.upper()
+                    body_produces_value = op_name not in void_ops
+                else:
+                    body_produces_value = True
+
+            if not body_produces_value:
+                # Body doesn't produce a value, push TRUE (1) as default return
+                code.append(0x14)  # ADD long form: 2OP:20 with small,small operands
+                code.append(0x00)  # First operand: constant 0
+                code.append(0x01)  # Second operand: constant 1
+                code.append(0x00)  # Store result to sp (variable 0 = stack)
 
             # Exit point is at the end of the block
             exit_point = len(code)
@@ -12071,6 +12193,13 @@ class ImprovedCodeGenerator:
         saved_locals = {}  # Save old mappings for shadowed variables
         bind_bound_vars = set()  # Track variables bound in this BIND
         bind_side_effect_vars = set()  # Variables with side-effect initializers
+
+        # Handle FormNode with () operator (list representation from macro expansion)
+        if isinstance(bindings_list, FormNode):
+            if isinstance(bindings_list.operator, AtomNode) and bindings_list.operator.value == '()':
+                # Convert FormNode list to Python list of operands
+                bindings_list = bindings_list.operands
+
         if isinstance(bindings_list, list):
             for binding in bindings_list:
                 if isinstance(binding, AtomNode):
@@ -12090,6 +12219,46 @@ class ImprovedCodeGenerator:
                     code.append(0x0D)  # STORE
                     code.append(var_num & 0xFF)
                     code.append(0x00)  # Initial value 0
+                elif isinstance(binding, FormNode) and isinstance(binding.operator, AtomNode) and binding.operator.value == '()':
+                    # FormNode with () operator representing (VAR VALUE) - convert to list
+                    binding = binding.operands
+                    if len(binding) >= 1 and isinstance(binding[0], AtomNode):
+                        var_name = binding[0].value
+                        if var_name in self.locals:
+                            saved_locals[var_name] = self.locals[var_name]
+                        var_num = len(self.locals) + 1
+                        self.locals[var_name] = var_num
+                        bind_bound_vars.add(var_name)
+                        if hasattr(self, 'max_local_slot'):
+                            self.max_local_slot = max(self.max_local_slot, var_num)
+                        if len(binding) >= 2:
+                            init_value = self.get_operand_value(binding[1])
+                            if isinstance(binding[1], FormNode):
+                                bind_side_effect_vars.add(var_name)
+                            if isinstance(init_value, int):
+                                if 0 <= init_value <= 255:
+                                    code.append(0x0D)
+                                    code.append(var_num & 0xFF)
+                                    code.append(init_value & 0xFF)
+                                else:
+                                    code.append(0xCD)
+                                    code.append(0x4F)
+                                    code.append(var_num & 0xFF)
+                                    code.append((init_value >> 8) & 0xFF)
+                                    code.append(init_value & 0xFF)
+                            else:
+                                init_code = self.generate_statement(binding[1])
+                                if init_code:
+                                    code.extend(init_code)
+                                    # Use PULL to pop stack into local variable
+                                    # PULL is VAR:9 (0xE9), with small constant type for operand
+                                    code.append(0xE9)  # PULL (VAR:9)
+                                    code.append(0x7F)  # Type: small constant, omit, omit, omit
+                                    code.append(var_num & 0xFF)  # Variable to pull into
+                        else:
+                            code.append(0x0D)
+                            code.append(var_num & 0xFF)
+                            code.append(0x00)
                 elif isinstance(binding, list) and len(binding) >= 1:
                     # (VAR) or (VAR VALUE)
                     if isinstance(binding[0], AtomNode):
@@ -12130,11 +12299,11 @@ class ImprovedCodeGenerator:
                                 init_code = self.generate_statement(binding[1])
                                 if init_code:
                                     code.extend(init_code)
-                                    # Store stack top (variable 0) to local variable
-                                    # Use 0x4D = 0x0D | 0x40 for variable operand form
-                                    code.append(0x4D)  # STORE from var (2OP:13, small/var)
-                                    code.append(var_num & 0xFF)
-                                    code.append(0x00)  # Stack (variable 0)
+                                    # Use PULL to pop stack into local variable
+                                    # PULL is VAR:9 (0xE9), with small constant type for operand
+                                    code.append(0xE9)  # PULL (VAR:9)
+                                    code.append(0x7F)  # Type: small constant, omit, omit, omit
+                                    code.append(var_num & 0xFF)  # Variable to pull into
                         else:
                             code.append(0x0D)  # STORE
                             code.append(var_num & 0xFF)
@@ -12164,8 +12333,10 @@ class ImprovedCodeGenerator:
 
         try:
             # Generate code for each statement in sequence
+            last_stmt = None
             for i in range(1, len(operands)):
                 stmt = operands[i]
+                last_stmt = stmt
 
                 # Track placeholder count before generating statement
                 placeholder_count_before = len(self._current_stmt_routine_offsets)
@@ -12180,6 +12351,34 @@ class ImprovedCodeGenerator:
                         self._current_stmt_routine_offsets[k] = (stmt_insert_offset + rel_offset, placeholder_val)
 
                     code.extend(stmt_code)
+
+            # Handle last statement as return value
+            # If the last statement is a LocalVarNode, push its value to the stack
+            # (since generate_statement for LocalVarNode returns empty bytes)
+            if isinstance(last_stmt, LocalVarNode):
+                var_num = self.locals.get(last_stmt.name)
+                if var_num is not None:
+                    # Mark as used
+                    if hasattr(self, 'used_locals'):
+                        self.used_locals.add(last_stmt.name)
+                    # Push local variable to stack using: ADD 0, local -> sp
+                    # 0x54 = 2OP:20 (ADD) with small, var operand types
+                    code.append(0x54)  # ADD small, var
+                    code.append(0x00)  # First operand: 0
+                    code.append(var_num & 0xFF)  # Second operand: local variable
+                    code.append(0x00)  # Store to stack
+            elif isinstance(last_stmt, GlobalVarNode):
+                var_num = self.globals.get(last_stmt.name)
+                if var_num is not None:
+                    # Push global variable to stack
+                    code.append(0x54)  # ADD small, var
+                    code.append(0x00)
+                    code.append(var_num & 0xFF)
+                    code.append(0x00)
+
+            # NOTE: For PROG, we add the default return value push LATER (after patching)
+            # because PROG's exit_point needs to be AFTER the push for targeted RETURNs.
+            # For BIND, we don't add a push here - the last expression's value is the result.
 
             # Exit point is at the end of the block
             exit_point = len(code)

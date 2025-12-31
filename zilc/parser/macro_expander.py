@@ -117,6 +117,15 @@ class MDLEvaluator:
 
     def _evaluate_form(self, form: FormNode, env: Dict[str, Any]) -> Any:
         """Evaluate a form (function call)."""
+        # Handle numeric operators as NTH: <1 .ARGS> means <NTH .ARGS 1>
+        if isinstance(form.operator, NumberNode):
+            index = form.operator.value
+            if form.operands:
+                list_val = self.evaluate(form.operands[0], env)
+                if isinstance(list_val, list) and 1 <= index <= len(list_val):
+                    return list_val[index - 1]  # 1-indexed
+            return None
+
         if not isinstance(form.operator, AtomNode):
             return form
 
@@ -174,7 +183,15 @@ class MDLEvaluator:
         elif op_name == 'FORM':
             return self._eval_form_constructor(operands, env)
         elif op_name == 'LIST':
-            return [self.evaluate(op, env) for op in operands]
+            # Evaluate operands and flatten any SpliceResultNodes
+            result = []
+            for op in operands:
+                evaluated = self.evaluate(op, env)
+                if isinstance(evaluated, SpliceResultNode):
+                    result.extend(evaluated.items)
+                else:
+                    result.append(evaluated)
+            return result
         elif op_name == 'GVAL':
             return self._eval_gval(operands, env)
         elif op_name == 'LVAL':
@@ -192,6 +209,27 @@ class MDLEvaluator:
             return self._eval_eval(operands, env)
         elif op_name == 'IFFLAG':
             return self._eval_ifflag(operands, env)
+        elif op_name == 'PRINC':
+            return self._eval_princ(operands, env)
+        elif op_name == 'PRIN1':
+            return self._eval_prin1(operands, env)
+        elif op_name == 'PRINT':
+            return self._eval_print(operands, env)
+        elif op_name == 'TERPRI':
+            return self._eval_terpri(operands, env)
+        elif op_name == 'CRLF':
+            # CRLF in compile context prints newline
+            print()
+            return True
+        elif op_name == 'BIND':
+            # BIND is a scoping construct: <BIND (bindings) body...>
+            # Evaluate the body expressions in order and return the last value
+            return self._eval_bind(operands, env)
+        elif op_name == 'PROG':
+            # PROG is similar to BIND but with different control flow semantics
+            return self._eval_bind(operands, env)
+        elif op_name == 'CHTYPE':
+            return self._eval_chtype(operands, env)
 
         # Unknown form - return as-is (will be processed at runtime)
         return form
@@ -576,6 +614,10 @@ class MDLEvaluator:
             n2 = val2 if isinstance(val2, int) else val2.value
             return n1 == n2
 
+        # Atom comparison - compare by value
+        if isinstance(val1, AtomNode) and isinstance(val2, AtomNode):
+            return val1.value.upper() == val2.value.upper()
+
         return val1 == val2
 
     def _eval_or(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
@@ -637,12 +679,39 @@ class MDLEvaluator:
             elif isinstance(item, int):
                 form_operands.append(NumberNode(item))
             elif isinstance(item, list):
-                # Convert list to nested structure
+                # Convert list to a parenthesized form (list structure)
+                # In ZIL, ((A B)) becomes a form with () operator
+                # Empty list () also needs to be preserved for PROG/BIND bindings
+                list_items = []
                 for sub in item:
                     if isinstance(sub, ASTNode):
-                        form_operands.append(sub)
+                        list_items.append(sub)
+                    elif isinstance(sub, list):
+                        # Nested list - recursively convert
+                        nested_items = self._convert_list_to_form(sub)
+                        list_items.append(nested_items)
+                    elif isinstance(sub, str):
+                        list_items.append(StringNode(sub))
+                    elif isinstance(sub, int):
+                        list_items.append(NumberNode(sub))
+                # Always create the form - even for empty lists (important for PROG/BIND)
+                form_operands.append(FormNode(AtomNode("()", 0, 0), list_items, 0, 0))
 
         return FormNode(operator, form_operands, 0, 0)
+
+    def _convert_list_to_form(self, lst: list) -> FormNode:
+        """Convert a Python list to a FormNode with () operator."""
+        items = []
+        for item in lst:
+            if isinstance(item, ASTNode):
+                items.append(item)
+            elif isinstance(item, list):
+                items.append(self._convert_list_to_form(item))
+            elif isinstance(item, str):
+                items.append(StringNode(item))
+            elif isinstance(item, int):
+                items.append(NumberNode(item))
+        return FormNode(AtomNode("()", 0, 0), items, 0, 0)
 
     def _eval_gval(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate GVAL (get global value)."""
@@ -722,6 +791,67 @@ class MDLEvaluator:
         if name in env:
             return env[name] is not None
         return False
+
+    def _eval_chtype(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate CHTYPE (change type).
+
+        CHTYPE converts a value to a different type.
+
+        Examples:
+        - <CHTYPE (TABLE <VOC "FOO" PREP>) FORM> - converts list to form
+        - <CHTYPE '(<A> <B>) SPLICE> - converts list for splicing
+
+        For FORM type: converts a list (FN arg1 arg2...) to <FN arg1 arg2...>
+        For SPLICE type: marks value for inline expansion
+        """
+        if len(operands) < 2:
+            return None
+
+        value = self.evaluate(operands[0], env)
+        type_node = operands[1]
+
+        if isinstance(type_node, AtomNode):
+            type_name = type_node.value.upper()
+
+            if type_name == 'FORM':
+                # Convert list to form: (FN arg1 arg2) -> <FN arg1 arg2>
+                if isinstance(value, list) and len(value) >= 1:
+                    # First element is the operator
+                    op = value[0]
+                    args = value[1:] if len(value) > 1 else []
+                    # Convert operator to AtomNode if needed
+                    if isinstance(op, str):
+                        op = AtomNode(op, 0, 0)
+                    elif isinstance(op, AtomNode):
+                        pass
+                    else:
+                        # Evaluate the operator
+                        op = self.evaluate(op, env) if isinstance(op, ASTNode) else op
+                        if isinstance(op, str):
+                            op = AtomNode(op, 0, 0)
+                    # Convert args to ASTNodes
+                    ast_args = []
+                    for arg in args:
+                        if isinstance(arg, ASTNode):
+                            ast_args.append(arg)
+                        elif isinstance(arg, int):
+                            ast_args.append(NumberNode(arg, 0, 0))
+                        elif isinstance(arg, str):
+                            ast_args.append(StringNode(arg, 0, 0))
+                        else:
+                            ast_args.append(arg)
+                    return FormNode(op, ast_args, 0, 0)
+                elif isinstance(value, FormNode):
+                    # Already a form
+                    return value
+
+            elif type_name == 'SPLICE':
+                # Mark for splicing
+                if isinstance(value, list):
+                    items = [item for item in value if isinstance(item, ASTNode)]
+                    return SpliceResultNode(items, 0, 0)
+
+        return value  # Return unchanged if type not recognized
 
     def _eval_eval(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate EVAL (compile-time evaluation).
@@ -835,6 +965,69 @@ class MDLEvaluator:
         # No matching clause
         return None
 
+    def _eval_princ(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate PRINC - print without quotes at compile time."""
+        if operands:
+            val = self.evaluate(operands[0], env)
+            if isinstance(val, str):
+                print(val, end='')
+            elif isinstance(val, StringNode):
+                print(val.value, end='')
+            elif val is not None:
+                print(str(val), end='')
+            return val
+        return None
+
+    def _eval_prin1(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate PRIN1 - print with quotes at compile time."""
+        if operands:
+            val = self.evaluate(operands[0], env)
+            if isinstance(val, str):
+                print(f'"{val}"', end='')
+            elif isinstance(val, StringNode):
+                print(f'"{val.value}"', end='')
+            elif val is not None:
+                print(repr(val), end='')
+            return val
+        return None
+
+    def _eval_print(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate PRINT - print with newline at compile time."""
+        if operands:
+            val = self.evaluate(operands[0], env)
+            if isinstance(val, str):
+                print(val)
+            elif isinstance(val, StringNode):
+                print(val.value)
+            elif val is not None:
+                print(str(val))
+            return val
+        return None
+
+    def _eval_terpri(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate TERPRI - print newline at compile time."""
+        print()
+        return True
+
+    def _eval_bind(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate BIND/PROG - execute body in a new scope."""
+        if not operands:
+            return None
+
+        # First operand is the binding list (which can be empty)
+        # Remaining operands are the body expressions
+        body = operands[1:] if len(operands) > 1 else []
+
+        # Create a new environment with any bindings
+        new_env = env.copy()
+
+        # Execute body expressions in order, return last value
+        result = None
+        for expr in body:
+            result = self.evaluate(expr, new_env)
+
+        return result
+
     def _expand_quasiquote(self, node: ASTNode, env: Dict[str, Any]) -> Any:
         """Expand quasiquoted expression."""
         if isinstance(node, UnquoteNode):
@@ -901,6 +1094,163 @@ class MacroExpander:
         """Check if a name is a defined macro."""
         return name.upper() in self.macros
 
+    def _call_propspec_handler(self, handler_name: str, prop_value, program: 'Program'):
+        """
+        Call a PROPSPEC handler function with property values.
+
+        PROPSPEC handlers are DEFINE functions that transform property values.
+        They take a single argument (the property value list) and return a list:
+        - Element 0: default value (often <>)
+        - Element 1: actual property value (e.g., TABLE, routine reference)
+
+        Returns the transformed property value, or None if handler failed.
+        """
+        handler = self.macros.get(handler_name.upper())
+        if not handler:
+            return None
+
+        # Build the argument list for the handler
+        # Wrap property value in a list if it's not already
+        if isinstance(prop_value, list):
+            value_list = prop_value
+        elif isinstance(prop_value, ASTNode):
+            value_list = [prop_value]
+        else:
+            value_list = [AtomNode(str(prop_value), 0, 0)]
+
+        # Create a quoted list of property values for the L parameter
+        # The handler receives the property values as a list
+        value_nodes = []
+        for v in value_list:
+            if isinstance(v, ASTNode):
+                value_nodes.append(v)
+            else:
+                value_nodes.append(AtomNode(str(v), 0, 0))
+
+        # Build bindings for the handler parameter (typically "L")
+        bindings = {}
+        if handler.params:
+            # Get the first parameter name (typically "L")
+            param = handler.params[0]
+            if len(param) >= 1:
+                param_name = param[0].upper()
+                bindings[param_name] = value_nodes
+
+        # Expand the handler body with parameter substitution
+        expanded = self._substitute(copy.deepcopy(handler.body), bindings)
+
+        # Evaluate MDL constructs
+        expanded = self._evaluate_mdl(expanded, bindings)
+
+        # The handler should return a list where:
+        # - Element 0 is the default value (often <>)
+        # - Element 1+ is the actual property value
+        if isinstance(expanded, list) and len(expanded) >= 2:
+            # Return the second element as the property value
+            result = expanded[1]
+            # Recursively expand macros in the result
+            if isinstance(result, ASTNode):
+                result = self._expand_recursive(result)
+            return result
+        elif isinstance(expanded, list) and len(expanded) == 1:
+            # Single element - use it as the value
+            result = expanded[0]
+            if isinstance(result, ASTNode):
+                result = self._expand_recursive(result)
+            return result
+        elif isinstance(expanded, ASTNode):
+            # Direct AST result
+            return self._expand_recursive(expanded)
+
+        return None
+
+    def _apply_routine_rewriter(self, program: Program, rewriter: MacroNode) -> Program:
+        """
+        Apply ROUTINE-REWRITER hook to all routines in the program.
+
+        The rewriter function is called with (NAME ARGS BODY) where:
+        - NAME: routine name as an atom
+        - ARGS: list of parameter names as atoms
+        - BODY: list of body expressions
+
+        If the rewriter returns a list, it's interpreted as [new_args, *new_body].
+        If it returns FALSE/None, the routine is unchanged.
+        """
+        for routine in program.routines:
+            # Create arguments for the rewriter: (NAME ARGS BODY)
+            name_atom = AtomNode(routine.name, 0, 0)
+
+            # Create a quoted list of parameter atoms
+            param_atoms = [AtomNode(p, 0, 0) for p in routine.params]
+            # In MDL, we represent this as a quoted form: '(arg1 arg2 ...)
+            args_list = FormNode(
+                AtomNode('QUOTE', 0, 0),
+                [param_atoms] if param_atoms else [[]],
+                0, 0
+            )
+
+            # Create a quoted list of body expressions
+            # Use quasiquote-like representation: '(<expr1> <expr2> ...)
+            body_list = FormNode(
+                AtomNode('QUOTE', 0, 0),
+                [routine.body] if routine.body else [[]],
+                0, 0
+            )
+
+            # Build bindings for the rewriter parameters
+            # Rewriter takes (NAME ARGS BODY) so bind these to first 3 params
+            bindings = {}
+            rewriter_params = []
+            for param in rewriter.params:
+                if len(param) >= 4:
+                    param_name = param[0].upper()
+                    is_aux = param[3]
+                    if not is_aux:
+                        rewriter_params.append(param_name)
+
+            # Bind arguments to parameters
+            if len(rewriter_params) > 0:
+                bindings[rewriter_params[0]] = name_atom  # NAME
+            if len(rewriter_params) > 1:
+                bindings[rewriter_params[1]] = param_atoms  # ARGS (as list)
+            if len(rewriter_params) > 2:
+                bindings[rewriter_params[2]] = routine.body  # BODY (as list)
+
+            # Expand the rewriter body with these bindings
+            try:
+                # Substitute parameters in rewriter body
+                expanded = self._substitute(rewriter.body, bindings)
+
+                # Call MDL evaluator directly to get raw result (not converted to AST)
+                result = self.mdl_evaluator.evaluate(expanded, bindings)
+
+                # Process the result
+                if result and result is not False:
+                    # Result should be a list: [new_args, *new_body]
+                    if isinstance(result, list) and len(result) >= 1:
+                        # First element is the new args list
+                        new_args = result[0]
+                        new_body = result[1:] if len(result) > 1 else []
+
+                        # Extract parameter names from new_args
+                        if isinstance(new_args, list):
+                            new_params = []
+                            for arg in new_args:
+                                if isinstance(arg, AtomNode):
+                                    new_params.append(arg.value)
+                                elif isinstance(arg, str):
+                                    new_params.append(arg)
+                            routine.params = new_params
+
+                        # Update body
+                        if new_body:
+                            routine.body = new_body
+            except Exception:
+                # If rewriter fails, keep original routine
+                pass
+
+        return program
+
     def _unwrap_quote(self, node: ASTNode) -> ASTNode:
         """Unwrap QUOTE forms - when a macro returns '<FORM>, the result is <FORM>.
 
@@ -965,7 +1315,9 @@ class MacroExpander:
         bindings = self._bind_parameters(macro, form.operands)
 
         # Expand the macro body with parameter substitution
-        expanded = self._substitute(macro.body, bindings)
+        # IMPORTANT: Use a deep copy to avoid mutating the original macro body
+        # (the macro may be expanded multiple times with different in_zilch values)
+        expanded = self._substitute(copy.deepcopy(macro.body), bindings)
 
         # Evaluate MDL constructs (MAPF/FUNCTION, etc.) at compile time
         expanded = self._evaluate_mdl(expanded, bindings)
@@ -1047,6 +1399,16 @@ class MacroExpander:
             return NumberNode(value, 0, 0)
         if isinstance(value, bool):
             return AtomNode("T" if value else "<>", 0, 0)
+        if isinstance(value, list):
+            # Convert list to a parenthesized form (list structure)
+            # Empty list () is represented as a FormNode with () operator
+            list_items = []
+            for item in value:
+                if isinstance(item, ASTNode):
+                    list_items.append(item)
+                else:
+                    list_items.append(self._convert_result_to_ast(item))
+            return FormNode(AtomNode("()", 0, 0), list_items, 0, 0)
         if value is None:
             return AtomNode("<>", 0, 0)
         # Fallback
@@ -1151,6 +1513,17 @@ class MacroExpander:
         # Check for IFFLAG that needs compile-time evaluation
         if op_name == 'IFFLAG':
             # Evaluate IFFLAG at compile time using MDL evaluator
+            result = self.mdl_evaluator.evaluate(node, bindings)
+            if result is None:
+                return None
+            if isinstance(result, ASTNode):
+                return self._evaluate_mdl(result, bindings)
+            return self._convert_to_ast(result)
+
+        # Check for FORM that needs compile-time evaluation
+        # FORM is an MDL function that constructs a new form from evaluated arguments
+        if op_name == 'FORM':
+            # Evaluate FORM at compile time using MDL evaluator
             result = self.mdl_evaluator.evaluate(node, bindings)
             if result is None:
                 return None
@@ -1277,7 +1650,20 @@ class MacroExpander:
                 if len(node.operands) == 0:
                     return node
 
-                new_operator = self._substitute(node.operands[0], bindings)
+                # The first operand is the operator - it should be evaluated
+                # For example: <FORM <IFFLAG (IN-ZILCH PRINTI) (T PRINC)> "hello">
+                # The IFFLAG should evaluate to PRINTI or PRINC
+                first_op = node.operands[0]
+                if isinstance(first_op, FormNode):
+                    # Evaluate the form to get the actual operator
+                    new_operator = self.mdl_evaluator.evaluate(first_op, bindings)
+                    if not isinstance(new_operator, ASTNode):
+                        if isinstance(new_operator, str):
+                            new_operator = AtomNode(new_operator, first_op.line, first_op.column)
+                        else:
+                            new_operator = AtomNode(str(new_operator), first_op.line, first_op.column)
+                else:
+                    new_operator = self._substitute(first_op, bindings)
                 new_operands = []
 
                 for i, operand in enumerate(node.operands[1:], 1):
@@ -1319,8 +1705,21 @@ class MacroExpander:
                                 new_operands.append(self._convert_result_to_ast(result))
                         continue
 
-                    substituted = self._substitute(operand, bindings)
-                    new_operands.append(substituted)
+                    # FORM evaluates all its arguments at macro expansion time
+                    # This includes STRING, IFFLAG, etc. - they should be evaluated, not just substituted
+                    result = self.mdl_evaluator.evaluate(operand, bindings)
+                    if isinstance(result, ASTNode):
+                        new_operands.append(result)
+                    elif isinstance(result, str):
+                        new_operands.append(StringNode(result, operand.line if hasattr(operand, 'line') else 0, operand.column if hasattr(operand, 'column') else 0))
+                    elif isinstance(result, int):
+                        new_operands.append(NumberNode(result, operand.line if hasattr(operand, 'line') else 0, operand.column if hasattr(operand, 'column') else 0))
+                    elif result is None:
+                        # Keep the substituted form for things that shouldn't be evaluated yet
+                        substituted = self._substitute(operand, bindings)
+                        new_operands.append(substituted)
+                    else:
+                        new_operands.append(self._convert_result_to_ast(result))
 
                 return FormNode(new_operator, new_operands, node.line, node.column)
 
@@ -1443,6 +1842,33 @@ class MacroExpander:
         for macro in program.macros:
             self.define_macro(macro)
 
+        # Check for ROUTINE-REWRITER hook
+        routine_rewriter = None
+        for global_node in program.globals:
+            if global_node.name.upper() == 'REWRITE-ROUTINE!-HOOKS!-ZILF':
+                # Value should be a GlobalVarNode pointing to the rewriter function
+                if isinstance(global_node.initial_value, GlobalVarNode):
+                    rewriter_name = global_node.initial_value.name.upper()
+                    if rewriter_name in self.macros:
+                        routine_rewriter = self.macros[rewriter_name]
+                break
+
+        # Apply ROUTINE-REWRITER hook to routines if defined
+        if routine_rewriter:
+            program = self._apply_routine_rewriter(program, routine_rewriter)
+
+        # Process top-level forms (macro calls) with IN-ZILCH = false
+        # These are compile-time operations that should be evaluated, not compiled
+        self.in_zilch = False
+        for form in program.top_level_forms:
+            # Expand the macro
+            expanded = self._expand_recursive(form)
+            # Evaluate the result (for compile-time operations like PRINC)
+            if expanded:
+                self.mdl_evaluator.evaluate(expanded, {})
+        # Clear top-level forms after evaluation (they've been executed, not compiled)
+        program.top_level_forms = []
+
         # Expand macros in routines (IN-ZILCH = true, generating Z-machine code)
         self.in_zilch = True
         for routine in program.routines:
@@ -1463,6 +1889,15 @@ class MacroExpander:
         # Expand macros in objects (IN-ZILCH = true, generating Z-machine code)
         for obj in program.objects:
             for key, value in obj.properties.items():
+                # Check for PROPSPEC handler
+                handler_name = program.propspec_handlers.get(key.upper())
+                if handler_name and handler_name.upper() in self.macros:
+                    # Call PROPSPEC handler with property value list
+                    new_value = self._call_propspec_handler(handler_name, value, program)
+                    if new_value is not None:
+                        obj.properties[key] = new_value
+                        continue
+                # Normal macro expansion
                 if isinstance(value, ASTNode):
                     obj.properties[key] = self._expand_recursive(value)
                 elif isinstance(value, list):

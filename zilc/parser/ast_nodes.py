@@ -669,7 +669,9 @@ class Program:
     define_globals: List['DefineGlobalsNode'] = field(default_factory=list)  # DEFINE-GLOBALS declarations
     compile_time_ops: List['FormNode'] = field(default_factory=list)  # Compile-time ops: ZPUT, PUTB, ZGET, ZREST
     cleared_propspecs: Set[str] = field(default_factory=set)  # PROPSPEC cleared for atoms (e.g., DIRECTIONS)
+    propspec_handlers: Dict[str, str] = field(default_factory=dict)  # PROPSPEC handlers: property_atom -> handler_function
     new_add_words: List['NewAddWordNode'] = field(default_factory=list)  # NEW-ADD-WORD declarations (NEW-PARSER?)
+    top_level_forms: List['FormNode'] = field(default_factory=list)  # Top-level forms (macro calls to evaluate)
 
     def __repr__(self):
         return (f"Program(v{self.version}, {len(self.routines)} routines, "
