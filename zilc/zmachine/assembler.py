@@ -337,7 +337,7 @@ class ZAssembler:
         Returns:
             Patched routine bytecode
         """
-        if not string_placeholders or not string_table:
+        if not string_placeholders or string_table is None:
             return routines
 
         result = bytearray(routines)
@@ -378,7 +378,7 @@ class ZAssembler:
             start_offset: Start offset in story to scan
             length: Number of bytes to scan
         """
-        if not string_placeholders or not string_table or length == 0:
+        if not string_placeholders or string_table is None or length == 0:
             return
 
         # Scan for 0xFC00 | index patterns (16-bit values)

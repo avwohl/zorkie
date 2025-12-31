@@ -265,7 +265,6 @@ class TestCHRSET:
             .in_v5() \
             .outputs("zil")
 
-    @pytest.mark.xfail(reason="String constants not implemented")
     def test_chrset_should_affect_text_encoding(self):
         """Test CHRSET affects text encoding."""
         AssertRoutine(

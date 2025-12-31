@@ -2241,6 +2241,34 @@ class ImprovedCodeGenerator:
                     # Don't store in constants - treat it as a global with table address
                     return
 
+        # Handle StringNode values - create string constant
+        if isinstance(const_node.value, StringNode):
+            # Check for redefinition
+            if const_node.name in self.constants:
+                raise ValueError(
+                    f"Constant '{const_node.name}' is already defined"
+                )
+            # Add string to string table
+            text = const_node.value.value
+            if self.string_table is not None:
+                self.string_table.add_string(text)
+            # Create a placeholder for the string address
+            # Use 0xFC format (same as string operands) for resolution during assembly
+            if text in self._string_operand_to_placeholder:
+                placeholder_idx = self._string_operand_to_placeholder[text]
+            else:
+                placeholder_idx = self._next_string_operand_index
+                if placeholder_idx > self._max_string_operand_index:
+                    raise ValueError(f"Too many unique string operands: cannot create placeholder for constant")
+                self._string_operand_placeholders[placeholder_idx] = text
+                self._string_operand_to_placeholder[text] = placeholder_idx
+                self._next_string_operand_index += 1
+            # Store the placeholder value as the constant
+            # This will be 0xFC00 | idx, which gets resolved during assembly
+            placeholder_value = 0xFC00 | placeholder_idx
+            self.constants[const_node.name] = placeholder_value
+            return
+
         value = self.eval_expression(const_node.value)
         if value is not None:
             # Check for redefinition with different value
@@ -4736,17 +4764,23 @@ class ImprovedCodeGenerator:
             expr_code = self.generate_form(operand)
             code.extend(expr_code)
             # Now print from stack (variable 0)
-            op_type = 1  # Variable
+            op_type = 2  # Variable
             op_val = 0   # Stack
         else:
-            op_type, op_val = self._get_operand_type_and_value(operand)
+            # Use _ext version to properly distinguish large/small constants
+            op_type, op_val = self._get_operand_type_and_value_ext(operand)
 
         # 1OP form: 0x8X for large constant (16-bit), 0x9X for small constant, 0xAX for variable
-        if op_type == 1:  # Variable
+        if op_type == 2:  # Variable
             code.append(0xA0 | opcode_1op)
-        else:  # Constant
-            code.append(0x90 | opcode_1op)  # Small constant (8-bit)
-        code.append(op_val & 0xFF)
+            code.append(op_val & 0xFF)
+        elif op_type == 1:  # Small constant (8-bit)
+            code.append(0x90 | opcode_1op)
+            code.append(op_val & 0xFF)
+        else:  # Large constant (16-bit)
+            code.append(0x80 | opcode_1op)
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
 
         return bytes(code)
 
