@@ -31,6 +31,7 @@ class ZILCompiler:
         self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
         self.override_version = override_version  # If True, ignore source VERSION directive
         self.warnings: List[str] = []  # Compilation warnings
+        self.errors: List[str] = []  # Compilation errors
 
     def log(self, message: str):
         """Print log message if verbose mode is enabled."""
@@ -47,6 +48,10 @@ class ZILCompiler:
     def get_warnings(self) -> List[str]:
         """Get all warnings generated during compilation."""
         return self.warnings.copy()
+
+    def get_errors(self) -> List[str]:
+        """Get all errors generated during compilation."""
+        return self.errors.copy()
 
     def _check_vocab_word_apostrophe(self, word: str, prop_type: str, obj_name: str):
         """Warn if a vocab word contains an apostrophe."""
@@ -1932,10 +1937,14 @@ class ZILCompiler:
         # Also extract any constants defined in PROPDEF output patterns
         propdef_constants = {}
         for propdef in program.propdefs:
-            prop_name = f'P?{propdef.name}'
-            if prop_name not in properties:
-                properties[prop_name] = next_prop
-                next_prop += 1
+            # Skip creating P?DIRECTIONS when PROPDEF DIRECTIONS is defined
+            # (directions are handled specially and get individual P?NORTH etc.)
+            # Still process the patterns for constants though
+            if propdef.name.upper() != 'DIRECTIONS':
+                prop_name = f'P?{propdef.name}'
+                if prop_name not in properties:
+                    properties[prop_name] = next_prop
+                    next_prop += 1
 
             # Extract constants from PROPDEF output patterns
             # Pattern structure:
@@ -1982,6 +1991,52 @@ class ZILCompiler:
                 prop_num = max_properties - i
                 properties[f'P?{dir_name}'] = prop_num
             low_direction = max_properties - len(program.directions) + 1
+
+        # Detect implicit directions - properties used with direction syntax
+        # (X GOES TO Y, X TO Y, X PER R) but not in the DIRECTIONS declaration
+        from .parser.ast_nodes import AtomNode
+        explicit_directions = set(d.upper() for d in program.directions)
+        implicit_directions = []
+
+        def is_direction_syntax(value):
+            """Check if a property value uses direction syntax."""
+            if not isinstance(value, list) or len(value) < 2:
+                return False
+            # Check for patterns like (GOES TO dest), (TO dest), (PER routine)
+            if len(value) >= 2:
+                first = value[0]
+                if isinstance(first, AtomNode):
+                    first_val = first.value.upper()
+                    # (GOES TO dest) pattern
+                    if first_val == 'GOES' and len(value) >= 3:
+                        second = value[1]
+                        if isinstance(second, AtomNode) and second.value.upper() == 'TO':
+                            return True
+                    # (TO dest) pattern
+                    if first_val == 'TO':
+                        return True
+                    # (PER routine) pattern
+                    if first_val == 'PER':
+                        return True
+            return False
+
+        # Scan all objects/rooms for direction-style properties
+        for obj in program.objects + program.rooms:
+            for key, value in obj.properties.items():
+                key_upper = key.upper()
+                if key_upper not in explicit_directions and is_direction_syntax(value):
+                    if key_upper not in implicit_directions:
+                        implicit_directions.append(key_upper)
+
+        # Add implicit directions to property map (continuing from explicit directions)
+        if implicit_directions:
+            next_dir_prop = low_direction - 1
+            for dir_name in implicit_directions:
+                properties[f'P?{dir_name}'] = next_dir_prop
+                next_dir_prop -= 1
+            low_direction = next_dir_prop + 1
+            # Also add implicit directions to the program's direction list for later use
+            program.directions.extend(implicit_directions)
 
         # Handle direction synonyms - if SYNONYM declares A B and A is a direction,
         # then P?B should be equal to P?A
@@ -2422,7 +2477,7 @@ class ZILCompiler:
         codegen.table_offsets[table_idx] = codegen._table_data_size
         codegen._table_data_size += len(table_data)
         codegen.table_counter += 1
-        codegen.tables.append((f"_DEFINE_GLOBALS_{dg.table_name}", bytes(table_data), False))  # is_pure=False
+        codegen.tables.append((f"_DEFINE_GLOBALS_{dg.table_name}", bytes(table_data), False, False))  # is_pure=False, is_parser_table=False
 
         # Register the global to point to this table
         codegen.globals[dg.table_name] = codegen.next_global
@@ -2448,8 +2503,9 @@ class ZILCompiler:
         Returns:
             Z-machine story file as bytes
         """
-        # Clear warnings from any previous compilation
+        # Clear warnings and errors from any previous compilation
         self.warnings = []
+        self.errors = []
 
         # Preprocess control characters (^L etc.)
         source = self.preprocess_control_characters(source)
@@ -2631,13 +2687,27 @@ class ZILCompiler:
         if table_routine_fixups:
             self.log(f"  {len(table_routine_fixups)} table routine fixups")
 
-        # Report missing routines as errors
+        # Report missing routines as errors (one error per call site)
         missing_routines = codegen.get_missing_routines()
         if missing_routines:
+            call_counts = codegen.get_missing_routine_call_counts()
+            error_limit = 100
+            error_count = 0
             for routine_name in sorted(missing_routines):
-                self.log(f"  ERROR: undefined routine '{routine_name}'")
+                count = call_counts.get(routine_name, 1)
+                self.log(f"  ERROR: undefined routine '{routine_name}' ({count} call sites)")
+                # Generate one error per call site
+                for _ in range(count):
+                    self.errors.append(f"ZIL0415: undefined routine '{routine_name}'")
+                    error_count += 1
+                    if error_count >= error_limit:
+                        # Add the "too many errors" message as the 101st error
+                        self.errors.append(f"ZIL0500: Too many errors (>{error_limit}), stopping compilation")
+                        raise SyntaxError(
+                            f"ZIL0500: {len(self.errors)} error(s), stopping after {error_limit}"
+                        )
             raise SyntaxError(
-                f"ZIL0415: {len(missing_routines)} undefined routine(s): " +
+                f"ZIL0415: {len(self.errors)} error(s) for undefined routine(s): " +
                 ", ".join(sorted(missing_routines))
             )
 
@@ -2663,8 +2733,9 @@ class ZILCompiler:
         table_data = codegen.get_table_data() if codegen.tables else b''
         table_offsets = codegen.get_table_offsets() if codegen.tables else {}
         tables_with_placeholders = codegen.get_tables_with_placeholders() if codegen.tables else []
+        impure_tables_size = codegen.get_impure_tables_size() if codegen.tables else 0
         if table_data:
-            self.log(f"  {len(codegen.tables)} tables ({len(table_data)} bytes)")
+            self.log(f"  {len(codegen.tables)} tables ({len(table_data)} bytes, {impure_tables_size} impure)")
 
         # Build globals data with initial values
         globals_data = codegen.build_globals_data()
@@ -3300,12 +3371,17 @@ class ZILCompiler:
                                     result.append(0)
 
                     elif form_type == 'ROOM':
-                        # Encode as room number (byte for V3, word for V4+)
+                        # Encode as room number
+                        # - V3: always 1 byte (max 255 objects)
+                        # - V4+ with ROOMS-FIRST: 1 byte (rooms have low numbers)
+                        # - V4+ otherwise: 2 bytes
+                        order_mode = getattr(program, 'order_objects', None)
+                        use_byte = self.version <= 3 or order_mode == 'ROOMS-FIRST'
                         for arg_type, arg_val in form_args:
                             if arg_type == 'VAR':
                                 room_name = captures.get(arg_val, '')
                                 room_num = obj_name_to_num.get(room_name, 0)
-                                if self.version <= 3:
+                                if use_byte:
                                     result.append(room_num & 0xFF)
                                 else:
                                     result.extend([(room_num >> 8) & 0xFF, room_num & 0xFF])
@@ -3320,23 +3396,30 @@ class ZILCompiler:
 
                     elif form_type == 'VOC':
                         # Encode as vocabulary word (2-byte dictionary address placeholder)
+                        # form_args: [('VAR', var_name), ('ATOM', pos_type)]
+                        word = None
+                        pos_type = None
                         for arg_type, arg_val in form_args:
                             if arg_type == 'VAR':
                                 word = captures.get(arg_val, '')
-                                if isinstance(word, str):
-                                    # Use W?* placeholder system (dict: idx -> word)
-                                    word_lower = word.lower()
-                                    # Find next available index
-                                    if vocab_placeholders:
-                                        placeholder_idx = max(vocab_placeholders.keys()) + 1
-                                    else:
-                                        placeholder_idx = 0
-                                    vocab_placeholders[placeholder_idx] = word_lower
-                                    # Placeholder value that will be fixed up
-                                    result.extend([(0xFB00 + placeholder_idx) >> 8,
-                                                   (0xFB00 + placeholder_idx) & 0xFF])
-                                else:
-                                    result.extend([0, 0])
+                            elif arg_type == 'ATOM':
+                                pos_type = arg_val.upper()
+                        if isinstance(word, str) and word:
+                            word_lower = word.lower()
+                            # Add to codegen's VOC tracking for dictionary building
+                            if not hasattr(codegen, '_voc_words'):
+                                codegen._voc_words = {}
+                            codegen._voc_words[word_lower] = pos_type
+                            # Use codegen's vocab placeholder system
+                            placeholder_idx = codegen._next_vocab_placeholder_index
+                            codegen._vocab_placeholders[placeholder_idx] = word_lower
+                            codegen._next_vocab_placeholder_index += 1
+                            # Store placeholder value (will be resolved to dict address)
+                            placeholder_val = 0xFB00 | placeholder_idx
+                            result.extend([(placeholder_val >> 8) & 0xFF,
+                                           placeholder_val & 0xFF])
+                        else:
+                            result.extend([0, 0])
 
                     elif form_type == 'GLOBAL':
                         # Encode as global variable reference
@@ -3541,9 +3624,11 @@ class ZILCompiler:
                                 # Wrap in ByteValue so it's stored as single byte (for GETB access)
                                 props[prop_num] = ByteValue(exit_value)
                     # Check if this property has a PROPDEF pattern
-                    elif isinstance(value, list) and key in propdef_patterns:
+                    elif key in propdef_patterns:
                         # Try to apply PROPDEF pattern matching
-                        encoded, constants = apply_propdef(key, value, obj_name_to_num)
+                        # Wrap non-list values in a list for pattern matching
+                        prop_values = value if isinstance(value, list) else [value]
+                        encoded, constants = apply_propdef(key, prop_values, obj_name_to_num)
                         if encoded is not None:
                             props[prop_num] = encoded
                             # Store any constants defined by the pattern
@@ -3834,6 +3919,17 @@ class ZILCompiler:
         # Get special header table indices
         tchars_table_idx = codegen.get_tchars_table_idx()
 
+        # Check for collected errors and report them
+        codegen_errors = codegen.get_errors()
+        if codegen_errors:
+            # Store errors in compiler for retrieval by test framework
+            self.errors = codegen_errors
+            # Raise with all collected errors
+            error_msg = f"{len(codegen_errors)} error(s) during code generation:\n" + "\n".join(codegen_errors[:20])
+            if len(codegen_errors) > 20:
+                error_msg += f"\n... and {len(codegen_errors) - 20} more errors"
+            raise SyntaxError(error_msg)
+
         # Assemble story file
         self.log("Assembling story file...")
         assembler = ZAssembler(self.version)
@@ -3847,6 +3943,7 @@ class ZILCompiler:
             table_data=table_data,
             table_offsets=table_offsets,
             tables_with_placeholders=tables_with_placeholders,
+            impure_tables_size=impure_tables_size,
             routine_fixups=routine_fixups,
             table_routine_fixups=table_routine_fixups,
             property_routine_fixups=property_routine_fixups,

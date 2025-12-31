@@ -117,6 +117,58 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_table_placeholders_split(self, data: bytes,
+                                           impure_base_addr: int,
+                                           pure_base_addr: int,
+                                           table_offsets: dict,
+                                           impure_tables_size: int,
+                                           dict_addr: int = None) -> bytes:
+        """
+        Resolve table address placeholders with split impure/pure table bases.
+
+        Like _resolve_table_placeholders but handles the case where impure tables
+        are at a different base address than pure tables.
+
+        Args:
+            data: Bytes to scan (typically globals_data)
+            impure_base_addr: Base address for impure tables (dynamic memory)
+            pure_base_addr: Base address for pure tables (static memory)
+            table_offsets: Dict mapping table index to offset within sorted table data
+            impure_tables_size: Byte offset where pure tables start in the sorted data
+            dict_addr: Dictionary address for resolving VOCAB placeholder
+
+        Returns:
+            Modified data with actual table addresses
+        """
+        result = bytearray(data)
+
+        # Scan for 16-bit placeholders
+        # Globals are stored as big-endian 16-bit words
+        for i in range(0, len(result) - 1, 2):
+            word = (result[i] << 8) | result[i + 1]
+            # Check if this is a VOCAB placeholder (0xFA00)
+            if word == 0xFA00 and dict_addr is not None:
+                # Replace with dictionary address
+                result[i] = (dict_addr >> 8) & 0xFF
+                result[i + 1] = dict_addr & 0xFF
+            # Check if this is a table placeholder (0xFF00-0xFFFF)
+            elif word >= 0xFF00 and word <= 0xFFFF and table_offsets:
+                table_index = word & 0x00FF
+                if table_index in table_offsets:
+                    offset = table_offsets[table_index]
+                    # Determine which section this table is in
+                    if offset < impure_tables_size:
+                        # Impure table: in dynamic memory
+                        actual_addr = impure_base_addr + offset
+                    else:
+                        # Pure table: in static memory
+                        actual_addr = pure_base_addr + (offset - impure_tables_size)
+                    # Write back as big-endian
+                    result[i] = (actual_addr >> 8) & 0xFF
+                    result[i + 1] = actual_addr & 0xFF
+
+        return bytes(result)
+
     def _resolve_string_markers(self, routines: bytes, string_table,
                                    string_placeholders: dict = None,
                                    placeholder_positions: list = None) -> bytes:
@@ -699,6 +751,7 @@ class ZAssembler:
                         table_data: bytes = b'',
                         table_offsets: dict = None,
                         tables_with_placeholders: list = None,
+                        impure_tables_size: int = None,
                         routine_fixups: list = None,
                         table_routine_fixups: list = None,
                         property_routine_fixups: list = None,
@@ -718,9 +771,11 @@ class ZAssembler:
             globals_data: Global variables data
             abbreviations_table: AbbreviationsTable instance (optional)
             string_table: StringTable instance (optional, for deduplication)
-            table_data: TABLE/LTABLE/ITABLE data (optional)
+            table_data: TABLE/LTABLE/ITABLE data (sorted: impure, parser, pure)
             table_offsets: Dict mapping table index to offset within table_data
             tables_with_placeholders: List of (start, end) byte ranges containing table address placeholders
+            impure_tables_size: Size of impure tables section (dynamic memory).
+                                Parser/pure tables start at this offset in static memory.
             routine_fixups: List of (code_offset, routine_offset) for call address patching
             table_routine_fixups: List of (table_offset, routine_offset) for table routine addresses
             property_routine_fixups: List of (placeholder_idx, routine_offset) for object property routine addresses
@@ -779,21 +834,42 @@ class ZAssembler:
         # NOW we know where tables will be placed
         table_base_addr = calc_addr
 
-        # Pre-calculate dictionary address for VOCAB global resolution
-        # Dictionary comes after: tables, extension table (V5+)
-        dict_addr_precalc = table_base_addr
-        if table_data:
-            dict_addr_precalc += len(table_data)
-            if dict_addr_precalc % 2 != 0:
-                dict_addr_precalc += 1  # Account for alignment
+        # Calculate static memory base (where pure tables will be placed)
+        # Layout: [impure tables] [extension table (V5+)] | STATIC_MEM_BASE | [pure tables] [dictionary]
+        if impure_tables_size is None:
+            impure_tables_size = len(table_data) if table_data else 0
+
+        static_base_precalc = table_base_addr
+        if table_data and impure_tables_size > 0:
+            static_base_precalc += impure_tables_size
+            if static_base_precalc % 2 != 0:
+                static_base_precalc += 1  # Account for alignment
         if extension_table and self.version >= 5:
-            dict_addr_precalc += len(extension_table)
+            static_base_precalc += len(extension_table)
+            if static_base_precalc % 2 != 0:
+                static_base_precalc += 1
+        elif self.version >= 5:
+            # Minimal extension table: 2 bytes
+            static_base_precalc += 2
+            if static_base_precalc % 2 != 0:
+                static_base_precalc += 1
+
+        # Pre-calculate dictionary address for VOCAB global resolution
+        # Dictionary comes after: pure tables
+        dict_addr_precalc = static_base_precalc
+        pure_tables_size = len(table_data) - impure_tables_size if table_data else 0
+        if pure_tables_size > 0:
+            dict_addr_precalc += pure_tables_size
             if dict_addr_precalc % 2 != 0:
                 dict_addr_precalc += 1
 
         # Patch globals_data with actual table addresses and VOCAB
-        globals_data = self._resolve_table_placeholders(
-            globals_data, table_base_addr, table_offsets, dict_addr_precalc
+        # For tables in the sorted data:
+        # - Impure tables (offset < impure_tables_size): address = table_base_addr + offset
+        # - Pure tables (offset >= impure_tables_size): address = static_base_precalc + (offset - impure_tables_size)
+        globals_data = self._resolve_table_placeholders_split(
+            globals_data, table_base_addr, static_base_precalc, table_offsets,
+            impure_tables_size, dict_addr_precalc
         )
 
         globals_addr = current_addr
@@ -911,15 +987,25 @@ class ZAssembler:
             story.append(0)
             current_addr += 1
 
-        # Add table data in dynamic memory (before static memory)
-        # Tables need to be writable, so they go in dynamic memory
+        # Split table data into impure (dynamic memory) and pure (static memory)
+        # Table layout: [impure tables] | STATIC_MEM_BASE | [parser tables] [pure tables] | [dictionary]
+        if impure_tables_size is None:
+            impure_tables_size = len(table_data) if table_data else 0
+
+        impure_table_data = table_data[:impure_tables_size] if table_data else b''
+        pure_table_data = table_data[impure_tables_size:] if table_data else b''
+
+        # Add impure tables in dynamic memory (before static memory)
         table_base_addr = current_addr
         table_data_start = 0  # Track position for later string placeholder resolution
         table_data_len = 0
+        impure_story_start = 0  # Story position where impure tables are added
+        pure_story_start = 0    # Story position where pure tables are added
 
         if table_data:
             # Calculate dictionary address for resolving vocab placeholders in tables
-            dict_addr_for_tables = current_addr + len(table_data)
+            # Account for: impure tables + alignment + extension table + alignment + pure tables + alignment
+            dict_addr_for_tables = current_addr + len(impure_table_data)
             if dict_addr_for_tables % 2 != 0:
                 dict_addr_for_tables += 1  # Account for alignment
             # Add extension table size (V5+)
@@ -927,12 +1013,19 @@ class ZAssembler:
                 dict_addr_for_tables += len(extension_table)
                 if dict_addr_for_tables % 2 != 0:
                     dict_addr_for_tables += 1
+            # Add pure tables size
+            dict_addr_for_tables += len(pure_table_data)
+            if pure_table_data and dict_addr_for_tables % 2 != 0:
+                dict_addr_for_tables += 1
 
-            # Resolve vocabulary word placeholders in table data
+            # Resolve vocabulary word placeholders in table data (all tables)
             if vocab_fixups:
                 table_data = self._resolve_table_vocab_placeholders(
                     table_data, vocab_fixups, dict_addr_for_tables
                 )
+                # Re-split after resolution
+                impure_table_data = table_data[:impure_tables_size]
+                pure_table_data = table_data[impure_tables_size:]
 
             # Resolve table address placeholders within VERBS table data
             # (VERBS table contains pointers to syntax entry tables)
@@ -949,12 +1042,19 @@ class ZAssembler:
                         table_data = bytearray(table_data)
                         table_data[table_start:table_end] = segment
                         table_data = bytes(table_data)
+                        # Re-split after resolution
+                        impure_table_data = table_data[:impure_tables_size]
+                        pure_table_data = table_data[impure_tables_size:]
 
             # Track table data position for later string placeholder resolution
             table_data_start = len(story)
             table_data_len = len(table_data)
-            story.extend(table_data)
-            current_addr += len(table_data)
+
+            # Add impure tables to dynamic memory
+            impure_story_start = len(story)
+            if impure_table_data:
+                story.extend(impure_table_data)
+                current_addr += len(impure_table_data)
 
             # Align to even boundary
             while len(story) % 2 != 0:
@@ -979,8 +1079,19 @@ class ZAssembler:
                 story.append(0)
                 current_addr += 1
 
-        # Static memory starts after tables and extension table (in dynamic memory)
+        # Static memory starts after impure tables and extension table
         self.static_mem_base = current_addr
+
+        # Add pure/parser tables in static memory (read-only)
+        pure_story_start = len(story)
+        if pure_table_data:
+            story.extend(pure_table_data)
+            current_addr += len(pure_table_data)
+
+            # Align to even boundary
+            while len(story) % 2 != 0:
+                story.append(0)
+                current_addr += 1
 
         # Add dictionary in static memory (read-only)
         dict_addr = current_addr
@@ -1045,8 +1156,14 @@ class ZAssembler:
                 else:
                     packed_addr = actual_addr // 8
 
-                # Patch the table data in the story (at table_base_addr + table_offset)
-                story_offset = table_base_addr + table_offset
+                # Determine story offset based on whether table is in impure or pure section
+                if table_offset < impure_tables_size:
+                    # Impure table: in dynamic memory section
+                    story_offset = impure_story_start + table_offset
+                else:
+                    # Pure table: in static memory section
+                    story_offset = pure_story_start + (table_offset - impure_tables_size)
+
                 if story_offset + 1 < len(story):
                     story[story_offset] = (packed_addr >> 8) & 0xFF
                     story[story_offset + 1] = packed_addr & 0xFF
@@ -1228,7 +1345,11 @@ class ZAssembler:
 
         # V5+ TCHARS (terminating characters table) address at 0x2E
         if self.version >= 5 and tchars_table_idx is not None and tchars_table_idx in table_offsets:
-            tchars_addr = table_base_addr + table_offsets[tchars_table_idx]
+            tchars_offset = table_offsets[tchars_table_idx]
+            if tchars_offset < impure_tables_size:
+                tchars_addr = table_base_addr + tchars_offset
+            else:
+                tchars_addr = self.static_mem_base + (tchars_offset - impure_tables_size)
             struct.pack_into('>H', story, 0x2E, tchars_addr)
 
         # V6-7 specific header fields (V8 doesn't use these)

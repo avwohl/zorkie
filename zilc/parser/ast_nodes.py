@@ -262,12 +262,16 @@ class RepeatNode(ASTNode):
 class TableNode(ASTNode):
     """TABLE/ITABLE/LTABLE node."""
     def __init__(self, table_type: str, flags: List[str] = None, size: int = None,
-                 values: List[ASTNode] = None, line: int = 0, column: int = 0):
+                 values: List[ASTNode] = None, line: int = 0, column: int = 0,
+                 pattern_spec: List[Any] = None):
         super().__init__(NodeType.TABLE, line, column)
         self.table_type = table_type
         self.flags = flags or []
         self.size = size
         self.values = values or []
+        # PATTERN specification: list of (type_name, is_rest) tuples
+        # e.g., [('BYTE', False), ('WORD', False), ('WORD', True)]
+        self.pattern_spec = pattern_spec or []
 
     def __repr__(self):
         return f"{self.table_type}({len(self.values)} values)"

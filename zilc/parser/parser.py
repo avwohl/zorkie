@@ -2017,6 +2017,7 @@ class Parser:
         flags = []
         size = None
         values = []
+        pattern_spec = []  # PATTERN specification: list of (type_name, is_rest) tuples
 
         # Check for size or bare flags (ITABLE only - LTABLE doesn't use size)
         # BYTE/WORD can appear as bare atoms before size: <ITABLE BYTE 2500>
@@ -2041,26 +2042,47 @@ class Parser:
         if self.current_token.type == TokenType.LPAREN:
             self.advance()
             paren_depth = 1
+            in_pattern = False  # Track if we're inside a PATTERN specification
             while paren_depth > 0 and self.current_token.type != TokenType.EOF:
                 if self.current_token.type == TokenType.RPAREN:
                     paren_depth -= 1
+                    if paren_depth == 1 and in_pattern:
+                        in_pattern = False  # Exiting PATTERN spec
                     if paren_depth > 0:
                         self.advance()
                 elif self.current_token.type == TokenType.LPAREN:
                     paren_depth += 1
                     self.advance()
                 elif self.current_token.type == TokenType.ATOM:
+                    atom_val = self.current_token.value.upper()
                     # Only collect top-level atoms as flags (BYTE, PURE, PATTERN, etc.)
                     if paren_depth == 1:
                         flags.append(self.current_token.value)
+                        if atom_val == 'PATTERN':
+                            in_pattern = True  # Next nested level contains pattern spec
+                    elif in_pattern and paren_depth == 2:
+                        # Inside PATTERN - collect type specs
+                        if atom_val in ('BYTE', 'WORD'):
+                            pattern_spec.append((atom_val, False))  # (type_name, is_rest)
                     self.advance()
                 elif self.current_token.type == TokenType.LBRACKET:
-                    # Skip bracketed patterns like [REST WORD]
+                    # Bracketed patterns like [REST WORD]
                     self.advance()
+                    rest_type = None
+                    is_rest = False
                     while self.current_token.type not in (TokenType.RBRACKET, TokenType.EOF):
+                        if self.current_token.type == TokenType.ATOM:
+                            atom_val = self.current_token.value.upper()
+                            if atom_val == 'REST':
+                                is_rest = True
+                            elif atom_val in ('BYTE', 'WORD'):
+                                rest_type = atom_val
                         self.advance()
                     if self.current_token.type == TokenType.RBRACKET:
                         self.advance()
+                    # Add the REST specification if we're in a PATTERN
+                    if in_pattern and is_rest and rest_type:
+                        pattern_spec.append((rest_type, True))  # (type_name, is_rest=True)
                 else:
                     # Skip other tokens inside nested patterns
                     self.advance()
@@ -2071,7 +2093,7 @@ class Parser:
         while self.current_token.type not in (TokenType.RANGLE, TokenType.EOF):
             values.append(self.parse_expression())
 
-        return TableNode(table_type, flags, size, values, line, col)
+        return TableNode(table_type, flags, size, values, line, col, pattern_spec)
 
     def parse_cond(self, line: int, col: int) -> CondNode:
         """Parse COND statement."""

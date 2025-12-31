@@ -389,7 +389,6 @@ class TestPropdef:
             "<OBJECT WOODS (NORTH TO HOUSE)>"
         ).does_not_compile()
 
-    @pytest.mark.xfail(reason="PROPDEF for implicit directions not implemented")
     def test_propdef_for_directions_can_be_used_for_implicit_directions(self):
         """Test that PROPDEF for DIRECTIONS can be used for implicit directions."""
         AssertGlobals(
@@ -404,7 +403,6 @@ class TestPropdef:
             "<BAND <GETB ,W?EAST 4> ,PS?DIRECTION>"
         )
 
-    @pytest.mark.xfail(reason="PROPDEF DIRECTIONS property name suppression not implemented")
     def test_propdef_for_directions_should_not_create_directions_property(self):
         """Test that PROPDEF for DIRECTIONS doesn't create a DIRECTIONS property."""
         # When using PROPDEF for DIRECTIONS, P?DIRECTIONS should not exist
@@ -426,7 +424,6 @@ class TestPropdef:
             "<OBJECT WOODS (NORTH GOES TO HOUSE)>"
         ).generates_code_not_matching(r"P\?DIRECTIONS")
 
-    @pytest.mark.xfail(reason="VOC in PROPDEF not implemented")
     def test_vocab_created_by_propdef_should_work_correctly(self):
         """Test that vocab created by PROPDEF works correctly."""
         AssertGlobals(
@@ -459,7 +456,6 @@ class TestPropdef:
             "<=? <APPLY <GETP ,BAR ,P?FOO>> 123>"
         )
 
-    @pytest.mark.xfail(reason="ROOM type in PROPDEF not optimized for ROOMS-FIRST")
     def test_room_in_propdef_one_byte_when_rooms_first(self):
         """Test that ROOM in PROPDEF is one byte when ORDER-OBJECTS? is ROOMS-FIRST."""
         AssertGlobals(

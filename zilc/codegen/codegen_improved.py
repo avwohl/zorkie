@@ -114,8 +114,10 @@ class ImprovedCodeGenerator:
         self.block_stack: List[Dict[str, Any]] = []
 
         # Table storage for TABLE/LTABLE/ITABLE
-        # Each table is (name/id, bytes, is_pure)
-        self.tables: List[Tuple[str, bytes, bool]] = []
+        # Each table is (name/id, bytes, is_pure, is_parser_table)
+        # is_pure: table goes in static memory (after PURBOT)
+        # is_parser_table: table is a PARSER-TABLE and should be placed first in static memory
+        self.tables: List[Tuple[str, bytes, bool, bool]] = []
         self.table_counter = 0
         self.table_offsets: Dict[int, int] = {}  # table_index -> offset within table data
         self._table_data_size = 0  # Running total of table data size
@@ -189,9 +191,13 @@ class ImprovedCodeGenerator:
 
         # Track missing routines (referenced but not defined)
         self._missing_routines: set = set()
+        # Count call sites per routine for error reporting
+        self._routine_call_count: Dict[str, int] = {}
 
         # Warning/error tracking
         self._warnings: List[str] = []
+        self._errors: List[str] = []
+        self._error_limit: int = 100  # Stop after this many errors
         self._current_routine: str = "<global>"  # Track current routine for context
 
         # Built-in constants
@@ -346,10 +352,26 @@ class ImprovedCodeGenerator:
         self._warnings.append(full_msg)
         print(full_msg, file=sys.stderr)
 
-    def _error(self, message: str):
-        """Raise a compilation error with current context."""
+    def _error(self, message: str, fatal: bool = False):
+        """Record a compilation error with current context.
+
+        If fatal=True or error limit is reached, raises SyntaxError immediately.
+        Otherwise, records the error and continues compilation.
+        """
         full_msg = f"[codegen] Error in {self._current_routine}: {message}"
-        raise SyntaxError(full_msg)
+        self._errors.append(full_msg)
+
+        # Raise immediately if fatal or error limit reached
+        if fatal or len(self._errors) > self._error_limit:
+            raise SyntaxError(full_msg)
+
+    def get_errors(self) -> List[str]:
+        """Return all errors collected during code generation."""
+        return self._errors.copy()
+
+    def has_errors(self) -> bool:
+        """Return True if any errors were recorded."""
+        return len(self._errors) > 0
 
     def get_warnings(self) -> List[str]:
         """Return all warnings generated during code generation."""
@@ -432,6 +454,9 @@ class ImprovedCodeGenerator:
         Returns a 16-bit placeholder value that will be replaced with
         the actual packed routine address during fixup resolution.
         """
+        # Track call count for error reporting
+        self._routine_call_count[routine_name] = self._routine_call_count.get(routine_name, 0) + 1
+
         if routine_name in self._routine_to_placeholder:
             return self._routine_to_placeholder[routine_name]
 
@@ -506,7 +531,7 @@ class ImprovedCodeGenerator:
                 self.table_offsets[table_idx] = self._table_data_size
                 self._table_data_size += len(vtbl_data)
                 self.table_counter += 1
-                self.tables.append(("_VTBL", bytes(vtbl_data), True))  # is_pure=True
+                self.tables.append(("_VTBL", bytes(vtbl_data), True, False))  # is_pure=True, is_parser_table=False
 
                 # Add VTBL as a global so table address gets resolved
                 if 'VTBL' not in self.globals:
@@ -881,7 +906,7 @@ class ImprovedCodeGenerator:
         table_idx = len(self.tables)
         self.table_offsets[table_idx] = self._table_data_size
         self._table_data_size += len(table_data)
-        self.tables.append((f"_SOFT_GLOBALS", bytes(table_data), False))  # Not pure, mutable
+        self.tables.append((f"_SOFT_GLOBALS", bytes(table_data), False, False))  # Not pure, mutable
 
         # Set the global's initial value to the table reference marker
         self.global_values[self.funny_globals_table_global] = 0xFF00 | table_idx
@@ -916,12 +941,24 @@ class ImprovedCodeGenerator:
         table_data = bytearray()
         table_type = table_node.table_type.upper()
         is_pure = 'PURE' in table_node.flags or table_type == 'PTABLE'
+        is_parser_table = 'PARSER-TABLE' in table_node.flags
+        if is_parser_table:
+            is_pure = True  # PARSER-TABLE implies PURE
         is_byte = 'BYTE' in table_node.flags
         is_string = 'STRING' in table_node.flags
         is_lexv = 'LEXV' in table_node.flags
         is_length = 'LENGTH' in table_node.flags
         if is_string:
             is_byte = True  # STRING implies BYTE mode
+
+        # Convert PATTERN specification from TableNode format to internal format
+        # TableNode: [('BYTE', False), ('WORD', True), ...] -> [(is_byte, is_rest), ...]
+        element_pattern = None
+        if table_node.pattern_spec:
+            element_pattern = []
+            for type_name, is_rest in table_node.pattern_spec:
+                is_byte_elem = (type_name == 'BYTE')
+                element_pattern.append((is_byte_elem, is_rest))
 
         values = table_node.values
 
@@ -944,7 +981,7 @@ class ImprovedCodeGenerator:
             self.table_offsets[table_idx] = self._table_data_size
             self._table_data_size += len(table_data)
             self.table_counter += 1
-            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
             self.global_values[global_name] = 0xFF00 | table_idx
             return
 
@@ -970,7 +1007,7 @@ class ImprovedCodeGenerator:
             self.table_offsets[table_idx] = self._table_data_size
             self._table_data_size += len(table_data)
             self.table_counter += 1
-            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
             self.global_values[global_name] = 0xFF00 | table_idx
             return
 
@@ -1006,7 +1043,7 @@ class ImprovedCodeGenerator:
             # ITABLE with size and values: repeat pattern 'size' times
             # <ITABLE 2 1 2 3> = [1, 2, 3, 1, 2, 3] (pattern repeated 2x)
             pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
-                                                      is_string=is_string)
+                                                      is_string=is_string, pattern=element_pattern)
             for _ in range(initial_size):
                 table_data.extend(pattern_data)
         elif initial_size and table_type == 'ITABLE':
@@ -1020,7 +1057,7 @@ class ImprovedCodeGenerator:
         else:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
-                                                     is_string=is_string)
+                                                     is_string=is_string, pattern=element_pattern)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1037,7 +1074,7 @@ class ImprovedCodeGenerator:
         self.table_offsets[table_idx] = self._table_data_size
         self._table_data_size += len(table_data)
         self.table_counter += 1
-        self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+        self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = 0xFF00 | table_idx
@@ -1053,20 +1090,26 @@ class ImprovedCodeGenerator:
         """
         table_data = bytearray()
         is_pure = table_type == 'PTABLE'
+        is_parser_table = False
         is_byte = False
         is_string = False
         is_lexv = False
         is_length = False
+        element_pattern = None  # PATTERN specification for element sizes
 
         # Process operands from the form
         values = []
         for op in form_node.operands:
-            # Check for flags like (PURE), (BYTE), (STRING), (LEXV), (LENGTH)
+            # Check for flags like (PURE), (BYTE), (STRING), (LEXV), (LENGTH), (PARSER-TABLE), (PATTERN ...)
             if isinstance(op, FormNode):
                 if isinstance(op.operator, AtomNode):
                     flag_name = op.operator.value.upper()
                     if flag_name == 'PURE':
                         is_pure = True
+                        continue
+                    elif flag_name == 'PARSER-TABLE':
+                        is_parser_table = True
+                        is_pure = True  # PARSER-TABLE implies PURE
                         continue
                     elif flag_name == 'BYTE':
                         is_byte = True
@@ -1081,10 +1124,19 @@ class ImprovedCodeGenerator:
                     elif flag_name == 'LENGTH':
                         is_length = True
                         continue
+                    elif flag_name == 'PATTERN':
+                        # Parse pattern specification: (PATTERN (BYTE WORD BYTE BYTE [REST WORD]))
+                        if op.operands:
+                            element_pattern = self._parse_table_pattern(op.operands)
+                        continue
             elif isinstance(op, AtomNode):
                 flag_name = op.value.upper()
                 if flag_name == 'PURE':
                     is_pure = True
+                    continue
+                elif flag_name == 'PARSER-TABLE':
+                    is_parser_table = True
+                    is_pure = True  # PARSER-TABLE implies PURE
                     continue
                 elif flag_name == 'BYTE':
                     is_byte = True
@@ -1134,7 +1186,7 @@ class ImprovedCodeGenerator:
             self.table_offsets[table_idx] = self._table_data_size
             self._table_data_size += len(table_data)
             self.table_counter += 1
-            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
             self.global_values[global_name] = 0xFF00 | table_idx
             return
 
@@ -1160,7 +1212,7 @@ class ImprovedCodeGenerator:
             self.table_offsets[table_idx] = self._table_data_size
             self._table_data_size += len(table_data)
             self.table_counter += 1
-            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+            self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
             self.global_values[global_name] = 0xFF00 | table_idx
             return
 
@@ -1184,7 +1236,7 @@ class ImprovedCodeGenerator:
             # ITABLE with size and values: repeat pattern 'size' times
             # <ITABLE 2 1 2 3> = [1, 2, 3, 1, 2, 3] (pattern repeated 2x)
             pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
-                                                      is_string=is_string)
+                                                      is_string=is_string, pattern=element_pattern)
             for _ in range(initial_size):
                 table_data.extend(pattern_data)
         elif initial_size and table_type == 'ITABLE':
@@ -1198,7 +1250,7 @@ class ImprovedCodeGenerator:
         else:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
-                                                     is_string=is_string)
+                                                     is_string=is_string, pattern=element_pattern)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1224,7 +1276,7 @@ class ImprovedCodeGenerator:
         self.table_offsets[table_idx] = self._table_data_size
         self._table_data_size += len(table_data)
         self.table_counter += 1
-        self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure))
+        self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = 0xFF00 | table_idx
@@ -1276,14 +1328,14 @@ class ImprovedCodeGenerator:
         if table_idx >= len(self.tables):
             return None, None
 
-        name, data, is_pure = self.tables[table_idx]
+        name, data, is_pure, is_parser_table = self.tables[table_idx]
         return table_idx, bytearray(data)
 
     def _update_table_data(self, table_idx: int, new_data: bytes):
         """Update the data for a table at the given index."""
         if table_idx < len(self.tables):
-            name, old_data, is_pure = self.tables[table_idx]
-            self.tables[table_idx] = (name, bytes(new_data), is_pure)
+            name, old_data, is_pure, is_parser_table = self.tables[table_idx]
+            self.tables[table_idx] = (name, bytes(new_data), is_pure, is_parser_table)
 
     def _compile_time_zput(self, operands):
         """Execute compile-time ZPUT: set word at index in table.
@@ -1685,7 +1737,7 @@ class ImprovedCodeGenerator:
             # Store table
             table_name = f'_ACTIONS_TABLE_{self.table_counter}'
             self.table_counter += 1
-            self.tables.append((table_name, bytes(table_data), True))
+            self.tables.append((table_name, bytes(table_data), True, False))  # is_pure=True, is_parser_table=False
 
             # Link ACTIONS global to the table using placeholder
             if 'ACTIONS' in self.globals:
@@ -1744,7 +1796,7 @@ class ImprovedCodeGenerator:
             # Store table
             table_name = f'_PREACTIONS_TABLE_{self.table_counter}'
             self.table_counter += 1
-            self.tables.append((table_name, bytes(table_data), True))
+            self.tables.append((table_name, bytes(table_data), True, False))  # is_pure=True, is_parser_table=False
 
             # Link PREACTIONS global to the table using placeholder
             if 'PREACTIONS' in self.globals:
@@ -1804,7 +1856,7 @@ class ImprovedCodeGenerator:
             # Store table
             table_name = f'_PREPOSITIONS_TABLE_{self.table_counter}'
             self.table_counter += 1
-            self.tables.append((table_name, bytes(table_data), True))
+            self.tables.append((table_name, bytes(table_data), True, False))  # is_pure=True, is_parser_table=False
 
             # Link PREPOSITIONS global to the table (global was reserved in _setup_action_table_globals)
             if 'PREPOSITIONS' in self.globals:
@@ -1916,7 +1968,7 @@ class ImprovedCodeGenerator:
             self._table_data_size += len(entry_data)
 
             table_name = f'_SYNTAX_ENTRY_{action_num}'
-            self.tables.append((table_name, bytes(entry_data), True))
+            self.tables.append((table_name, bytes(entry_data), True, False))  # is_pure=True, is_parser_table=False
             entry_table_indices[action_num] = table_index
 
         # Now build VERBS table: array of pointers indexed by (255 - action_num)
@@ -1940,7 +1992,7 @@ class ImprovedCodeGenerator:
         self.table_offsets[table_index] = self._table_data_size
         self._table_data_size += len(verbs_data)
 
-        self.tables.append(("_VERBS", bytes(verbs_data), True))
+        self.tables.append(("_VERBS", bytes(verbs_data), True, False))  # is_pure=True, is_parser_table=False
 
         # Link VERBS global to the table
         self.global_values['VERBS'] = 0xFF00 | table_index
@@ -2008,7 +2060,7 @@ class ImprovedCodeGenerator:
         # Store table
         table_name = f'_LONG_WORD_TABLE_{self.table_counter}'
         self.table_counter += 1
-        self.tables.append((table_name, bytes(table_data), True))
+        self.tables.append((table_name, bytes(table_data), True, False))  # is_pure=True, is_parser_table=False
 
         # Link LONG-WORD-TABLE global to the table
         self.global_values['LONG-WORD-TABLE'] = 0xFF00 | table_index
@@ -2088,6 +2140,15 @@ class ImprovedCodeGenerator:
             Set of routine names that are missing.
         """
         return self._missing_routines
+
+    def get_missing_routine_call_counts(self) -> Dict[str, int]:
+        """Get call counts for missing routines.
+
+        Returns:
+            Dict mapping routine name to number of call sites.
+        """
+        return {name: self._routine_call_count.get(name, 0)
+                for name in self._missing_routines}
 
     def get_string_placeholders(self) -> Dict[int, str]:
         """Get string operand placeholders for the assembler to resolve.
@@ -2657,11 +2718,42 @@ class ImprovedCodeGenerator:
                         routine_code.append(1)
                         implicit_ret_generated = True
                 elif isinstance(last_stmt, GlobalVarNode):
-                    # Return the global variable
-                    var_num = self.globals.get(last_stmt.name, 0x10)
-                    routine_code.append(0xAB)  # RET variable
-                    routine_code.append(var_num)
-                    implicit_ret_generated = True
+                    # Return the global variable, constant, or object
+                    if last_stmt.name in self.globals:
+                        var_num = self.globals[last_stmt.name]
+                        routine_code.append(0xAB)  # RET variable
+                        routine_code.append(var_num)
+                        implicit_ret_generated = True
+                    elif last_stmt.name in self.constants:
+                        val = self.constants[last_stmt.name]
+                        if 0 <= val <= 255:
+                            routine_code.append(0x9B)  # RET small constant
+                            routine_code.append(val & 0xFF)
+                        else:
+                            routine_code.append(0x8B)  # RET large constant
+                            routine_code.append((val >> 8) & 0xFF)
+                            routine_code.append(val & 0xFF)
+                        implicit_ret_generated = True
+                    elif last_stmt.name in self.objects:
+                        obj_num = self.objects[last_stmt.name]
+                        if 0 <= obj_num <= 255:
+                            routine_code.append(0x9B)  # RET small constant
+                            routine_code.append(obj_num & 0xFF)
+                        else:
+                            routine_code.append(0x8B)  # RET large constant
+                            routine_code.append((obj_num >> 8) & 0xFF)
+                            routine_code.append(obj_num & 0xFF)
+                        implicit_ret_generated = True
+                    elif last_stmt.name.startswith('P?'):
+                        # Error for P?* property constants that don't exist
+                        # (they should have been defined if the property exists)
+                        self._error(f"Unknown property constant '{last_stmt.name}'")
+                    else:
+                        # Unknown global - use default (variable 0x10)
+                        self._warn(f"Unknown global/object '{last_stmt.name}' - using default")
+                        routine_code.append(0xAB)  # RET variable
+                        routine_code.append(0x10)
+                        implicit_ret_generated = True
                 elif isinstance(last_stmt, NumberNode):
                     # Return the number
                     val = last_stmt.value
@@ -3559,8 +3651,52 @@ class ImprovedCodeGenerator:
 
     # ===== Table Node Helpers =====
 
+    def _parse_table_pattern(self, pattern_operands) -> list:
+        """Parse a TABLE PATTERN specification.
+
+        The PATTERN format is: (BYTE WORD BYTE BYTE [REST WORD])
+        Each element specifies the size of the corresponding table value:
+        - BYTE: 1 byte
+        - WORD: 2 bytes
+        - [REST type]: remaining values use 'type' (BYTE or WORD)
+
+        Args:
+            pattern_operands: List of pattern elements from the PATTERN form
+
+        Returns:
+            List of tuples: (is_byte, is_rest) for each pattern element
+            is_rest=True for the [REST ...] element
+        """
+        pattern = []
+        for elem in pattern_operands:
+            if isinstance(elem, AtomNode):
+                elem_name = elem.value.upper()
+                if elem_name == 'BYTE':
+                    pattern.append((True, False))  # is_byte=True, is_rest=False
+                elif elem_name == 'WORD':
+                    pattern.append((False, False))  # is_byte=False, is_rest=False
+            elif isinstance(elem, list):
+                # [REST BYTE] or [REST WORD]
+                if len(elem) >= 2:
+                    rest_elem = elem[0]
+                    type_elem = elem[1]
+                    if isinstance(rest_elem, AtomNode) and rest_elem.value.upper() == 'REST':
+                        if isinstance(type_elem, AtomNode):
+                            type_name = type_elem.value.upper()
+                            is_byte = (type_name == 'BYTE')
+                            pattern.append((is_byte, True))  # is_rest=True
+            elif isinstance(elem, FormNode):
+                # Could be wrapped in a form like <WORD>
+                if isinstance(elem.operator, AtomNode):
+                    elem_name = elem.operator.value.upper()
+                    if elem_name == 'BYTE':
+                        pattern.append((True, False))
+                    elif elem_name == 'WORD':
+                        pattern.append((False, False))
+        return pattern
+
     def _encode_table_values(self, values: List[ASTNode], default_is_byte: bool = False,
-                              is_string: bool = False) -> bytearray:
+                              is_string: bool = False, pattern: list = None) -> bytearray:
         """Encode table values to bytes, handling #BYTE and #WORD prefixes.
 
         In ZIL/MDL, #BYTE value stores value as a single byte,
@@ -3570,12 +3706,23 @@ class ImprovedCodeGenerator:
             values: List of AST nodes to encode
             default_is_byte: If True, values without prefix are stored as bytes
             is_string: If True, strings are encoded as raw character bytes
+            pattern: Optional list of (is_byte, is_rest) tuples from PATTERN spec
 
         Returns:
             bytearray: Encoded table data
         """
         table_data = bytearray()
         i = 0
+        pattern_idx = 0
+        rest_is_byte = default_is_byte  # Default for REST elements
+
+        # Find REST element in pattern if present
+        if pattern:
+            for pi, (is_byte, is_rest) in enumerate(pattern):
+                if is_rest:
+                    rest_is_byte = is_byte
+                    break
+
         while i < len(values):
             val = values[i]
 
@@ -3588,6 +3735,7 @@ class ImprovedCodeGenerator:
                     val_int = self._get_table_value_int(next_val)
                     table_data.append(val_int & 0xFF)
                 i += 1
+                pattern_idx += 1
                 continue
 
             # Check for #WORD prefix atom
@@ -3599,6 +3747,7 @@ class ImprovedCodeGenerator:
                     val_int = self._get_table_value_int(next_val)
                     table_data.extend(struct.pack('>H', val_int & 0xFFFF))
                 i += 1
+                pattern_idx += 1
                 continue
 
             # Handle STRING mode - strings become raw character bytes
@@ -3606,15 +3755,31 @@ class ImprovedCodeGenerator:
                 for char in val.value:
                     table_data.append(ord(char) & 0xFF)
                 i += 1
+                pattern_idx += 1
                 continue
+
+            # Determine byte vs word based on pattern or default
+            use_byte = default_is_byte
+            if pattern:
+                if pattern_idx < len(pattern):
+                    is_byte, is_rest = pattern[pattern_idx]
+                    if is_rest:
+                        # Found REST - use its type for this and all remaining
+                        use_byte = is_byte
+                    else:
+                        use_byte = is_byte
+                else:
+                    # Past pattern length, use REST type if available
+                    use_byte = rest_is_byte
 
             # Regular value
             val_int = self._get_table_value_int(val)
-            if default_is_byte:
+            if use_byte:
                 table_data.append(val_int & 0xFF)
             else:
                 table_data.extend(struct.pack('>H', val_int & 0xFFFF))
             i += 1
+            pattern_idx += 1
 
         return table_data
 
@@ -3762,6 +3927,9 @@ class ImprovedCodeGenerator:
         table_data = bytearray()
         table_type = node.table_type
         is_pure = 'PURE' in node.flags
+        is_parser_table = 'PARSER-TABLE' in node.flags
+        if is_parser_table:
+            is_pure = True  # PARSER-TABLE implies PURE
         is_byte = 'BYTE' in node.flags
         is_string = 'STRING' in node.flags
         if is_string:
@@ -3801,7 +3969,7 @@ class ImprovedCodeGenerator:
         self.table_offsets[table_index] = self._table_data_size
         self._table_data_size += len(table_data)
         self.table_counter += 1
-        self.tables.append((table_id, bytes(table_data), is_pure))
+        self.tables.append((table_id, bytes(table_data), is_pure, is_parser_table))
 
         return table_index
 
@@ -5707,8 +5875,14 @@ class ImprovedCodeGenerator:
                     self.used_locals.add(node.name)
                 return (2, self.locals[node.name])
             else:
-                self._warn(f"Unknown global/object '{node.name}' - using default")
-                return (2, 0x10)
+                # Error for P?* property constants that don't exist
+                # (they should have been defined if the property exists)
+                if node.name.startswith('P?'):
+                    self._error(f"Unknown property constant '{node.name}'")
+                    return (2, 0x10)  # Return something for error recovery
+                else:
+                    self._warn(f"Unknown global/object '{node.name}' - using default")
+                    return (2, 0x10)
         elif isinstance(node, LocalVarNode) or isinstance(node, CharLocalVarNode):
             var_num = self.locals.get(node.name)
             if var_num is not None:
@@ -5764,8 +5938,8 @@ class ImprovedCodeGenerator:
                     self.used_locals.add(node.name)
                 return (2, self.locals[node.name])
             else:
-                self._warn(f"Unknown global/object '{node.name}' - using default")
-                return (2, 0x10)
+                self._error(f"Unknown global/constant/object '{node.name}'")
+                return (2, 0x10)  # Return something for error recovery
         elif isinstance(node, TableNode):
             table_id = self._add_table(node)
             return (0, table_id)  # Table addresses are typically large
@@ -19190,7 +19364,7 @@ class ImprovedCodeGenerator:
                 table_idx = len(self.tables)
                 self.table_offsets[table_idx] = self._table_data_size  # Track offset
                 self._table_data_size += len(int_data)  # Update running total
-                self.tables.append((table_id, bytes(int_data), False))
+                self.tables.append((table_id, bytes(int_data), False, False))  # is_pure=False, is_parser_table=False
                 self._interrupt_table_indices[int_name] = table_idx
 
                 # Also track in interrupts dict for INT lookup
@@ -19479,19 +19653,25 @@ class ImprovedCodeGenerator:
 
         table_data = bytearray()
         is_pure = table_type == 'PTABLE'
+        is_parser_table = False
         is_byte = False
         is_string = False  # STRING flag - store strings as raw characters
         initial_size = None
+        element_pattern = None  # PATTERN specification for element sizes
 
         # Process operands
         values = []
         for op in operands:
-            # Check for flags like (PURE), (BYTE), (STRING)
+            # Check for flags like (PURE), (BYTE), (STRING), (PARSER-TABLE), (PATTERN ...)
             if isinstance(op, FormNode):
                 if isinstance(op.operator, AtomNode):
                     flag_name = op.operator.value.upper()
                     if flag_name == 'PURE':
                         is_pure = True
+                        continue
+                    elif flag_name == 'PARSER-TABLE':
+                        is_parser_table = True
+                        is_pure = True  # PARSER-TABLE implies PURE
                         continue
                     elif flag_name == 'BYTE':
                         is_byte = True
@@ -19500,10 +19680,19 @@ class ImprovedCodeGenerator:
                         is_string = True
                         is_byte = True  # STRING implies BYTE mode
                         continue
+                    elif flag_name == 'PATTERN':
+                        # Parse pattern specification: (PATTERN (BYTE WORD BYTE BYTE [REST WORD]))
+                        if op.operands:
+                            element_pattern = self._parse_table_pattern(op.operands)
+                        continue
             elif isinstance(op, AtomNode):
                 flag_name = op.value.upper()
                 if flag_name == 'PURE':
                     is_pure = True
+                    continue
+                elif flag_name == 'PARSER-TABLE':
+                    is_parser_table = True
+                    is_pure = True  # PARSER-TABLE implies PURE
                     continue
                 elif flag_name == 'BYTE':
                     is_byte = True
@@ -19533,7 +19722,7 @@ class ImprovedCodeGenerator:
         if initial_size and table_type == 'ITABLE' and values:
             # ITABLE with size and values: repeat pattern 'size' times
             pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
-                                                      is_string=is_string)
+                                                      is_string=is_string, pattern=element_pattern)
             for _ in range(initial_size):
                 table_data.extend(pattern_data)
         elif initial_size and table_type == 'ITABLE':
@@ -19547,7 +19736,7 @@ class ImprovedCodeGenerator:
         else:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
             table_data.extend(self._encode_table_values(values, default_is_byte=is_byte,
-                                                         is_string=is_string))
+                                                         is_string=is_string, pattern=element_pattern))
 
         # Store the table for later assembly
         table_id = f"_TABLE_{self.table_counter}"
@@ -19555,7 +19744,7 @@ class ImprovedCodeGenerator:
         self.table_offsets[table_idx] = self._table_data_size  # Track offset
         self._table_data_size += len(table_data)  # Update running total
         self.table_counter += 1
-        self.tables.append((table_id, bytes(table_data), is_pure))
+        self.tables.append((table_id, bytes(table_data), is_pure, is_parser_table))
 
         # Allocate a global variable to hold this table's address
         # The global will be initialized with a placeholder that gets resolved by the assembler
@@ -19577,24 +19766,86 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def _get_sorted_tables(self) -> Tuple[List[Tuple[int, str, bytes, bool, bool]], int, int]:
+        """Sort tables into memory layout order and calculate split points.
+
+        Memory layout order:
+        1. Impure tables (dynamic memory, before PURBOT)
+        2. Parser tables (start of static memory, at PURBOT)
+        3. Pure tables (static memory, after parser tables)
+
+        Returns:
+            Tuple of:
+            - List of (original_idx, name, data, is_pure, is_parser_table) in sorted order
+            - Byte offset where impure section ends (= parser section starts)
+            - Byte offset where parser section ends (= pure section starts)
+        """
+        # Categorize tables
+        impure_tables = []
+        parser_tables = []
+        pure_tables = []
+
+        for idx, (name, data, is_pure, is_parser_table) in enumerate(self.tables):
+            if not is_pure:
+                impure_tables.append((idx, name, data, is_pure, is_parser_table))
+            elif is_parser_table:
+                parser_tables.append((idx, name, data, is_pure, is_parser_table))
+            else:
+                pure_tables.append((idx, name, data, is_pure, is_parser_table))
+
+        # Concatenate in order: impure, parser, pure
+        sorted_tables = impure_tables + parser_tables + pure_tables
+
+        # Calculate split points
+        impure_size = sum(len(data) for _, _, data, _, _ in impure_tables)
+        parser_size = sum(len(data) for _, _, data, _, _ in parser_tables)
+
+        return sorted_tables, impure_size, impure_size + parser_size
+
     def get_table_data(self) -> bytes:
         """Get all accumulated table data for assembly.
 
+        Tables are sorted into memory layout order:
+        1. Impure tables (dynamic memory)
+        2. Parser tables (start of static memory)
+        3. Pure tables (rest of static memory)
+
         Returns:
-            bytes: Concatenated table data
+            bytes: Concatenated table data in sorted order
         """
+        sorted_tables, _, _ = self._get_sorted_tables()
         result = bytearray()
-        for table_id, data, is_pure in self.tables:
+        for _, _, data, _, _ in sorted_tables:
             result.extend(data)
         return bytes(result)
 
     def get_table_offsets(self) -> Dict[int, int]:
         """Get table offset mapping for address resolution.
 
+        Offsets reflect the sorted memory layout where impure tables come first,
+        followed by parser tables, then pure tables.
+
         Returns:
-            Dict mapping table index to offset within table data block
+            Dict mapping original table index to offset within table data block
         """
-        return self.table_offsets.copy()
+        sorted_tables, _, _ = self._get_sorted_tables()
+        offsets = {}
+        current_offset = 0
+        for orig_idx, _, data, _, _ in sorted_tables:
+            offsets[orig_idx] = current_offset
+            current_offset += len(data)
+        return offsets
+
+    def get_impure_tables_size(self) -> int:
+        """Get the total size of impure tables (dynamic memory section).
+
+        This is the byte offset where parser tables begin (PURBOT boundary).
+
+        Returns:
+            int: Size in bytes of all impure tables
+        """
+        _, impure_size, _ = self._get_sorted_tables()
+        return impure_size
 
     def get_tables_with_placeholders(self) -> List[Tuple[int, int]]:
         """Get byte ranges in table data that contain table address placeholders.
@@ -19606,9 +19857,10 @@ class ImprovedCodeGenerator:
         Returns:
             List of (start, end) byte offsets within combined table data
         """
+        sorted_tables, _, _ = self._get_sorted_tables()
         result = []
         offset = 0
-        for table_name, data, is_pure in self.tables:
+        for _, table_name, data, _, _ in sorted_tables:
             # Only _VERBS table contains table address placeholders
             if table_name == '_VERBS':
                 result.append((offset, offset + len(data)))

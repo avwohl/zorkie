@@ -248,7 +248,6 @@ class TestReleaseid:
 class TestErrorLimits:
     """Tests for error limits."""
 
-    @pytest.mark.xfail(reason="Error limit not implemented - requires undefined routine detection")
     def test_compilation_stops_after_100_errors(self):
         """Test compilation stops after 100 errors."""
         builder = AssertRoutine("", "T")

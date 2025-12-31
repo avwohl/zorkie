@@ -86,7 +86,6 @@ class TestITABLE:
 class TestTablePatterns:
     """Tests for table patterns."""
 
-    @pytest.mark.xfail(reason="Table PATTERN not implemented")
     def test_table_pattern_affects_element_sizes(self):
         """Test that PATTERN affects element sizes."""
         AssertGlobals(
@@ -201,7 +200,6 @@ class TestCompileTimeTableManipulation:
 class TestParserTables:
     """Tests for parser tables."""
 
-    @pytest.mark.xfail(reason="PARSER-TABLE memory ordering not implemented")
     def test_parser_tables_come_before_other_pure_tables(self):
         """Test that PARSER-TABLEs come before other pure tables."""
         AssertGlobals(

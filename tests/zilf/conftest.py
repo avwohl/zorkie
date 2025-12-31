@@ -254,11 +254,15 @@ class ZILCompiler:
         except SyntaxError as e:
             # Parse/syntax errors
             error_msg = str(e)
+            # Get all collected errors from the compiler if available
+            all_errors = compiler.get_errors() if hasattr(compiler, 'get_errors') else []
+            if not all_errors:
+                all_errors = [error_msg]
             # Extract error codes like ZIL0404, MDL0417, etc.
             error_codes = re.findall(r'([A-Z]{2,}[0-9]{3,})', error_msg)
             return CompilationResult(
                 success=False,
-                errors=[error_msg],
+                errors=all_errors,
                 error_codes=error_codes,
             )
         except Exception as e:
