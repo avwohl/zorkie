@@ -16621,39 +16621,15 @@ class ImprovedCodeGenerator:
         <GET table index> reads word from table[index].
         Uses Z-machine LOADW instruction.
 
-        If any operand is a FormNode, generate that form's code first
-        (which puts result on stack) then use stack as the operand.
+        Properly handles large constants (like W?* vocabulary word placeholders)
+        by using variable form when needed.
         """
         if len(operands) != 2:
             raise ValueError("GET requires exactly 2 operands")
 
-        code = bytearray()
-
-        # Process each operand - FormNodes need code generation first
-        op_types = []
-        op_vals = []
-
-        for op in operands:
-            if isinstance(op, FormNode):
-                # Generate code for nested form - result goes to stack
-                inner_code = self.generate_form(op)
-                code.extend(inner_code)
-                # Use stack (variable 0) as the operand
-                op_types.append(1)  # Variable
-                op_vals.append(0)   # Stack
-            else:
-                op_type, op_val = self._get_operand_type_and_value(op)
-                op_types.append(op_type)
-                op_vals.append(op_val)
-
         # LOADW is 2OP opcode 0x0F
-        opcode = 0x0F | (op_types[0] << 6) | (op_types[1] << 5)
-        code.append(opcode)
-        code.append(op_vals[0] & 0xFF)
-        code.append(op_vals[1] & 0xFF)
-        code.append(0x00)  # Store to stack
-
-        return bytes(code)
+        # Use _gen_2op_store which properly handles large constants
+        return self._gen_2op_store(0x0F, operands[0], operands[1], store_var=0)
 
     def gen_put(self, operands: List[ASTNode]) -> bytes:
         """Generate PUT (table word write).
@@ -19861,8 +19837,9 @@ class ImprovedCodeGenerator:
         result = []
         offset = 0
         for _, table_name, data, _, _ in sorted_tables:
-            # Only _VERBS table contains table address placeholders
-            if table_name == '_VERBS':
+            # _VERBS and _VWORD_* tables contain table address placeholders
+            # Note: _VERB_DATA_* tables do NOT - they contain literal values like -1
+            if table_name == '_VERBS' or table_name.startswith('_VWORD_'):
                 result.append((offset, offset + len(data)))
             offset += len(data)
         return result

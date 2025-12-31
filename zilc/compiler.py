@@ -2183,6 +2183,10 @@ class ZILCompiler:
         verb_word_order = []  # Track verb words in order of appearance
         verb_numbers = {}  # verb_word -> verb_number (255, 254, ...)
 
+        # NEW-PARSER? mode: Track syntax object counts per verb
+        # verb_syntaxes[verb_word] = {'one_object': bool, 'two_object': bool}
+        verb_syntaxes = {}
+
         for syntax_def in program.syntax:
             if not syntax_def.routine:
                 continue
@@ -2208,6 +2212,16 @@ class ZILCompiler:
                         verb_word_order.append(verb_upper)
                         # Assign verb number: 255, 254, 253, ...
                         verb_numbers[verb_upper] = 255 - len(verb_word_order) + 1
+
+                    # Count OBJECT keywords in pattern for NEW-PARSER? VERB-DATA
+                    object_count = sum(1 for w in syntax_def.pattern
+                                       if isinstance(w, str) and w.upper() == 'OBJECT')
+                    if verb_upper not in verb_syntaxes:
+                        verb_syntaxes[verb_upper] = {'one_object': False, 'two_object': False}
+                    if object_count == 1:
+                        verb_syntaxes[verb_upper]['one_object'] = True
+                    elif object_count >= 2:
+                        verb_syntaxes[verb_upper]['two_object'] = True
 
             # If there's an action name override, it creates a NEW action entry
             # with the same routine but potentially different preaction
@@ -2439,6 +2453,8 @@ class ZILCompiler:
             'verb_word_order': verb_word_order,  # ordered list of verb words
             # Syntax entries with scope flags for VERBS table
             'syntax_entries': syntax_entries,
+            # NEW-PARSER? verb syntax info: verb -> {one_object: bool, two_object: bool}
+            'verb_syntaxes': verb_syntaxes,
         }
 
         return self._action_table
@@ -3058,6 +3074,8 @@ class ZILCompiler:
                 globals_data = codegen.build_globals_data()
 
         # Generate WORD-FLAG-TABLE if there are NEW-ADD-WORD entries (NEW-PARSER? mode)
+        # Track placeholders that should resolve to dictionary addresses (not VWORD)
+        word_flag_table_placeholders = set()
         if word_flag_entries:
             self.log(f"  Generating WORD-FLAG-TABLE with {len(word_flag_entries)} entries")
             # Table format: [count, word1, flags1, word2, flags2, ...]
@@ -3071,6 +3089,8 @@ class ZILCompiler:
                 placeholder_idx = codegen._next_vocab_placeholder_index
                 codegen._vocab_placeholders[placeholder_idx] = word_name.lower()
                 codegen._next_vocab_placeholder_index += 1
+                # Track as internal to WORD-FLAG-TABLE (should resolve to dictionary, not VWORD)
+                word_flag_table_placeholders.add(placeholder_idx)
                 placeholder_val = 0xFB00 | placeholder_idx
                 table_data_wft.extend([(placeholder_val >> 8) & 0xFF, placeholder_val & 0xFF])
                 # Add flags
@@ -3090,6 +3110,192 @@ class ZILCompiler:
             # Refresh table data and offsets
             table_data = codegen.get_table_data()
             table_offsets = codegen.get_table_offsets()
+            globals_data = codegen.build_globals_data()
+
+        # Generate VWORD tables for NEW-PARSER? mode
+        # In NEW-PARSER? mode, W?WORD points to a VWORD table, not the dictionary entry
+        # VWORD structure (7 words = 14 bytes):
+        #   0: WORD-LEXICAL-WORD (dictionary address placeholder)
+        #   1: WORD-CLASSIFICATION-NUMBER (type bits)
+        #   2: WORD-FLAGS (0 if WORD-FLAGS-IN-TABLE)
+        #   3: WORD-SEMANTIC-STUFF (for verbs: VERB-DATA table pointer)
+        #   4: WORD-VERB-STUFF
+        #   5: WORD-ADJ-ID
+        #   6: WORD-DIR-ID
+        vword_tables = {}  # word -> table_index (for W?WORD resolution)
+        vword_internal_placeholders = set()  # Placeholder indices internal to VWORD tables
+        if new_parser:
+            self.log("  Generating VWORD tables for NEW-PARSER? mode...")
+            verb_syntaxes = action_table_info.get('verb_syntaxes', {}) if action_table_info else {}
+
+            # Collect all words that need VWORD tables (words referenced via W?WORD)
+            # Include: verbs from syntax definitions, NEW-ADD-WORD words, synonym main words
+            words_needing_vword = set()
+            if action_table_info:
+                for verb_word in action_table_info.get('verb_numbers', {}).keys():
+                    words_needing_vword.add(verb_word.upper())
+
+            # Add NEW-ADD-WORD words (these are the main words that synonyms point to)
+            new_add_word_classifications = {}  # word -> classification bits
+            if program.new_add_words:
+                for naw in program.new_add_words:
+                    word_upper = naw.name.upper()
+                    words_needing_vword.add(word_upper)
+                    # Parse classification from word_type (e.g., TBUZZ -> BUZZ)
+                    classification = 0
+                    if naw.word_type:
+                        flag_upper = naw.word_type.upper()
+                        if flag_upper.startswith('T'):
+                            flag_name = flag_upper[1:]  # TBUZZ -> BUZZ
+                        else:
+                            flag_name = flag_upper
+                        # Map classification names to bit values
+                        class_bits = {
+                            'ADJ': 1, 'BUZZ': 2, 'DIR': 4, 'NOUN': 8,
+                            'PREP': 16, 'VERB': 32, 'PARTICLE': 64
+                        }
+                        classification = class_bits.get(flag_name, 0)
+                    new_add_word_classifications[word_upper] = classification
+
+            # Build synonym map: synonym -> main word (first in group)
+            synonym_to_main = {}  # synonym -> main word
+            for group in program.verb_synonym_groups:
+                if len(group) >= 2:
+                    main_word = group[0].upper()
+                    for synonym in group[1:]:
+                        synonym_to_main[synonym.upper()] = main_word
+
+            # Generate VERB-DATA tables for verbs first (so we can reference them in VWORD)
+            verb_data_tables = {}  # verb_word -> table_index
+            for verb_word in words_needing_vword:
+                syntax_info = verb_syntaxes.get(verb_word, {'one_object': False, 'two_object': False})
+
+                # VERB-DATA structure (4 words = 8 bytes):
+                #   0: VERB-ZERO = -1 (0xFFFF)
+                #   1: VERB-RESERVED = 0
+                #   2: VERB-ONE = pointer to one-object syntax table, or 0
+                #   3: VERB-TWO = pointer to two-object syntax table, or 0
+                verb_data = bytearray()
+                verb_data.extend([0xFF, 0xFF])  # VERB-ZERO = -1
+                verb_data.extend([0x00, 0x00])  # VERB-RESERVED = 0
+
+                # For now, use placeholder non-zero values if syntax exists
+                # (A proper implementation would generate actual syntax tables)
+                if syntax_info['one_object']:
+                    verb_data.extend([0x00, 0x01])  # Non-zero placeholder for VERB-ONE
+                else:
+                    verb_data.extend([0x00, 0x00])  # 0 = no one-object syntax
+
+                if syntax_info['two_object']:
+                    verb_data.extend([0x00, 0x01])  # Non-zero placeholder for VERB-TWO
+                else:
+                    verb_data.extend([0x00, 0x00])  # 0 = no two-object syntax
+
+                # Add VERB-DATA table
+                table_index = len(codegen.tables)
+                self.log(f"    VERB-DATA for {verb_word}: {[hex(b) for b in verb_data]} (idx={table_index})")
+                codegen.tables.append((f"_VERB_DATA_{verb_word}", bytes(verb_data), False, False))
+                verb_data_tables[verb_word] = table_index
+
+            # Generate VWORD tables for each main word (not synonyms)
+            for word in words_needing_vword:
+                vword_data = bytearray()
+
+                # Field 0: WORD-LEXICAL-WORD (dictionary address placeholder)
+                placeholder_idx = codegen._next_vocab_placeholder_index
+                codegen._vocab_placeholders[placeholder_idx] = word.lower()
+                codegen._next_vocab_placeholder_index += 1
+                vword_internal_placeholders.add(placeholder_idx)  # Track as internal
+                placeholder_val = 0xFB00 | placeholder_idx
+                vword_data.extend([(placeholder_val >> 8) & 0xFF, placeholder_val & 0xFF])
+
+                # Field 1: WORD-CLASSIFICATION-NUMBER (type bits)
+                if word in new_add_word_classifications:
+                    classification = new_add_word_classifications[word]
+                else:
+                    classification = 0x20  # VERB = 32
+                vword_data.extend([(classification >> 8) & 0xFF, classification & 0xFF])
+
+                # Field 2: WORD-FLAGS (0 if WORD-FLAGS-IN-TABLE)
+                vword_data.extend([0x00, 0x00])
+
+                # Field 3: WORD-SEMANTIC-STUFF (VERB-DATA table pointer for verbs)
+                if word in verb_data_tables:
+                    # Use 0xFF00 | table_index pattern for table reference
+                    verb_data_ref = 0xFF00 | verb_data_tables[word]
+                    vword_data.extend([(verb_data_ref >> 8) & 0xFF, verb_data_ref & 0xFF])
+                else:
+                    vword_data.extend([0x00, 0x00])
+
+                # Field 4: WORD-VERB-STUFF
+                vword_data.extend([0x00, 0x00])
+
+                # Field 5: WORD-ADJ-ID
+                vword_data.extend([0x00, 0x00])
+
+                # Field 6: WORD-DIR-ID
+                vword_data.extend([0x00, 0x00])
+
+                # Add VWORD table
+                table_index = len(codegen.tables)
+                codegen.tables.append((f"_VWORD_{word}", bytes(vword_data), False, False))
+                vword_tables[word] = table_index
+
+            # Generate VWORD tables for synonyms (field 3 points to main word's VWORD)
+            synonym_vword_count = 0
+            for synonym, main_word in synonym_to_main.items():
+                # Skip if main word doesn't have a VWORD table
+                if main_word not in vword_tables:
+                    continue
+
+                vword_data = bytearray()
+
+                # Field 0: WORD-LEXICAL-WORD (dictionary address placeholder)
+                placeholder_idx = codegen._next_vocab_placeholder_index
+                codegen._vocab_placeholders[placeholder_idx] = synonym.lower()
+                codegen._next_vocab_placeholder_index += 1
+                vword_internal_placeholders.add(placeholder_idx)  # Track as internal
+                placeholder_val = 0xFB00 | placeholder_idx
+                vword_data.extend([(placeholder_val >> 8) & 0xFF, placeholder_val & 0xFF])
+
+                # Field 1: WORD-CLASSIFICATION-NUMBER (copy from main word)
+                if main_word in new_add_word_classifications:
+                    classification = new_add_word_classifications[main_word]
+                else:
+                    classification = 0x20  # VERB = 32
+                vword_data.extend([(classification >> 8) & 0xFF, classification & 0xFF])
+
+                # Field 2: WORD-FLAGS (0 if WORD-FLAGS-IN-TABLE)
+                vword_data.extend([0x00, 0x00])
+
+                # Field 3: WORD-SEMANTIC-STUFF (pointer to main word's VWORD table)
+                # Use 0xFF00 | table_index pattern for table reference
+                main_vword_ref = 0xFF00 | vword_tables[main_word]
+                vword_data.extend([(main_vword_ref >> 8) & 0xFF, main_vword_ref & 0xFF])
+
+                # Field 4: WORD-VERB-STUFF
+                vword_data.extend([0x00, 0x00])
+
+                # Field 5: WORD-ADJ-ID
+                vword_data.extend([0x00, 0x00])
+
+                # Field 6: WORD-DIR-ID
+                vword_data.extend([0x00, 0x00])
+
+                # Add VWORD table
+                table_index = len(codegen.tables)
+                codegen.tables.append((f"_VWORD_{synonym}", bytes(vword_data), False, False))
+                vword_tables[synonym] = table_index
+                synonym_vword_count += 1
+
+            self.log(f"  Generated {len(vword_tables)} VWORD tables ({synonym_vword_count} synonyms) and {len(verb_data_tables)} VERB-DATA tables")
+
+            # Refresh table data, offsets, placeholder ranges, impure size, and routine fixups
+            table_data = codegen.get_table_data()
+            table_offsets = codegen.get_table_offsets()
+            tables_with_placeholders = codegen.get_tables_with_placeholders()
+            impure_tables_size = codegen.get_impure_tables_size()
+            table_routine_fixups = codegen.get_table_routine_fixups()  # Recalculate with new offsets
             globals_data = codegen.build_globals_data()
 
         # Build object table with proper properties
@@ -3869,7 +4075,26 @@ class ZILCompiler:
             # Symbols don't have aliases (exact match only)
         }
 
+        # Track VWORD table fixups separately (need table address resolution)
+        vword_fixups = []  # List of (placeholder_idx, table_index)
+
+        self.log(f"  Resolving vocab placeholders: new_parser={new_parser}")
+        self.log(f"    vword_tables: {vword_tables}")
+        self.log(f"    vword_internal_placeholders: {vword_internal_placeholders}")
+        self.log(f"    vocab_placeholders: {vocab_placeholders}")
+
         for placeholder_idx, word in vocab_placeholders.items():
+            # In NEW-PARSER? mode, check if this word has a VWORD table
+            # BUT: internal VWORD placeholders should still resolve to dictionary
+            word_upper = word.upper()
+            self.log(f"    placeholder {placeholder_idx}: word={word}, upper={word_upper}, in_vword={word_upper in vword_tables}, internal={placeholder_idx in vword_internal_placeholders}")
+            if new_parser and word_upper in vword_tables and placeholder_idx not in vword_internal_placeholders:
+                # This word has a VWORD table - use table index for fixup
+                # (only for code references, not internal VWORD table placeholders)
+                vword_fixups.append((placeholder_idx, vword_tables[word_upper]))
+                self.log(f"      -> added to vword_fixups: ({placeholder_idx}, {vword_tables[word_upper]})")
+                continue
+
             # First, try exact match
             if word in dict_word_offsets:
                 vocab_fixups.append((placeholder_idx, dict_word_offsets[word]))
@@ -4004,6 +4229,7 @@ class ZILCompiler:
             tell_string_placeholders=tell_string_placeholders,
             tell_placeholder_positions=tell_placeholder_positions,
             vocab_fixups=vocab_fixups,
+            vword_fixups=vword_fixups if new_parser else None,
             tchars_table_idx=tchars_table_idx
         )
 

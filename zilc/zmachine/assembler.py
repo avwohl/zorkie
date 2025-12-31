@@ -442,6 +442,50 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_vword_placeholders(self, routines: bytes, vword_fixups: list,
+                                     table_base_addr: int, table_offsets: dict) -> bytes:
+        """
+        Resolve VWORD table placeholders (W?*) in routine bytecode.
+
+        Similar to _resolve_vocab_placeholders, but resolves to table addresses
+        instead of dictionary addresses. Used in NEW-PARSER? mode.
+
+        Args:
+            routines: Routine bytecode with vocab placeholders
+            vword_fixups: List of (placeholder_idx, table_index) tuples
+            table_base_addr: Base address where tables are placed in memory
+            table_offsets: Dict mapping table index to offset within table data
+
+        Returns:
+            Patched routine bytecode
+        """
+        if not vword_fixups:
+            return routines
+
+        result = bytearray(routines)
+
+        # Build a map from placeholder_idx to VWORD table address
+        fixup_map = {}
+        for placeholder_idx, table_index in vword_fixups:
+            if table_index in table_offsets:
+                table_addr = table_base_addr + table_offsets[table_index]
+                fixup_map[placeholder_idx] = table_addr
+
+        # Scan for 0xFB00 | index patterns (16-bit values)
+        i = 0
+        while i < len(result) - 1:
+            # Check for 0xFB high byte
+            if result[i] == 0xFB:
+                placeholder_idx = result[i + 1]
+                if placeholder_idx in fixup_map:
+                    table_addr = fixup_map[placeholder_idx]
+                    # Patch the 16-bit address
+                    result[i] = (table_addr >> 8) & 0xFF
+                    result[i + 1] = table_addr & 0xFF
+            i += 1
+
+        return bytes(result)
+
     def _resolve_table_vocab_placeholders(self, table_data: bytes,
                                            vocab_fixups: list,
                                            dict_addr: int) -> bytes:
@@ -483,6 +527,50 @@ class ZAssembler:
 
         return bytes(result)
 
+    def _resolve_table_vword_placeholders(self, table_data: bytes,
+                                          vword_fixups: list,
+                                          table_base_addr: int,
+                                          table_offsets: dict) -> bytes:
+        """
+        Resolve VWORD table placeholders in table data.
+
+        Similar to _resolve_table_vocab_placeholders, but resolves to VWORD
+        table addresses instead of dictionary addresses. Used in NEW-PARSER? mode.
+
+        Args:
+            table_data: Table data with vocab placeholders
+            vword_fixups: List of (placeholder_idx, table_index) tuples
+            table_base_addr: Base address of tables in story file
+            table_offsets: Dict of table_index -> offset from table_base_addr
+
+        Returns:
+            Patched table data
+        """
+        if not vword_fixups or not table_data:
+            return table_data
+
+        result = bytearray(table_data)
+
+        # Build a map from placeholder_idx to VWORD table address
+        fixup_map = {}
+        for placeholder_idx, table_index in vword_fixups:
+            if table_index in table_offsets:
+                table_addr = table_base_addr + table_offsets[table_index]
+                fixup_map[placeholder_idx] = table_addr
+
+        # Scan for 0xFB00 | index patterns (16-bit values)
+        i = 0
+        while i < len(result) - 1:
+            if result[i] == 0xFB:
+                placeholder_idx = result[i + 1]
+                if placeholder_idx in fixup_map:
+                    table_addr = fixup_map[placeholder_idx]
+                    result[i] = (table_addr >> 8) & 0xFF
+                    result[i + 1] = table_addr & 0xFF
+            i += 1
+
+        return bytes(result)
+
     def _resolve_vocab_placeholders_in_story(self, story: bytearray,
                                               vocab_fixups: list,
                                               dict_addr: int,
@@ -520,6 +608,48 @@ class ZAssembler:
                     word_addr = fixup_map[placeholder_idx]
                     story[i] = (word_addr >> 8) & 0xFF
                     story[i + 1] = word_addr & 0xFF
+            i += 1
+
+    def _resolve_vword_placeholders_in_story(self, story: bytearray,
+                                              vword_fixups: list,
+                                              table_base_addr: int,
+                                              table_offsets: dict,
+                                              start_offset: int,
+                                              length: int) -> None:
+        """
+        Resolve VWORD table placeholders in a section of the story file.
+
+        Similar to _resolve_vocab_placeholders_in_story, but resolves to
+        table addresses instead of dictionary addresses. Used in NEW-PARSER? mode.
+
+        Args:
+            story: Story bytearray to modify in place
+            vword_fixups: List of (placeholder_idx, table_index) tuples
+            table_base_addr: Base address where tables are placed in memory
+            table_offsets: Dict mapping table index to offset within table data
+            start_offset: Start offset in story to scan
+            length: Number of bytes to scan
+        """
+        if not vword_fixups:
+            return
+
+        # Build a map from placeholder_idx to VWORD table address
+        fixup_map = {}
+        for placeholder_idx, table_index in vword_fixups:
+            if table_index in table_offsets:
+                table_addr = table_base_addr + table_offsets[table_index]
+                fixup_map[placeholder_idx] = table_addr
+
+        # Scan for 0xFB00 | index patterns (16-bit values)
+        end_offset = min(start_offset + length, len(story) - 1)
+        i = start_offset
+        while i < end_offset:
+            if story[i] == 0xFB:
+                placeholder_idx = story[i + 1]
+                if placeholder_idx in fixup_map:
+                    table_addr = fixup_map[placeholder_idx]
+                    story[i] = (table_addr >> 8) & 0xFF
+                    story[i + 1] = table_addr & 0xFF
             i += 1
 
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
@@ -760,6 +890,7 @@ class ZAssembler:
                         tell_string_placeholders: dict = None,
                         tell_placeholder_positions: list = None,
                         vocab_fixups: list = None,
+                        vword_fixups: list = None,
                         tchars_table_idx: int = None) -> bytes:
         """
         Build complete story file.
@@ -784,6 +915,7 @@ class ZAssembler:
             tell_string_placeholders: Dict mapping placeholder index to string text for TELL resolution (0x8D format)
             tell_placeholder_positions: List of (byte_offset, placeholder_idx) for position-based TELL resolution
             vocab_fixups: List of (placeholder_idx, word_offset) for W?* vocabulary word resolution
+            vword_fixups: List of (placeholder_idx, table_index) for NEW-PARSER? VWORD table resolution
             tchars_table_idx: Table index for TCHARS constant (terminating characters, header 0x2E)
 
         Returns:
@@ -1018,6 +1150,16 @@ class ZAssembler:
             if pure_table_data and dict_addr_for_tables % 2 != 0:
                 dict_addr_for_tables += 1
 
+            # Resolve VWORD placeholders in table data first (NEW-PARSER? mode)
+            # This must happen before vocab_fixups so vword placeholders get VWORD addresses
+            if vword_fixups and table_offsets:
+                table_data = self._resolve_table_vword_placeholders(
+                    table_data, vword_fixups, table_base_addr, table_offsets
+                )
+                # Re-split after resolution
+                impure_table_data = table_data[:impure_tables_size]
+                pure_table_data = table_data[impure_tables_size:]
+
             # Resolve vocabulary word placeholders in table data (all tables)
             if vocab_fixups:
                 table_data = self._resolve_table_vocab_placeholders(
@@ -1104,6 +1246,13 @@ class ZAssembler:
         if vocab_fixups and globals_len > 0:
             self._resolve_vocab_placeholders_in_story(
                 story, vocab_fixups, dict_addr, globals_addr, globals_len
+            )
+
+        # Resolve VWORD table placeholders in NEW-PARSER? mode
+        # (same 0xFB00 format but resolves to table addresses instead of dictionary)
+        if vword_fixups and globals_len > 0 and table_offsets:
+            self._resolve_vword_placeholders_in_story(
+                story, vword_fixups, table_base_addr, table_offsets, globals_addr, globals_len
             )
 
         # Align to even boundary
@@ -1276,6 +1425,10 @@ class ZAssembler:
         # Resolve vocabulary word placeholders (W?* -> dictionary addresses)
         if vocab_fixups:
             routines = self._resolve_vocab_placeholders(routines, vocab_fixups, dict_addr)
+
+        # Resolve VWORD table placeholders (NEW-PARSER? mode: W?* -> table addresses)
+        if vword_fixups and table_offsets:
+            routines = self._resolve_vword_placeholders(routines, vword_fixups, table_base_addr, table_offsets)
 
         # Add routines
         story.extend(routines)

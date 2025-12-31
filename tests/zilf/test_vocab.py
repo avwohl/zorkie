@@ -313,7 +313,6 @@ class TestNewParser:
         ).in_v4() \
             .implies("<N=? <GET ,W?SING 3> 0>")
 
-    @pytest.mark.xfail(reason="NEW-PARSER? syntax format not implemented")
     def test_new_parser_p_should_affect_syntax_format(self):
         """Test NEW-PARSER? affects syntax format."""
         AssertGlobals(
@@ -352,7 +351,6 @@ class TestNewParser:
         ).in_v6() \
             .compiles()
 
-    @pytest.mark.xfail(reason="NEW-PARSER? synonym pointers not implemented")
     def test_new_parser_p_synonyms_should_use_pointers(self):
         """Test NEW-PARSER? synonyms use pointers."""
         AssertGlobals(
