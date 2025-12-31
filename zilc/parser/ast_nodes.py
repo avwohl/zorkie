@@ -510,6 +510,52 @@ class SpliceResultNode(ASTNode):
         return f"SpliceResult({self.items})"
 
 
+class AssociationIterator:
+    """Iterator for MDL ASSOCIATIONS.
+
+    In MDL, ASSOCIATIONS returns an iterator over all symbol bindings.
+    Each association has:
+    - item: the atom/symbol name
+    - indicator: type of binding (ZVAL for routines, GVAL for globals, etc.)
+    - value: the actual value
+
+    Used by PRE-COMPILE hooks to introspect the compilation environment.
+    """
+    def __init__(self, associations: List[tuple]):
+        """Initialize with list of (item, indicator, value) tuples."""
+        self.associations = associations
+        self.index = 0
+
+    def current(self):
+        """Get current association or None if exhausted."""
+        if self.index < len(self.associations):
+            return self.associations[self.index]
+        return None
+
+    def next(self):
+        """Advance to next association and return new iterator state."""
+        if self.index < len(self.associations):
+            self.index += 1
+        if self.index < len(self.associations):
+            return self  # Still valid
+        return None  # Exhausted
+
+    def to_list(self):
+        """Convert current association to [item, indicator, value] list."""
+        assoc = self.current()
+        if assoc:
+            item, indicator, value = assoc
+            return [item, indicator, value]
+        return []
+
+    def __bool__(self):
+        """False when exhausted."""
+        return self.index < len(self.associations)
+
+    def __repr__(self):
+        return f"AssociationIterator({self.index}/{len(self.associations)})"
+
+
 class DirectionsNode(ASTNode):
     """Directions declaration: <DIRECTIONS NORTH SOUTH EAST WEST>
 

@@ -243,6 +243,17 @@ class MDLEvaluator:
         elif op_name == 'MOD':
             return self._eval_mod(operands, env)
 
+        # Symbol table introspection
+        elif op_name == 'ASSOCIATIONS':
+            return self._eval_associations(operands, env)
+        elif op_name == 'NEXT':
+            return self._eval_next(operands, env)
+        elif op_name == 'SORT':
+            return self._eval_sort(operands, env)
+        elif op_name == 'VECTOR':
+            # VECTOR creates a vector from arguments (same as LIST for our purposes)
+            return [self.evaluate(op, env) for op in operands]
+
         # Unknown form - return as-is (will be processed at runtime)
         return form
 
@@ -339,6 +350,8 @@ class MDLEvaluator:
         <FUNCTION (params...) body...>
         or
         <FUNCTION ("AUX" var1 var2...) body...>
+        or
+        <FUNCTION ("AUX" (var1 init1) var2...) body...>
         """
         if not operands:
             return lambda e, *args: None
@@ -348,32 +361,56 @@ class MDLEvaluator:
         body = operands[1:]
 
         params = []
-        aux_vars = []
+        aux_vars = []  # List of (name, initializer_or_None) tuples
         in_aux = False
 
+        # Handle both FormNode and list representations of parameter list
+        param_items = []
         if isinstance(param_spec, FormNode):
-            # Parameter list as form (params...)
-            for p in [param_spec.operator] + param_spec.operands:
-                if isinstance(p, AtomNode):
-                    name = p.value.upper()
-                    if name == '"AUX"' or name == 'AUX':
-                        in_aux = True
-                    elif in_aux:
-                        aux_vars.append(name)
-                    else:
-                        params.append(name)
-                elif isinstance(p, StringNode):
-                    if p.value.upper() == 'AUX':
-                        in_aux = True
+            param_items = [param_spec.operator] + list(param_spec.operands)
+        elif isinstance(param_spec, list):
+            param_items = param_spec
+
+        for p in param_items:
+            if isinstance(p, AtomNode):
+                name = p.value.upper()
+                if name == '"AUX"' or name == 'AUX':
+                    in_aux = True
+                elif in_aux:
+                    aux_vars.append((name, None))
+                else:
+                    params.append(name)
+            elif isinstance(p, StringNode):
+                if p.value.upper() == 'AUX':
+                    in_aux = True
+            elif isinstance(p, FormNode) and in_aux:
+                # AUX variable with initializer: (VAR init-expr)
+                # The operator is the var name, operands[0] is the initializer
+                if isinstance(p.operator, AtomNode):
+                    var_name = p.operator.value.upper()
+                    initializer = p.operands[0] if p.operands else None
+                    aux_vars.append((var_name, initializer))
+            elif isinstance(p, list) and len(p) >= 1:
+                if isinstance(p[0], StringNode) and p[0].value.upper() == 'AUX':
+                    # ["AUX", ...] - skip AUX, process rest
+                    in_aux = True
+                elif in_aux and isinstance(p[0], AtomNode):
+                    # [VAR init-expr] - AUX variable with initializer
+                    var_name = p[0].value.upper()
+                    initializer = p[1] if len(p) > 1 else None
+                    aux_vars.append((var_name, initializer))
 
         evaluator = self
+        # Capture reference to the outer environment for closure behavior
+        # Note: We use the same dict object, not a copy, so changes are visible to caller
+        captured_env = env
 
         def mdl_function(call_env: Dict[str, Any], *args) -> Any:
             """Execute the MDL function.
 
-            Note: We use call_env directly (not a copy) so that modifications
-            to captured variables (like .A in TELL macro) persist across
-            iterations when used with MAPF.
+            Note: We use call_env directly which is passed by MAPF. The caller
+            (MAPF) uses the same environment that contains captured variables
+            like A from an enclosing PROG.
             """
             # Bind parameters directly in call_env
             for i, param in enumerate(params):
@@ -382,10 +419,12 @@ class MDLEvaluator:
                 else:
                     call_env[param] = None
 
-            # Initialize AUX variables (fresh each call)
-            for var in aux_vars:
-                if var not in call_env:
-                    call_env[var] = None
+            # Initialize AUX variables (evaluate initializers with call_env)
+            for var_name, initializer in aux_vars:
+                if initializer is not None:
+                    call_env[var_name] = evaluator.evaluate(initializer, call_env)
+                elif var_name not in call_env:
+                    call_env[var_name] = None
 
             # Execute body
             result = None
@@ -580,6 +619,10 @@ class MDLEvaluator:
                 if type_name == 'LVAL' and isinstance(val, LocalVarNode):
                     return True
                 if type_name == 'GVAL' and isinstance(val, GlobalVarNode):
+                    return True
+                if type_name == 'ROUTINE' and isinstance(val, RoutineNode):
+                    return True
+                if type_name == 'MACRO' and isinstance(val, MacroNode):
                     return True
 
         return False
@@ -863,6 +906,14 @@ class MDLEvaluator:
                     items = [item for item in value if isinstance(item, ASTNode)]
                     return SpliceResultNode(items, 0, 0)
 
+            elif type_name == 'LIST':
+                # Convert AssociationIterator to list [item, indicator, value]
+                if isinstance(value, AssociationIterator):
+                    return value.to_list()
+                # Already a list
+                if isinstance(value, list):
+                    return value
+
         return value  # Return unchanged if type not recognized
 
     def _eval_add(self, operands: List[ASTNode], env: Dict[str, Any]) -> int:
@@ -939,6 +990,85 @@ class MDLEvaluator:
             return first % second
         return 0
 
+    def _eval_associations(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate ASSOCIATIONS - return iterator over symbol table.
+
+        Returns an AssociationIterator containing all known symbols:
+        - Routines with indicator ZVAL
+        - Globals with indicator GVAL
+        - Macros with indicator DECL
+
+        Used by PRE-COMPILE hooks to introspect the compilation environment.
+        """
+        # Get the symbol table from the macro expander
+        associations = []
+
+        # Add routines (indicator = ZVAL, value = actual RoutineNode for TYPE? check)
+        if hasattr(self.macro_expander, 'program') and self.macro_expander.program:
+            program = self.macro_expander.program
+            for routine in program.routines:
+                # Create atom for routine name
+                name_atom = AtomNode(routine.name, 0, 0)
+                # Indicator is ZVAL for routine values
+                indicator = AtomNode('ZVAL', 0, 0)
+                # Value is the actual RoutineNode so TYPE? ROUTINE works
+                associations.append((name_atom, indicator, routine))
+
+            # Add macros (indicator = DECL)
+            for macro_name in self.macro_expander.macros:
+                name_atom = AtomNode(macro_name, 0, 0)
+                indicator = AtomNode('DECL', 0, 0)
+                value = AtomNode('MACRO', 0, 0)
+                associations.append((name_atom, indicator, value))
+
+        return AssociationIterator(associations)
+
+    def _eval_next(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate NEXT - advance association iterator.
+
+        <NEXT assoc> returns the next association or false if exhausted.
+        """
+        if not operands:
+            return None
+
+        val = self.evaluate(operands[0], env)
+        if isinstance(val, AssociationIterator):
+            return val.next()
+        return None
+
+    def _eval_sort(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate SORT - sort a list/vector.
+
+        <SORT comparator sequence> sorts sequence.
+        If comparator is <> (false), uses default alphabetic comparison.
+        """
+        if len(operands) < 2:
+            return []
+
+        comparator = self.evaluate(operands[0], env)
+        sequence = self.evaluate(operands[1], env)
+
+        if not isinstance(sequence, list):
+            return sequence
+
+        # Extract sortable values
+        def get_sort_key(item):
+            if isinstance(item, AtomNode):
+                return item.value.upper()
+            elif isinstance(item, str):
+                return item.upper()
+            elif isinstance(item, NumberNode):
+                return item.value
+            elif isinstance(item, int):
+                return item
+            return str(item)
+
+        # Sort using default alphabetic comparison (comparator <> means default)
+        try:
+            return sorted(sequence, key=get_sort_key)
+        except Exception:
+            return sequence
+
     def _eval_eval(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate EVAL (compile-time evaluation).
 
@@ -995,6 +1125,39 @@ class MDLEvaluator:
                         # Create ConstantNode and add to pending list
                         const_node = ConstantNode(name, value)
                         self.macro_expander.pending_constants.append(const_node)
+                        return None
+
+            elif op_name == 'ROUTINE':
+                # Create a routine dynamically
+                # <ROUTINE name (params) body...>
+                if len(arg.operands) >= 1:
+                    name_node = arg.operands[0]
+                    if isinstance(name_node, AtomNode):
+                        name = name_node.value.upper()
+                        # Parse params (second operand should be a FormNode with () operator)
+                        params = []
+                        body = []
+                        start_idx = 1
+
+                        if len(arg.operands) > 1:
+                            param_node = arg.operands[1]
+                            if isinstance(param_node, FormNode):
+                                if isinstance(param_node.operator, AtomNode) and param_node.operator.value == '()':
+                                    # Empty param list
+                                    start_idx = 2
+                                else:
+                                    # Non-empty param list - extract param names
+                                    start_idx = 2
+                            elif isinstance(param_node, list):
+                                # List of params
+                                start_idx = 2
+
+                        # Body is the remaining operands
+                        body = list(arg.operands[start_idx:])
+
+                        # Create RoutineNode and add to pending list
+                        routine_node = RoutineNode(name, params, [], body)
+                        self.macro_expander.pending_routines.append(routine_node)
                         return None
 
         # For other forms, just evaluate and return result
@@ -1096,16 +1259,53 @@ class MDLEvaluator:
         return True
 
     def _eval_bind(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
-        """Evaluate BIND/PROG - execute body in a new scope."""
+        """Evaluate BIND/PROG - execute body in a new scope.
+
+        <PROG ((VAR1 init1) (VAR2 init2) ...) body...>
+        <BIND ((VAR1 init1) ...) body...>
+        """
         if not operands:
             return None
 
         # First operand is the binding list (which can be empty)
         # Remaining operands are the body expressions
+        binding_list = operands[0] if operands else None
         body = operands[1:] if len(operands) > 1 else []
 
         # Create a new environment with any bindings
         new_env = env.copy()
+
+        # Parse and evaluate bindings
+        if binding_list:
+            bindings_to_process = []
+            if isinstance(binding_list, FormNode):
+                # Bindings are in the form: ((VAR1 init1) (VAR2 init2) ...)
+                bindings_to_process = [binding_list.operator] + list(binding_list.operands)
+            elif isinstance(binding_list, list):
+                bindings_to_process = binding_list
+
+            for binding in bindings_to_process:
+                if isinstance(binding, FormNode):
+                    # (VAR init-expr) - operator is var name, operand is initializer
+                    if isinstance(binding.operator, AtomNode):
+                        var_name = binding.operator.value.upper()
+                        if binding.operands:
+                            init_value = self.evaluate(binding.operands[0], new_env)
+                            new_env[var_name] = init_value
+                        else:
+                            new_env[var_name] = None
+                elif isinstance(binding, list) and len(binding) >= 1:
+                    # [VAR init-expr] list form
+                    if isinstance(binding[0], AtomNode):
+                        var_name = binding[0].value.upper()
+                        if len(binding) > 1:
+                            init_value = self.evaluate(binding[1], new_env)
+                            new_env[var_name] = init_value
+                        else:
+                            new_env[var_name] = None
+                elif isinstance(binding, AtomNode):
+                    # Just a variable name with no initializer
+                    new_env[binding.value.upper()] = None
 
         # Execute body expressions in order, return last value
         result = None
@@ -1166,11 +1366,15 @@ class MacroExpander:
         self.pending_globals: List[GlobalNode] = []
         # Constants created by EVAL during macro expansion
         self.pending_constants: List[ConstantNode] = []
+        # Routines created by EVAL during macro expansion (e.g., PRE-COMPILE hooks)
+        self.pending_routines: List[RoutineNode] = []
         # IN-ZILCH flag: True when expanding macros for Z-machine code generation,
         # False when expanding for compile-time execution
         self.in_zilch: bool = False
         # Compilation flags for IFFLAG evaluation
         self.compilation_flags: Dict[str, bool] = {}
+        # Reference to the program being expanded (for ASSOCIATIONS introspection)
+        self.program: Optional['Program'] = None
 
     def define_macro(self, macro: MacroNode):
         """Store a macro definition."""
@@ -1249,6 +1453,41 @@ class MacroExpander:
             return self._expand_recursive(expanded)
 
         return None
+
+    def _execute_pre_compile_hook(self, hook: MacroNode, program: Program) -> None:
+        """
+        Execute PRE-COMPILE hook function.
+
+        The PRE-COMPILE hook is called before macro expansion and can:
+        - Introspect the compilation environment via ASSOCIATIONS
+        - Create new routines, globals, or constants via EVAL
+        - Perform compile-time side effects
+
+        The hook takes no arguments (or has AUX parameters only).
+        """
+        # Build environment with no arguments (hook uses AUX for local vars)
+        env = {}
+
+        # Get AUX parameter defaults
+        for param in hook.params:
+            if len(param) >= 4:
+                param_name = param[0].upper()
+                is_aux = param[3]
+                if is_aux:
+                    # AUX parameter - check for default value
+                    # Default value would be in a different format, skip for now
+                    env[param_name] = None
+
+        # Evaluate the hook body
+        result = None
+        if isinstance(hook.body, list):
+            for stmt in hook.body:
+                result = self.mdl_evaluator.evaluate(stmt, env)
+        else:
+            result = self.mdl_evaluator.evaluate(hook.body, env)
+
+        # Note: side effects (routine creation via EVAL) are handled by
+        # pending_routines, pending_globals, pending_constants
 
     def _apply_routine_rewriter(self, program: Program, rewriter: MacroNode) -> Program:
         """
@@ -1924,9 +2163,27 @@ class MacroExpander:
         First, collect all macro definitions.
         Then, recursively expand all forms in routines, objects, etc.
         """
+        # Store program reference for ASSOCIATIONS introspection
+        self.program = program
+
         # Register all macros
         for macro in program.macros:
             self.define_macro(macro)
+
+        # Check for PRE-COMPILE hook
+        pre_compile_hook = None
+        for global_node in program.globals:
+            if global_node.name.upper() == 'PRE-COMPILE!-HOOKS!-ZILF':
+                # Value should be a GlobalVarNode pointing to the hook function
+                if isinstance(global_node.initial_value, GlobalVarNode):
+                    hook_name = global_node.initial_value.name.upper()
+                    if hook_name in self.macros:
+                        pre_compile_hook = self.macros[hook_name]
+                break
+
+        # Execute PRE-COMPILE hook if defined
+        if pre_compile_hook:
+            self._execute_pre_compile_hook(pre_compile_hook, program)
 
         # Check for ROUTINE-REWRITER hook
         routine_rewriter = None
@@ -2038,6 +2295,14 @@ class MacroExpander:
                 if const_node.name not in existing_names:
                     program.constants.append(const_node)
                     existing_names.add(const_node.name)
+
+        # Merge routines created by EVAL during macro expansion (e.g., from PRE-COMPILE hooks)
+        if self.pending_routines:
+            existing_names = {r.name for r in program.routines}
+            for routine_node in self.pending_routines:
+                if routine_node.name not in existing_names:
+                    program.routines.append(routine_node)
+                    existing_names.add(routine_node.name)
 
         return program
 

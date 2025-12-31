@@ -220,7 +220,6 @@ class TestPreCompileHook:
                      <FUNCTION (A) <FORM TELL <SPNAME .A> CR>>
                      <SORT <> .ROUTINES>>>>>"""
 
-    @pytest.mark.xfail(reason="PRE-COMPILE hook not implemented")
     def test_pre_compile_hook_can_add_to_compilation_environment(self):
         """Test PRE-COMPILE hook can add to compilation environment."""
         AssertRoutine("", "<LIST-ROUTINES>") \
