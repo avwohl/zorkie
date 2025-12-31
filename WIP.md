@@ -11,13 +11,22 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 654 passed, 0 failed, 19 xfailed
+- **Tests:** 656 passed, 0 failed, 17 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
 
 ## Recent Changes (2025-12-31)
+- **NEW-PARSER? VWORD table generation** - W?* vocabulary word resolution:
+  - Fixed gen_get to handle 16-bit W?* vocab placeholders (was truncating to 8 bits)
+  - Generate VWORD tables (7 words, 14 bytes) for verbs, NEW-ADD-WORD words, synonyms
+  - VWORD fields: lexical-word, classification, flags, semantic-stuff, verb-stuff, adj-id, dir-id
+  - Generate VERB-DATA tables (4 words) for verbs with syntax definitions
+  - Synonyms get VWORD tables with field 3 pointing to main word's VWORD
+  - Added _resolve_vword_placeholders for routine bytecode
+  - Added _resolve_table_vword_placeholders for table data
+  - 4 NEW-PARSER? tests now pass (was 2 xfailed)
 - **NEW-ADD-WORD and WORD-FLAG-TABLE** - NEW-PARSER? vocabulary support:
   - Added NewAddWordNode AST node for `<NEW-ADD-WORD name type value flags>`
   - Generates WORD-FLAG-TABLE containing word addresses and flags
@@ -36,12 +45,11 @@ Focus areas for next session:
 - **TABLE PATTERN** - Affects element sizes in table generation (1 test passes)
 - **PARSER-TABLE ordering** - Parser tables come before other pure tables (1 test passes)
 
-## Remaining xfailed tests (19)
+## Remaining xfailed tests (17)
 All remaining xfails require substantial work or depend on external factors:
 - **Interpreter issues (6)**: V7 bugs (2), dfrotz trailing spaces (2), Unicode/Glk (2)
 - **Meta-programming (5)**: PROPSPEC (2), IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE
 - **Custom encodings (4)**: CHRSET (2), LANGUAGE (2)
-- **NEW-PARSER? (2)**: Syntax format, synonym pointers
 - **Reader macros (1)**: MAKE-PREFIX-MACRO
 - **LANGUAGE lexing (1)**: German character handling
 
@@ -386,11 +394,11 @@ All remaining xfails require substantial work or depend on external factors:
 
 ### Remaining Work
 See "What's Left" section for categorized xfailed tests.
-All 654 passing tests cover basic ZILF functionality.
+All 656 passing tests cover basic ZILF functionality.
 
 ## What's Left
 
-### XFailed Tests (19 remaining)
+### XFailed Tests (17 remaining)
 
 All remaining xfails are for advanced ZILF features not yet implemented:
 
@@ -398,41 +406,30 @@ All remaining xfails are for advanced ZILF features not yet implemented:
 - `test_two_spaces_after_period_*` (2) - dfrotz strips trailing spaces
 - `test_unicode_characters_*` (2) - dfrotz/Glulx unicode handling
 
-**CHRSET/LANGUAGE Encoding (5 tests)** - Custom character set support:
+**CHRSET/LANGUAGE Encoding (4 tests)** - Custom character set support:
 - `test_chrset_should_affect_text_*` (2) - Custom CHRSET encoding
-- `test_language_should_affect_*` (3) - LANGUAGE directive for non-English
+- `test_language_should_affect_*` (2) - LANGUAGE directive for non-English
 
-**NEW-PARSER Features (3 tests)** - Extended vocabulary format:
-- `test_new_parser_p_should_affect_syntax_format` - VERB-DATA structure
-- `test_new_parser_p_synonyms_should_use_pointers` - Synonym pointer format
-- `test_language_should_affect_lexing` - LANGUAGE lexing (German ß → ss)
+**LANGUAGE Lexing (1 test)**:
+- `test_language_should_affect_lexing` - German character handling (ß → ss)
 
-**PROPDEF Advanced Features (6 tests)** - Complex property definitions:
-- `test_propdef_for_directions_can_be_used_for_implicit_directions`
-- `test_propdef_for_directions_should_not_create_directions_property`
-- `test_vocab_created_by_propdef_should_work_correctly`
+**PROPSPEC Features (2 tests)** - Property specification clearing:
 - `test_vocab_created_by_propspec_should_work_correctly`
 - `test_routines_created_by_propspec_should_work_correctly`
-- `test_room_in_propdef_one_byte_when_rooms_first`
-
-**Table Features (2 tests)**:
-- `test_table_pattern_affects_element_sizes` - TABLE PATTERN not implemented
-- `test_parser_tables_come_before_other_pure_tables` - PARSER-TABLE ordering
 
 **Meta/Hooks (3 tests)**:
 - `test_in_zilch_indicates_macro_expansion_context` - IN-ZILCH flag
 - `test_routine_rewriter_can_rewrite_routines` - ROUTINE-REWRITER
 - `test_pre_compile_hook_can_add_to_compilation_environment` - PRE-COMPILE
 
-**Error Handling (1 test)**:
-- `test_compilation_stops_after_100_errors` - Error limit (requires error accumulation refactor)
+**V7 Interpreter (2 tests)**:
+- V7 hello world tests - bocfel/dfrotz interpreter bugs
 
 **Reader Macros (1 test)**:
 - `test_make_prefix_macro_should_work` - MAKE-PREFIX-MACRO
 
 ### Priority Items for Future Work
-1. Error accumulation in compiler (for error limit test)
-2. TABLE PATTERN feature (custom element sizes)
-3. NEW-PARSER vocabulary format
-4. PROPDEF implicit directions support
-5. CHRSET/LANGUAGE encoding support
+1. PROPSPEC clearing support (override default PROPDEF patterns)
+2. CHRSET/LANGUAGE encoding support
+3. Meta/hooks (IN-ZILCH, ROUTINE-REWRITER, PRE-COMPILE)
+4. Object ordering for complex mixed object/room definitions
