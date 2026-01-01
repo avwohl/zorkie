@@ -42,6 +42,7 @@ class GlulxAssembler:
     OP_QUIT = 0x120
     OP_GESTALT = 0x100
     OP_GLK = 0x130
+    OP_SETIOSYS = 0x149  # Set I/O system mode
 
     # Glk function selectors (for use with OP_GLK)
     GLK_WINDOW_OPEN = 0x0023      # glk_window_open(split, method, size, wintype, rock) -> window
@@ -50,6 +51,11 @@ class GlulxAssembler:
 
     # Glk window types
     GLK_WINTYPE_TEXTBUFFER = 3
+
+    # I/O system modes for setiosys
+    IOSYS_NULL = 0   # No output
+    IOSYS_FILTER = 1  # Filter to string
+    IOSYS_GLK = 2    # Output via Glk
 
     # Operand modes (encoded in opcode bytes)
     MODE_CONST_ZERO = 0x0  # Constant 0
@@ -256,7 +262,8 @@ class GlulxAssembler:
     def emit_quit(self) -> bytes:
         """Emit quit instruction."""
         # quit opcode = 0x120 (2-byte encoding: 0x81 0x20)
-        return bytes([0x81, 0x20, 0x00])  # 0x00 = no operands
+        # No operands, so no mode byte needed
+        return bytes([0x81, 0x20])
 
     def emit_return(self, value: int = 0) -> bytes:
         """Emit return instruction."""
@@ -264,6 +271,37 @@ class GlulxAssembler:
         mode, value_bytes = self.encode_const(value)
         result = bytearray([0x31, mode])
         result.extend(value_bytes)
+        return bytes(result)
+
+    def emit_setiosys(self, mode: int, rock: int = 0) -> bytes:
+        """
+        Emit setiosys instruction to set the I/O system mode.
+
+        This MUST be called before streamchar/streamunichar will produce output.
+
+        Args:
+            mode: I/O mode (IOSYS_GLK = 2 for Glk output)
+            rock: Rock value (usually 0)
+
+        Returns:
+            Encoded setiosys instruction bytes
+        """
+        result = bytearray()
+
+        # setiosys opcode = 0x149 (2-byte encoding: 0x81 0x49)
+        result.append(0x81)
+        result.append(0x49)
+
+        # Mode byte: L1 mode (low nibble), L2 mode (high nibble)
+        mode_enc, mode_bytes = self.encode_const(mode)
+        rock_enc, rock_bytes = self.encode_const(rock)
+        mode_byte = (rock_enc << 4) | mode_enc
+        result.append(mode_byte)
+
+        # Operand values
+        result.extend(mode_bytes)
+        result.extend(rock_bytes)
+
         return bytes(result)
 
     def emit_glk(self, selector: int, num_args: int, store_mode: int = None) -> bytes:
@@ -349,21 +387,26 @@ class GlulxAssembler:
         Emit Glk initialization code to open a text buffer window.
 
         This sequence:
-        1. Pushes args for glk_window_open(0, 0, 0, wintype_TextBuffer, 0)
-        2. Calls glk_window_open, result on stack
-        3. Calls glk_set_window with the window reference
+        1. Set I/O system to Glk mode
+        2. Pushes args for glk_window_open(0, 0, 0, wintype_TextBuffer, 0)
+        3. Calls glk_window_open, result on stack
+        4. Calls glk_set_window with the window reference
 
         After this, streamchar/streamunichar will work.
         """
         result = bytearray()
 
+        # First, set the I/O system to Glk mode - this is REQUIRED
+        result.extend(self.emit_setiosys(self.IOSYS_GLK, 0))
+
         # Push args for glk_window_open(split=0, method=0, size=0, wintype=3, rock=0)
-        # Args are pushed in reverse order onto the stack
-        result.extend(self.emit_copy(0))  # rock
-        result.extend(self.emit_copy(self.GLK_WINTYPE_TEXTBUFFER))  # wintype=3
-        result.extend(self.emit_copy(0))  # size
-        result.extend(self.emit_copy(0))  # method
-        result.extend(self.emit_copy(0))  # split
+        # Glulx spec: "pushed on the stack, in forward order"
+        # First arg pushed first (ends up at bottom), last arg pushed last (on top)
+        result.extend(self.emit_copy(0))  # split (arg 1 - pushed first)
+        result.extend(self.emit_copy(0))  # method (arg 2)
+        result.extend(self.emit_copy(0))  # size (arg 3)
+        result.extend(self.emit_copy(self.GLK_WINTYPE_TEXTBUFFER))  # wintype=3 (arg 4)
+        result.extend(self.emit_copy(0))  # rock (arg 5 - pushed last, on top)
 
         # Call glk_window_open - result (window ref) goes on stack
         result.extend(self.emit_glk(self.GLK_WINDOW_OPEN, 5))
@@ -394,7 +437,9 @@ class GlulxAssembler:
         if num_locals > 0:
             result.append(4)  # type = 32-bit
             result.append(num_locals)  # count
-        result.append(0)  # end of locals
+        # End of locals format: (type=0, count=0) pair
+        result.append(0)  # type = 0 (end marker)
+        result.append(0)  # count = 0
 
         # Function body
         result.extend(code)
