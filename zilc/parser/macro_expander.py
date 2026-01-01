@@ -1505,22 +1505,35 @@ class MacroExpander:
         # The handler should return a list where:
         # - Element 0 is the default value (often <>)
         # - Element 1+ is the actual property value
-        if isinstance(expanded, list) and len(expanded) >= 2:
-            # Return the second element as the property value
-            result = expanded[1]
-            # Recursively expand macros in the result
+        #
+        # The expanded result is the handler body, which may be:
+        # - A list of statements (e.g., [ROUTINE-side-effect, return-value-list])
+        # - The last statement is the actual return value (a list like (<> PROP-ROUTINE))
+
+        # Find the last non-None element (the actual return value)
+        return_value = None
+        if isinstance(expanded, list):
+            for item in reversed(expanded):
+                if item is not None:
+                    return_value = item
+                    break
+        else:
+            return_value = expanded
+
+        # The return value should be a list: (<> PROP-ROUTINE)
+        # Extract element 1 (the actual property value)
+        if isinstance(return_value, list) and len(return_value) >= 2:
+            result = return_value[1]
             if isinstance(result, ASTNode):
                 result = self._expand_recursive(result)
             return result
-        elif isinstance(expanded, list) and len(expanded) == 1:
-            # Single element - use it as the value
-            result = expanded[0]
+        elif isinstance(return_value, list) and len(return_value) == 1:
+            result = return_value[0]
             if isinstance(result, ASTNode):
                 result = self._expand_recursive(result)
             return result
-        elif isinstance(expanded, ASTNode):
-            # Direct AST result
-            return self._expand_recursive(expanded)
+        elif isinstance(return_value, ASTNode):
+            return self._expand_recursive(return_value)
 
         return None
 
@@ -1878,6 +1891,12 @@ class MacroExpander:
         if isinstance(node, list):
             return [self._evaluate_mdl(item, bindings) for item in node]
 
+        # Handle RoutineNode directly (created by parser when ROUTINE appears in DEFINE body)
+        if isinstance(node, RoutineNode):
+            # Add to pending routines and return None (side effect only)
+            self.pending_routines.append(node)
+            return None
+
         if not isinstance(node, FormNode):
             return node
 
@@ -1941,6 +1960,39 @@ class MacroExpander:
                 # Evaluate with MDL evaluator
                 result = self.mdl_evaluator.evaluate(node, bindings)
                 return self._convert_to_ast(result)
+
+        # Check for ROUTINE that creates a routine dynamically
+        if op_name == 'ROUTINE':
+            # <ROUTINE name (params) body...>
+            if len(node.operands) >= 1:
+                name_node = node.operands[0]
+                if isinstance(name_node, AtomNode):
+                    name = name_node.value.upper()
+                    # Parse params (second operand should be a FormNode with () operator)
+                    params = []
+                    body = []
+                    start_idx = 1
+
+                    if len(node.operands) > 1:
+                        param_node = node.operands[1]
+                        if isinstance(param_node, FormNode):
+                            if isinstance(param_node.operator, AtomNode) and param_node.operator.value == '()':
+                                # Empty param list
+                                start_idx = 2
+                            else:
+                                # Non-empty param list - extract param names
+                                start_idx = 2
+                        elif isinstance(param_node, list):
+                            # List of params
+                            start_idx = 2
+
+                    # Body is the remaining operands
+                    body = list(node.operands[start_idx:])
+
+                    # Create RoutineNode and add to pending list
+                    routine_node = RoutineNode(name, params, [], body)
+                    self.pending_routines.append(routine_node)
+                    return None
 
         # Recursively process operands
         new_operands = []

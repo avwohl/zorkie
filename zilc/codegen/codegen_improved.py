@@ -17929,6 +17929,15 @@ class ImprovedCodeGenerator:
         code = bytearray()
         args = operands[1:]
 
+        # First, evaluate any FormNode operands that need to push results to stack
+        # This handles cases like <CALL <GETP obj prop>> where GETP must execute first
+        all_ops = [operands[0]] + list(args)
+        for op in all_ops:
+            if isinstance(op, (FormNode, CondNode, RepeatNode)):
+                # Generate code for the nested form - result goes on stack
+                nested_code = self.generate_form(op) if isinstance(op, FormNode) else self._generate_node(op)
+                code.extend(nested_code)
+
         # Get routine type and value
         routine_type, routine_val = self._get_operand_type_and_value(operands[0])
 

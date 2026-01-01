@@ -443,7 +443,6 @@ class TestPropdef:
             "<=? <GET <GETP ,BAR ,P?FOO> 0> ,W?FOO>"
         )
 
-    @pytest.mark.xfail(reason="Routine creation via PROPSPEC not implemented")
     def test_routines_created_by_propspec_should_work_correctly(self):
         """Test that routines created by PROPSPEC work correctly."""
         AssertGlobals(
