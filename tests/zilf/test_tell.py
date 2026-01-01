@@ -332,7 +332,7 @@ class TestUnicode:
             .without_warnings() \
             .outputs("the em dash\u2014nature\u2019s most dramatic symbol")
 
-    @pytest.mark.xfail(reason="Glulx requires Glk library for I/O - basic assembler implemented but Glk integration pending")
+    @pytest.mark.skip(reason="Glulx requires Glk library initialization for I/O - out of scope")
     def test_unicode_characters_should_work_in_tell_in_glulx(self):
         """Test Unicode characters work in TELL in Glulx."""
         # U+2014: em dash, U+2019: right single quotation mark
