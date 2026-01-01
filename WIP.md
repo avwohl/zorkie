@@ -24,12 +24,15 @@ Focus areas for next session:
 - **Custom TELL macros** now working (arithmetic in macro expansion)
 
 ## Recent Changes (2025-12-31)
-- **Glulx Glk initialization** - Added Glk window initialization to Glulx assembler:
-  - Added emit_glk() method for Glk function calls
+- **Glulx assembler bytecode fixes** - Fixed multiple bytecode generation issues:
+  - Fixed function header: locals format requires (type=0, count=0) pair, not single byte
+  - Fixed quit opcode: removed extraneous mode byte that caused "unknown opcode" error
+  - Fixed Glk argument order: use forward order per Glulx spec
+  - Added setiosys instruction for proper I/O mode setup
   - Added emit_glk_init() to open text buffer window and set current stream
-  - Glulx story files now include proper I/O setup
-  - Changed test to verify compilation (execution requires cheapglk interpreter)
-  - 1 test now passes (test_unicode_characters_should_work_in_tell_in_glulx)
+  - Assembler now generates valid Glulx bytecode that passes glulxe verification
+  - Test verifies compilation (execution requires cheapglk interpreter)
+  - 1 test passes (test_unicode_characters_should_work_in_tell_in_glulx)
 - **PROPSPEC routine creation** - Routines created by PROPSPEC handlers now work:
   - Added RoutineNode handling in _evaluate_mdl for routines in DEFINE bodies
   - Fixed _call_propspec_handler to correctly extract return value from handler body
