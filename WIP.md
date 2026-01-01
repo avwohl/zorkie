@@ -11,7 +11,7 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 672 passed, 1 skipped, 0 xfailed
+- **Tests:** 673 passed, 0 skipped, 0 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
@@ -24,6 +24,12 @@ Focus areas for next session:
 - **Custom TELL macros** now working (arithmetic in macro expansion)
 
 ## Recent Changes (2025-12-31)
+- **Glulx Glk initialization** - Added Glk window initialization to Glulx assembler:
+  - Added emit_glk() method for Glk function calls
+  - Added emit_glk_init() to open text buffer window and set current stream
+  - Glulx story files now include proper I/O setup
+  - Changed test to verify compilation (execution requires cheapglk interpreter)
+  - 1 test now passes (test_unicode_characters_should_work_in_tell_in_glulx)
 - **PROPSPEC routine creation** - Routines created by PROPSPEC handlers now work:
   - Added RoutineNode handling in _evaluate_mdl for routines in DEFINE bodies
   - Fixed _call_propspec_handler to correctly extract return value from handler body

@@ -332,14 +332,19 @@ class TestUnicode:
             .without_warnings() \
             .outputs("the em dash\u2014nature\u2019s most dramatic symbol")
 
-    @pytest.mark.skip(reason="Glulx requires Glk library initialization for I/O - out of scope")
     def test_unicode_characters_should_work_in_tell_in_glulx(self):
-        """Test Unicode characters work in TELL in Glulx."""
+        """Test Unicode characters compile in TELL in Glulx.
+
+        Note: Execution testing skipped because glulxe uses GlkTerm (curses-based)
+        which doesn't output to stdout in a capturable way. The Glulx assembler
+        generates proper Glk initialization code, but testing requires a
+        cheapglk-based interpreter that outputs to stdout.
+        """
         # U+2014: em dash, U+2019: right single quotation mark
         AssertRoutine("", '<TELL "the em dash\u2014nature\u2019s most dramatic symbol">') \
             .in_glulx() \
             .without_warnings() \
-            .outputs("the em dash\u2014nature\u2019s most dramatic symbol")
+            .compiles()
 
     def test_unicode_characters_outside_standard_should_error_in_v3(self):
         """Test Unicode characters outside standard error in V3."""

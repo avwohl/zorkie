@@ -33,6 +33,7 @@ class GlulxAssembler:
     OP_SUB = 0x11
     OP_MUL = 0x12
     OP_DIV = 0x13
+    OP_COPY = 0x40
     OP_RETURN = 0x31
     OP_STREAMCHAR = 0x70
     OP_STREAMNUM = 0x71
@@ -40,7 +41,15 @@ class GlulxAssembler:
     OP_STREAMUNICHAR = 0x73
     OP_QUIT = 0x120
     OP_GESTALT = 0x100
-    OP_GLKOP = 0x130
+    OP_GLK = 0x130
+
+    # Glk function selectors (for use with OP_GLK)
+    GLK_WINDOW_OPEN = 0x0023      # glk_window_open(split, method, size, wintype, rock) -> window
+    GLK_SET_WINDOW = 0x002F       # glk_set_window(window) - sets current stream
+    GLK_EXIT = 0x0001             # glk_exit()
+
+    # Glk window types
+    GLK_WINTYPE_TEXTBUFFER = 3
 
     # Operand modes (encoded in opcode bytes)
     MODE_CONST_ZERO = 0x0  # Constant 0
@@ -257,6 +266,113 @@ class GlulxAssembler:
         result.extend(value_bytes)
         return bytes(result)
 
+    def emit_glk(self, selector: int, num_args: int, store_mode: int = None) -> bytes:
+        """
+        Emit a Glk function call.
+
+        The GLK opcode (0x130) takes:
+        - L1: Glk function selector
+        - L2: Number of arguments (args are on stack)
+        - S1: Store destination for result (0 to discard)
+
+        Args:
+            selector: Glk function selector (e.g., GLK_WINDOW_OPEN)
+            num_args: Number of arguments on the stack
+            store_mode: Where to store result (None = stack, 0 = discard)
+
+        Returns:
+            Encoded GLK instruction bytes
+        """
+        result = bytearray()
+
+        # GLK opcode 0x130 = 2-byte encoding: 0x81 0x30
+        result.append(0x81)
+        result.append(0x30)
+
+        # Mode byte: L1 mode, L2 mode, S1 mode packed
+        # We use 2-byte constants for selector/args for simplicity
+        selector_mode, selector_bytes = self.encode_const(selector)
+        args_mode, args_bytes = self.encode_const(num_args)
+
+        if store_mode is None:
+            # Store to stack
+            s1_mode = self.MODE_STACK
+        else:
+            s1_mode = self.MODE_CONST_ZERO  # Discard result
+
+        # Pack modes: L1 in low nibble, L2 in high nibble of byte 1
+        # S1 in low nibble of byte 2
+        mode_byte1 = (args_mode << 4) | selector_mode
+        mode_byte2 = s1_mode
+        result.append(mode_byte1)
+        result.append(mode_byte2)
+
+        # Add operand values
+        result.extend(selector_bytes)
+        result.extend(args_bytes)
+
+        return bytes(result)
+
+    def emit_copy(self, value: int, dest_mode: int = None) -> bytes:
+        """
+        Emit a copy instruction to push a value onto the stack.
+
+        Args:
+            value: Value to copy
+            dest_mode: Destination mode (default: stack)
+
+        Returns:
+            Encoded COPY instruction bytes
+        """
+        result = bytearray()
+
+        # COPY opcode = 0x40 (1 byte)
+        result.append(0x40)
+
+        # Get source operand encoding
+        src_mode, src_bytes = self.encode_const(value)
+
+        # Destination is stack
+        dst_mode = self.MODE_STACK if dest_mode is None else dest_mode
+
+        # Mode byte: src in low nibble, dst in high nibble
+        mode_byte = (dst_mode << 4) | src_mode
+        result.append(mode_byte)
+
+        # Add source value bytes
+        result.extend(src_bytes)
+
+        return bytes(result)
+
+    def emit_glk_init(self) -> bytes:
+        """
+        Emit Glk initialization code to open a text buffer window.
+
+        This sequence:
+        1. Pushes args for glk_window_open(0, 0, 0, wintype_TextBuffer, 0)
+        2. Calls glk_window_open, result on stack
+        3. Calls glk_set_window with the window reference
+
+        After this, streamchar/streamunichar will work.
+        """
+        result = bytearray()
+
+        # Push args for glk_window_open(split=0, method=0, size=0, wintype=3, rock=0)
+        # Args are pushed in reverse order onto the stack
+        result.extend(self.emit_copy(0))  # rock
+        result.extend(self.emit_copy(self.GLK_WINTYPE_TEXTBUFFER))  # wintype=3
+        result.extend(self.emit_copy(0))  # size
+        result.extend(self.emit_copy(0))  # method
+        result.extend(self.emit_copy(0))  # split
+
+        # Call glk_window_open - result (window ref) goes on stack
+        result.extend(self.emit_glk(self.GLK_WINDOW_OPEN, 5))
+
+        # Now call glk_set_window with the window ref on stack
+        result.extend(self.emit_glk(self.GLK_SET_WINDOW, 1, store_mode=0))
+
+        return bytes(result)
+
     def create_function(self, code: bytes, num_locals: int = 0) -> bytes:
         """
         Create a Glulx function.
@@ -321,15 +437,19 @@ class GlulxAssembler:
             Complete Glulx story file bytes
         """
         # Build the main function code
+        func_code = bytearray()
+
+        # Always start with Glk initialization to set up I/O
+        func_code.extend(self.emit_glk_init())
+
         if main_string:
-            func_code = bytearray()
             func_code.extend(self.emit_string_print(main_string))
             func_code.extend(self.emit_quit())
         elif routines_code:
-            func_code = routines_code
+            func_code.extend(routines_code)
         else:
             # Default: just quit
-            func_code = bytearray(self.emit_quit())
+            func_code.extend(self.emit_quit())
 
         # Create the main function
         main_func = self.create_function(bytes(func_code))
