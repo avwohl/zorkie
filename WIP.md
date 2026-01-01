@@ -11,11 +11,12 @@ Focus areas for next session:
 3. **PROPSPEC clearing** - Override default PROPDEF patterns
 
 ## Current Status (2025-12-31)
-- **Tests:** 671 passed, 0 failed, 2 xfailed
+- **Tests:** 672 passed, 0 failed, 1 xfailed
 - **Interpreter tests:** 143 passed (100%)
 - **Hello world works** in V1, V2, V3, V4, V5, V6, V8 (V7 xfail due to interpreter bugs)
 - **Full V1-V8 support** with bocfel interpreter for V5+ (stricter Z-machine compliance)
 - All tests passing (excluding xfails for unimplemented ZILF features)
+- **PROPSPEC routine creation** now working (dynamic routines in property handlers)
 - **MAKE-PREFIX-MACRO** now fully working (reader prefix macros like @WORD)
 - **PRE-COMPILE hook** now fully working (symbol introspection and dynamic routine creation)
 - **ROUTINE-REWRITER hook** now fully working
@@ -23,6 +24,12 @@ Focus areas for next session:
 - **Custom TELL macros** now working (arithmetic in macro expansion)
 
 ## Recent Changes (2025-12-31)
+- **PROPSPEC routine creation** - Routines created by PROPSPEC handlers now work:
+  - Added RoutineNode handling in _evaluate_mdl for routines in DEFINE bodies
+  - Fixed _call_propspec_handler to correctly extract return value from handler body
+  - Fixed gen_call to evaluate FormNode operands before the CALL instruction
+  - Handles cases like <APPLY <GETP obj prop>> where GETP must execute first
+  - 1 test now passes (test_routines_created_by_propspec_should_work_correctly)
 - **MAKE-PREFIX-MACRO reader macros** - Reader-level token transformation:
   - Updated lexer to handle @ as a prefix character token
   - Added MAKE-PREFIX-MACRO handling in MDL evaluator
