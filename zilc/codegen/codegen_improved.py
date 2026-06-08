@@ -18028,9 +18028,9 @@ class ImprovedCodeGenerator:
             operands[1-8]: Up to 8 arguments
 
         Returns:
-            bytes: Z-machine code (CALL_VS2 EXT opcode)
+            bytes: Z-machine code (CALL_VS2 VAR opcode)
         """
-        if not operands or self.version < 5:
+        if not operands or self.version < 4:
             return b''
 
         code = bytearray()
@@ -18041,9 +18041,8 @@ class ImprovedCodeGenerator:
             t, v = self._get_operand_type_and_value(op)
             all_operands.append((t, v))
 
-        # CALL_VS2 is EXT opcode 0x0C
-        code.append(0xBE)  # EXT opcode marker
-        code.append(0x0C)  # CALL_VS2
+        # CALL_VS2 is VAR:236 -> 0xE0 | 0x0C = 0xEC (VARIABLE form)
+        code.append(0xEC)  # CALL_VS2
 
         # Build type bytes based on actual operand types
         def get_type_code(op_type, op_val):
@@ -18064,16 +18063,15 @@ class ImprovedCodeGenerator:
                 type_byte_1 |= (0x03 << (6 - i*2))  # Omitted
         code.append(type_byte_1)
 
-        # Second type byte (operands 4-7) - only if needed
-        if len(all_operands) > 4:
-            type_byte_2 = 0x00
-            for i in range(4):
-                if i + 4 < len(all_operands):
-                    t = get_type_code(all_operands[i+4][0], all_operands[i+4][1])
-                    type_byte_2 |= (t << (6 - i*2))
-                else:
-                    type_byte_2 |= (0x03 << (6 - i*2))  # Omitted
-            code.append(type_byte_2)
+        # Second type byte (operands 4-7) - ALWAYS emitted for call_vs2 (two type bytes)
+        type_byte_2 = 0x00
+        for i in range(4):
+            if i + 4 < len(all_operands):
+                t = get_type_code(all_operands[i+4][0], all_operands[i+4][1])
+                type_byte_2 |= (t << (6 - i*2))
+            else:
+                type_byte_2 |= (0x03 << (6 - i*2))  # Omitted
+        code.append(type_byte_2)
 
         # Output operand values
         for op_type, op_val in all_operands:
@@ -18098,9 +18096,9 @@ class ImprovedCodeGenerator:
             operands[1-8]: Up to 8 arguments
 
         Returns:
-            bytes: Z-machine code (CALL_VN2 EXT opcode)
+            bytes: Z-machine code (CALL_VN2 VAR opcode)
         """
-        if not operands or self.version < 5:
+        if not operands or self.version < 4:
             return b''
 
         code = bytearray()
@@ -18111,9 +18109,8 @@ class ImprovedCodeGenerator:
             t, v = self._get_operand_type_and_value(op)
             all_operands.append((t, v))
 
-        # CALL_VN2 is EXT opcode 0x0D
-        code.append(0xBE)  # EXT opcode marker
-        code.append(0x0D)  # CALL_VN2
+        # CALL_VN2 is VAR:250 -> 0xE0 | 0x1A = 0xFA (VARIABLE form)
+        code.append(0xFA)  # CALL_VN2
 
         # Build type bytes based on actual operand types
         def get_type_code(op_type, op_val):
@@ -18134,16 +18131,15 @@ class ImprovedCodeGenerator:
                 type_byte_1 |= (0x03 << (6 - i*2))  # Omitted
         code.append(type_byte_1)
 
-        # Second type byte (operands 4-7) - only if needed
-        if len(all_operands) > 4:
-            type_byte_2 = 0x00
-            for i in range(4):
-                if i + 4 < len(all_operands):
-                    t = get_type_code(all_operands[i+4][0], all_operands[i+4][1])
-                    type_byte_2 |= (t << (6 - i*2))
-                else:
-                    type_byte_2 |= (0x03 << (6 - i*2))  # Omitted
-            code.append(type_byte_2)
+        # Second type byte (operands 4-7) - ALWAYS emitted for call_vn2 (two type bytes)
+        type_byte_2 = 0x00
+        for i in range(4):
+            if i + 4 < len(all_operands):
+                t = get_type_code(all_operands[i+4][0], all_operands[i+4][1])
+                type_byte_2 |= (t << (6 - i*2))
+            else:
+                type_byte_2 |= (0x03 << (6 - i*2))  # Omitted
+        code.append(type_byte_2)
 
         # Output operand values
         for op_type, op_val in all_operands:

@@ -154,11 +154,18 @@ class ObjectTable:
             prop_table.append(0)
 
         # Build property list from obj['properties']
-        # Properties must be in descending numerical order
+        # Properties must be in descending numerical order.
+        # Property #1 (DESC) is the object short name and lives ONLY in the
+        # property-table header above; it must NOT also be emitted as a numbered
+        # property block (that would duplicate the short name and make
+        # get_prop(obj, 1) return name bytes instead of the property default).
         properties = obj.get('properties', {})
 
-        # Sort properties by number (descending)
-        sorted_props = sorted(properties.items(), key=lambda x: x[0], reverse=True)
+        # Sort properties by number (descending), excluding #1 (DESC / short name)
+        sorted_props = sorted(
+            (item for item in properties.items() if item[0] != 1),
+            key=lambda x: x[0], reverse=True,
+        )
 
         for prop_num, prop_value in sorted_props:
             # Convert property value to bytes

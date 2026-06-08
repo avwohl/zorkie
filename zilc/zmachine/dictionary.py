@@ -250,7 +250,12 @@ class Dictionary:
         # Detect collisions and merge types
         merged_types: Dict[tuple, Set[str]] = {}
         unique_words = []  # First word of each encoded group
-        for encoded, words in sorted(encoded_groups.items(), key=lambda x: x[1][0]):
+        # Sort by the ENCODED z-char bytes (the tuple key), not the source string.
+        # A positive entry count tells the interpreter to binary-search, which
+        # requires entries ascending by encoded-text prefix (big-endian). The
+        # encoded tuple is a sequence of 16-bit words in order, so tuple
+        # comparison is equivalent to big-endian byte comparison.
+        for encoded, words in sorted(encoded_groups.items(), key=lambda x: x[0]):
             first_word = words[0]
             unique_words.append(first_word)
 
@@ -388,14 +393,14 @@ class Dictionary:
         data_bytes = 3
         entry_length = text_bytes + data_bytes
 
-        # Get sorted unique words (same as in build())
-        seen_encoded = {}
-        unique_words = []
+        # Get unique words in EMITTED order (same as in build()): grouped by
+        # encoded form, then ordered by the encoded z-char bytes (the tuple key).
+        groups = {}
         for w in sorted(self.words):
             encoded = tuple(self.encoder.encode_dictionary_word(w))
-            if encoded not in seen_encoded:
-                seen_encoded[encoded] = w
-                unique_words.append(w)
+            if encoded not in groups:
+                groups[encoded] = w  # first source word of the group
+        unique_words = [w for _enc, w in sorted(groups.items(), key=lambda kv: kv[0])]
 
         # Find word index
         try:
@@ -429,15 +434,19 @@ class Dictionary:
         data_bytes = 3
         entry_length = text_bytes + data_bytes
 
-        # Get sorted unique words (same as in build())
-        # Track which words encode to the same entry
-        seen_encoded = {}  # encoded tuple -> (first_word, offset_idx)
-        unique_words = []
+        # Get unique words in EMITTED order (same as in build()): group words
+        # by encoded form, then order the groups by their encoded z-char bytes
+        # (the tuple key) so the offsets match the binary-search layout.
+        groups = {}  # encoded tuple -> first source word of the group
         for w in sorted(self.words):
             encoded = tuple(self.encoder.encode_dictionary_word(w))
-            if encoded not in seen_encoded:
-                seen_encoded[encoded] = (w, len(unique_words))
-                unique_words.append(w)
+            if encoded not in groups:
+                groups[encoded] = w
+        unique_words = []
+        seen_encoded = {}  # encoded tuple -> (first_word, offset_idx)
+        for encoded, w in sorted(groups.items(), key=lambda kv: kv[0]):
+            seen_encoded[encoded] = (w, len(unique_words))
+            unique_words.append(w)
 
         # First assign offsets to unique words
         for idx, word in enumerate(unique_words):
