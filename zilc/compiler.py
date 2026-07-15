@@ -1144,15 +1144,17 @@ class ZILCompiler:
                 if pos < len(source):
                     pos += 1  # skip closing "
             elif ch == '!':
-                # Character literal: !\X or !<char> - skip the next character(s)
-                # This handles !\> (literal >) which shouldn't close brackets
+                # Only !\X is a character literal (e.g. !\> is a literal >, not a
+                # bracket). Other uses of ! are segment/splice operators -- !<form>,
+                # !.var, !,var -- whose following token is ordinary and MUST be
+                # counted normally. Skipping the char after every ! swallowed the <
+                # of !<...>, so the inner form's > over-decremented depth and this
+                # matcher returned a span one > short, leaving a stray >.
                 pos += 1
                 if pos < len(source) and source[pos] == '\\':
                     pos += 1  # skip \
                     if pos < len(source):
                         pos += 1  # skip the escaped char
-                elif pos < len(source):
-                    pos += 1  # skip any char after !
             elif ch == '<':
                 depth += 1
                 pos += 1

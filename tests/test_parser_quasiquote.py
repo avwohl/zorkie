@@ -53,3 +53,34 @@ def test_quasiquoted_routine_and_object_also_templated():
         e = _expr(src)
         assert isinstance(e, QuasiquoteNode)
         assert isinstance(e.expr, FormNode)
+
+
+# A compile-time-eval block %<...> is skipped/replaced by two bracket-matchers
+# (the lexer, and preprocess_zilf_directives). Both treated every ! as a char
+# literal and skipped the following char, so !<form> (a splice) had its < eaten
+# while its > still decremented depth -- the match ended one > short and leaked a
+# stray >. Only !\X is a character literal; !<form>/!.var/!,var are splices whose
+# following token must be counted. These reproduce the cloak.zil MAP-SCOPE case.
+
+def test_percent_eval_with_splice_in_cond_clause_parses():
+    """Lexer path: %<FORM x !<BAR>> inside a COND clause must not desync."""
+    src = "<ROUTINE R (B) <COND (.B %<FORM x !<BAR>> <RETURN>)>>"
+    Parser(Lexer(src).tokenize()).parse()  # no "Unexpected closing parenthesis"
+
+
+def test_zilf_directive_preprocess_of_splice_stays_balanced():
+    """preprocess_zilf_directives path: replacing a %<...> that contains a
+    !<...> splice must leave the surrounding source parseable (no stray >)."""
+    from zilc.compiler import ZILCompiler
+    src = ("<ROUTINE R (B) <COND (.B "
+           "%<FORM PROG '() !<MAPF ,LIST <FUNCTION (I) 1> ,S>> "
+           "<RETURN>)>>")
+    out = ZILCompiler().preprocess_zilf_directives(src)
+    Parser(Lexer(out).tokenize()).parse()  # no desync after preprocessing
+
+
+def test_char_literal_gt_still_skipped_in_percent_eval():
+    """Regression: !\\> is a literal >, not a bracket, so a %<...> containing it
+    must still be skipped as one balanced unit."""
+    src = r'<ROUTINE R () <CONSTANT C %<STRING !\> !\<>> <RTRUE>>'
+    Parser(Lexer(src).tokenize()).parse()

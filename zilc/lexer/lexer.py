@@ -779,13 +779,16 @@ class Lexer:
                     elif c == '>':
                         depth -= 1
                     elif c == '!':
-                        # Character literal: !\X or !<char> - skip the next character
-                        # This handles !\> (literal >) which shouldn't close brackets
+                        # Only !\X is a character literal (e.g. !\> is a literal >,
+                        # which must NOT count as a bracket). Other uses of ! are
+                        # segment/splice operators -- !<form>, !.var, !,var -- whose
+                        # following token is ordinary and MUST be counted normally.
+                        # Skipping the char after every ! swallowed the < of !<...>,
+                        # so the inner form's > over-decremented depth and this %<...>
+                        # skip terminated one > early, leaking a stray >.
                         if self.peek() == '\\' and self.pos + 1 < len(self.source):
                             self.advance()  # skip \
                             self.advance()  # skip the escaped char
-                        elif self.peek():
-                            self.advance()  # skip any char after !
                     elif c == '"':
                         # Skip string contents
                         while self.pos < len(self.source):
