@@ -14367,12 +14367,24 @@ class ImprovedCodeGenerator:
                 t, v = self._get_operand_type_and_value(op)
                 types_and_vals.append((t, v))
 
-            # Map types: 0=small const->01, 1=var->10
+            # Map types: constant -> large(00, 2 bytes) if >255/<0 else small(01,
+            # 1 byte); variable -> 10 (1 byte). Previously every constant was typed
+            # small and emitted as one byte, so a large constant (e.g. a dictionary
+            # word W?FOO = 902) was truncated to its low byte and never matched.
             type_byte = 0
+            enc_ops = []  # (num_bytes, value) in operand order
             for j, (t, v) in enumerate(types_and_vals):
                 if j >= 4:
                     break
-                type_code = 0x01 if t == 0 else 0x02
+                if t == 0 and (v < 0 or v > 255):
+                    type_code = 0x00      # large constant, 2 bytes
+                    enc_ops.append((2, v & 0xFFFF))
+                elif t == 0:
+                    type_code = 0x01      # small constant, 1 byte
+                    enc_ops.append((1, v & 0xFF))
+                else:
+                    type_code = 0x02      # variable, 1 byte
+                    enc_ops.append((1, v & 0xFF))
                 type_byte |= (type_code << (6 - j * 2))
             # Fill remaining with 0x03 (omitted)
             for j in range(len(types_and_vals), 4):
@@ -14380,8 +14392,10 @@ class ImprovedCodeGenerator:
 
             je_code.append(type_byte)
 
-            # Add operand values
-            for t, v in types_and_vals:
+            # Add operand values (large constants are big-endian 2-byte)
+            for nbytes, v in enc_ops:
+                if nbytes == 2:
+                    je_code.append((v >> 8) & 0xFF)
                 je_code.append(v & 0xFF)
 
             # Placeholder for branch byte - will be filled in later
@@ -16112,17 +16126,32 @@ class ImprovedCodeGenerator:
                                 t, v = self._get_operand_type_and_value(op)
                                 types_and_vals.append((t, v))
 
+                            # Constant -> large(00, 2 bytes) if >255/<0 else
+                            # small(01, 1 byte); variable -> 10 (1 byte). Emitting
+                            # every constant as one byte truncated large constants
+                            # (e.g. dictionary words W?FOO) so they never matched.
                             type_byte = 0
+                            enc_ops = []  # (num_bytes, value) in operand order
                             for i, (t, v) in enumerate(types_and_vals):
                                 if i >= 4:
                                     break
-                                type_code = 0x01 if t == 0 else 0x02
+                                if t == 0 and (v < 0 or v > 255):
+                                    type_code = 0x00
+                                    enc_ops.append((2, v & 0xFFFF))
+                                elif t == 0:
+                                    type_code = 0x01
+                                    enc_ops.append((1, v & 0xFF))
+                                else:
+                                    type_code = 0x02
+                                    enc_ops.append((1, v & 0xFF))
                                 type_byte |= (type_code << (6 - i * 2))
                             for i in range(len(types_and_vals), 4):
                                 type_byte |= (0x03 << (6 - i * 2))
 
                             code.append(type_byte)
-                            for t, v in types_and_vals:
+                            for nbytes, v in enc_ops:
+                                if nbytes == 2:
+                                    code.append((v >> 8) & 0xFF)
                                 code.append(v & 0xFF)
 
                         if remaining:
