@@ -17,6 +17,11 @@ class Parser:
         self.filename = filename
         self.pos = 0
         self.current_token = self.tokens[0] if tokens else None
+        # Depth of enclosing quasiquote (`) templates. While > 0, forms are DATA
+        # (a template), so special-form dispatch (ROUTINE/CONSTANT/OBJECT/...) is
+        # suppressed in parse_form; unquote (~) and splice-unquote (~!) escape one
+        # level and restore normal dispatch. At depth 0 nothing changes.
+        self.quasiquote_depth = 0
 
     def error(self, message: str):
         """Raise a parser error with location information."""
@@ -319,8 +324,11 @@ class Parser:
         # Parse operator
         operator = self.parse_expression()
 
-        # Check for special forms
-        if isinstance(operator, AtomNode):
+        # Check for special forms. Inside a quasiquote template (`<...>) a form is
+        # data, not a definition, so skip the special dispatch and parse it as a
+        # generic form -- the operand loop below handles unquotes (~ / ~!). This is
+        # what lets library macros like `<CONSTANT ~.NAME <ITABLE ...>> parse.
+        if self.quasiquote_depth == 0 and isinstance(operator, AtomNode):
             op_name = operator.value.upper()
 
             if op_name == "ROUTINE":
@@ -646,22 +654,33 @@ class Parser:
             quote_atom = AtomNode("QUOTE", line, col)
             return FormNode(quote_atom, [quoted_expr], line, col)
 
-        # Handle quasiquote operator: `EXPR becomes QuasiquoteNode
+        # Handle quasiquote operator: `EXPR becomes QuasiquoteNode. Inside the
+        # template body, special-form dispatch is suppressed (see parse_form).
         if token.type == TokenType.ATOM and token.value == '`':
             self.advance()
+            self.quasiquote_depth += 1
             quoted_expr = self.parse_expression()
+            self.quasiquote_depth -= 1
             return QuasiquoteNode(quoted_expr, line, col)
 
-        # Handle unquote operator: ~EXPR becomes UnquoteNode
+        # Handle unquote operator: ~EXPR becomes UnquoteNode. Unquote escapes one
+        # quasiquote level, so normal special-form dispatch resumes inside it.
         if token.type == TokenType.ATOM and token.value == '~':
             self.advance()
+            saved = self.quasiquote_depth
+            self.quasiquote_depth = max(0, self.quasiquote_depth - 1)
             unquoted_expr = self.parse_expression()
+            self.quasiquote_depth = saved
             return UnquoteNode(unquoted_expr, line, col)
 
-        # Handle splice-unquote operator: ~!EXPR becomes SpliceUnquoteNode
+        # Handle splice-unquote operator: ~!EXPR becomes SpliceUnquoteNode (also
+        # escapes one quasiquote level).
         if token.type == TokenType.ATOM and token.value == '~!':
             self.advance()
+            saved = self.quasiquote_depth
+            self.quasiquote_depth = max(0, self.quasiquote_depth - 1)
             spliced_expr = self.parse_expression()
+            self.quasiquote_depth = saved
             return SpliceUnquoteNode(spliced_expr, line, col)
 
         # Handle MDL splice operator: !EXPR becomes SpliceUnquoteNode
