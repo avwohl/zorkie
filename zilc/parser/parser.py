@@ -1008,6 +1008,14 @@ class Parser:
                             if loc_prop in properties and loc_prop != prop_name:
                                 # Remove the conflicting location property - later value wins
                                 del properties[loc_prop]
+                    # A location keyword (IN/LOC) doubles as the IN direction. When
+                    # a direction exit like (IN TO ROOM) would overwrite an existing
+                    # CONTAINER under the same key, preserve the container under the
+                    # other alias so the room's parent (from (IN ROOMS)) isn't lost.
+                    if prop_name in location_props and is_direction_exit and prop_name in properties:
+                        other = 'LOC' if prop_name == 'IN' else 'IN'
+                        if other not in properties:
+                            properties[other] = properties[prop_name]
                     # Store property (combine FLAGS if already present)
                     if prop_name == 'FLAGS' and prop_name in properties:
                         # Combine FLAGS values
@@ -1081,6 +1089,14 @@ class Parser:
                         if loc_prop in properties and loc_prop != prop_name:
                             # Remove the conflicting location property - later value wins
                             del properties[loc_prop]
+                # A location keyword (IN/LOC) doubles as the IN direction. When a
+                # direction exit like (IN TO ROOM) would overwrite an existing
+                # CONTAINER value under the same key, preserve the container under
+                # the other alias so the room's parent (from (IN ROOMS)) isn't lost.
+                if prop_name in location_props and is_direction_exit and prop_name in properties:
+                    other = 'LOC' if prop_name == 'IN' else 'IN'
+                    if other not in properties:
+                        properties[other] = properties[prop_name]
                 # Store property (combine FLAGS if already present)
                 if prop_name == 'FLAGS' and prop_name in properties:
                     # Combine FLAGS values

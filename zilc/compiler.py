@@ -4122,12 +4122,34 @@ class ZILCompiler:
             # Look up parent by name
             return obj_name_to_num.get(parent_name, 0)
 
+        from .parser.ast_nodes import AtomNode as _AtomNode
+
+        def _is_dir_exit_value(v):
+            """True if v is a direction-exit value (e.g. [TO, ROOM, ...]) rather
+            than a container object -- IN doubles as the IN direction."""
+            if isinstance(v, list) and v:
+                f = v[0]
+                fv = (f.value.upper() if isinstance(f, _AtomNode)
+                      else f.upper() if isinstance(f, str) else "")
+                return fv in ('TO', 'PER', 'SORRY', 'NEXIT', 'UEXIT', 'NE-EXIT',
+                              'CEXIT', 'FEXIT', 'DEXIT', 'DOOR', 'IF', 'SETG', 'NONE')
+            return False
+
         # Build parent relationships
         parent_of = {}  # obj_num -> parent_num
         for name, node, is_room in all_objects:
             obj_num = obj_name_to_num[name]
-            # Check for IN or LOC property
-            in_value = node.properties.get('IN') or node.properties.get('LOC')
+            # Check for IN or LOC property. IN is overloaded: (IN ROOMS) is the
+            # container, (IN TO ...) is the IN-direction exit. Prefer whichever
+            # alias holds a real container, not a direction exit.
+            inv = node.properties.get('IN')
+            locv = node.properties.get('LOC')
+            if inv is not None and not _is_dir_exit_value(inv):
+                in_value = inv
+            elif locv is not None and not _is_dir_exit_value(locv):
+                in_value = locv
+            else:
+                in_value = inv if inv is not None else locv
             parent_num = get_parent_num(in_value, name)
             parent_of[obj_num] = parent_num
 
