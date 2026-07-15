@@ -15900,6 +15900,51 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def _resolve_two_cmp_operands(self, n1, n2, code):
+        """Resolve two comparison operands for a branch-context JG/JL/etc.
+
+        A nested form/cond operand (e.g. <SET CNT <+ .CNT 1>>) must be EVALUATED
+        -- calling _get_operand_type_and_value on it just returns (0, 0), so the
+        comparison used a constant 0 and any side effect (the increment) was lost,
+        which infinite-loops the classic <G? <SET C <+ .C 1>> N> counter idiom.
+
+        Emits any needed evaluation code into `code`; returns
+        (op1_type, op1_val, op2_type, op2_val) using type 1 = variable (val 0 =
+        stack). If both operands need the stack, the first is spilled to a temp
+        global so operand order is preserved.
+        """
+        def is_expr(n):
+            return isinstance(n, (FormNode, CondNode))
+
+        def emit(n):
+            before = len(self._current_stmt_routine_offsets)
+            insert_pos = len(code)
+            expr = self.generate_form(n) if isinstance(n, FormNode) else self.generate_cond(n)
+            for k in range(before, len(self._current_stmt_routine_offsets)):
+                rel, ph = self._current_stmt_routine_offsets[k]
+                self._current_stmt_routine_offsets[k] = (insert_pos + rel, ph)
+            code.extend(expr)
+
+        if is_expr(n1):
+            emit(n1)  # value -> stack
+            if is_expr(n2):
+                # spill stack -> temp global (ADD sp 0 -> G16) so n2 can use stack
+                temp = 0x10
+                code.extend([0xD4, 0x9F, 0x00, 0x00, temp])
+                op1_type, op1_val = 1, temp  # variable (global 16)
+            else:
+                op1_type, op1_val = 1, 0     # stack
+        else:
+            op1_type, op1_val = self._get_operand_type_and_value(n1)
+
+        if is_expr(n2):
+            emit(n2)
+            op2_type, op2_val = 1, 0         # stack
+        else:
+            op2_type, op2_val = self._get_operand_type_and_value(n2)
+
+        return op1_type, op1_val, op2_type, op2_val
+
     def generate_condition_test(self, condition: ASTNode, branch_on_false: bool = False) -> bytes:
         """Generate a condition test that produces a branch instruction.
 
@@ -16188,8 +16233,8 @@ class ImprovedCodeGenerator:
             # Handle L? (JL)
             elif op_name in ('L?', '<'):
                 if len(condition.operands) >= 2:
-                    op1_type, op1_val = self._get_operand_type_and_value(condition.operands[0])
-                    op2_type, op2_val = self._get_operand_type_and_value(condition.operands[1])
+                    op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+                        condition.operands[0], condition.operands[1], code)
 
                     # Build JL instruction based on operand types
                     if op1_type == 1 and op2_type == 0 and 0 <= op2_val <= 255:
@@ -16229,8 +16274,8 @@ class ImprovedCodeGenerator:
             # Handle G? (JG)
             elif op_name in ('G?', '>'):
                 if len(condition.operands) >= 2:
-                    op1_type, op1_val = self._get_operand_type_and_value(condition.operands[0])
-                    op2_type, op2_val = self._get_operand_type_and_value(condition.operands[1])
+                    op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+                        condition.operands[0], condition.operands[1], code)
 
                     # Build JG instruction based on operand types
                     if op1_type == 1 and op2_type == 0 and 0 <= op2_val <= 255:
