@@ -1,5 +1,8 @@
 # ZILF vs MDL ZIL Syntax Differences
 
+> **Status note:** This document may contain outdated status/progress claims.
+> The authoritative, measured project status is in [STATUS.md](../STATUS.md).
+
 ## Overview
 
 There are two main ZIL dialects:

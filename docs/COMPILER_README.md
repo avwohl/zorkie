@@ -1,5 +1,8 @@
 # ZIL to Z-machine Compiler
 
+> **Status note:** This document may contain outdated status/progress claims.
+> The authoritative, measured project status is in [STATUS.md](../STATUS.md).
+
 A Python-based compiler that translates ZIL (Zork Implementation Language) source code to Z-machine bytecode.
 
 ## Overview

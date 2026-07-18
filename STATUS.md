@@ -1,1164 +1,303 @@
-# Zorkie Project Status
-
-## Project Goal
-Create a complete ZIL (Zork Implementation Language) to Z-machine compiler in Python, along with comprehensive documentation and a decompiler.
-
-## Current Status: ✅ MAJOR MILESTONE ACHIEVED
-
-We now have a **working ZIL compiler** that successfully compiles ZIL source code to valid Z-machine bytecode!
-
----
-
-## Completed Components
-
-### 1. ✅ Documentation (100% Complete)
-
-#### ZIL_SPECIFICATION.md
-- **20 sections** covering complete ZIL language
-- Syntax, data types, routines, objects, rooms
-- Built-in functions (60+ documented)
-- Control flow, macros, file organization
-- Version differences (Z-machine V3-V8)
-- Best practices and conventions
-
-#### ZMACHINE_SPECIFICATION.md
-- **17 sections** on Z-machine bytecode format
-- Memory architecture (dynamic, static, high memory)
-- Complete header format (64 bytes documented)
-- Object table structure
-- Instruction encoding (all forms)
-- Text encoding (ZSCII, Z-characters, alphabets)
-- Dictionary and routine formats
-- Complete opcode reference
-- Version-specific differences (V1-V8)
-
-#### COMPILER_README.md
-- Architecture overview
-- Usage guide and examples
-- Implementation status
-- Extension guide
-
-#### COMPARISON_ANALYSIS.md
-- Analysis vs real Infocom files
-- Mini-Zork structural comparison
-- Validation methodology
-
----
-
-### 2. ✅ ZIL Compiler (80% Complete)
-
-#### Lexer (100% Complete)
-- Full ZIL syntax tokenization
-- Angle brackets, parentheses, strings, numbers
-- Variable prefixes (. for local, , for global)
-- Comments (;\"...\")
-- Hex numbers ($FF format)
-- **Bug Fixed**: Removed '<' and '>' from atom characters
-
-#### Parser (90% Complete)
-- Abstract Syntax Tree construction
-- ✅ ROUTINE definitions
-- ✅ OBJECT and ROOM definitions
-- ✅ SYNTAX definitions
-- ✅ VERSION directives
-- ✅ GLOBAL and CONSTANT declarations
-- ✅ TABLE/ITABLE/LTABLE
-- ✅ COND conditionals
-- ✅ Generic forms
-- ⚠️ Missing: Macros (DEFMAC), some advanced forms
-
-#### Code Generator (70% Complete)
-
-**Implemented: 50+ Opcodes**
-
-Control Flow:
-- ✅ RTRUE, RFALSE, RETURN
-- ✅ QUIT
-
-Output:
-- ✅ TELL/PRINT (inline text with Z-character encoding)
-- ✅ PRINT_NUM
-- ✅ PRINT_CHAR
-- ✅ CRLF/NEW_LINE
-
-Variables:
-- ✅ SET/SETG (local/global assignment)
-- ✅ INC, DEC
-
-Arithmetic (all with proper store):
-- ✅ ADD, SUB, MUL, DIV, MOD
-
-Comparison (branch instructions):
-- ✅ EQUAL? (JE)
-- ✅ L? (JL), G? (JG)
-
-Logical (bitwise):
-- ✅ AND, OR, NOT
-
-Object Operations:
-- ✅ FSET, FCLEAR, FSET?
-- ✅ MOVE, REMOVE
-- ✅ LOC (get parent)
-
-Properties:
-- ✅ GETP, PUTP
-
-**Missing**:
-- Routine calls with parameters
-- Full COND branching logic
-- Memory operations (loadw, storew)
-- Advanced control flow (REPEAT loops)
-- Object traversal (get_sibling, get_child)
-
-#### Z-machine Support (85% Complete)
-
-Text Encoding:
-- ✅ Complete ZSCII character set
-- ✅ Z-character compression (5-bit packing)
-- ✅ Alphabet tables (A0, A1, A2)
-- ✅ Dictionary word encoding
-- ✅ String padding and end markers
-
-Assembler:
-- ✅ Valid Z-machine header generation
-- ✅ Story file assembly
-- ✅ Checksum calculation
-- ✅ Memory layout (dynamic, static, high)
-- ⚠️ Basic object table (needs property tables)
-- ⚠️ Basic dictionary (needs full integration)
-
----
-
-### 3. ✅ Test Suite
-
-#### Working Examples
-All examples compile and generate valid Z-code:
-
-- **minimal.zil** → 644 bytes
-  - Simplest possible program (just QUIT)
-
-- **hello.zil** → 676 bytes
-  - Text output with TELL
-  - CRLF formatting
-
-- **simple_counter.zil** → 647 bytes
-  - Global variables
-  - Assignment (SETG)
-
-- **counter.zil** → 735 bytes
-  - INC/DEC operations
-  - Multiple PRINTN calls
-
-- **arithmetic.zil**
-  - All math operations
-  - Variable storage and retrieval
-
-- **objects.zil**
-  - Object definitions
-  - Attribute manipulation
-  - MOVE/REMOVE operations
-
-#### Test Results
-```bash
-./zorkie examples/minimal.zil --verbose
-# Output: Compilation successful: 644 bytes
-
-python3 tools/analyze_z3.py examples/minimal.z3
-# Shows valid Z-machine header and structure
-```
-
----
-
-### 4. ✅ Analysis Tools
-
-#### tools/analyze_z3.py
-- Parses Z-machine story file headers
-- Extracts all header fields
-- Shows memory layout
-- Validates file structure
-- Used to analyze Mini-Zork (52KB Infocom file)
-
----
-
-## What Works Right Now
-
-You can write ZIL programs that:
-- ✅ Print text to screen
-- ✅ Perform arithmetic operations
-- ✅ Use global and local variables
-- ✅ Increment and decrement counters
-- ✅ Manipulate object attributes
-- ✅ Access and modify properties
-- ✅ Use conditional logic (basic)
-- ✅ Define objects and rooms
-
-All compiled to **valid Z-machine bytecode** that conforms to the specification!
-
----
-
-## What's Missing
-
-### For Full Game Compilation
-
-1. **Routine Calls** (High Priority)
-   - Parameter passing
-   - Return value handling
-   - Packed addresses for routine locations
-
-2. **Complete Control Flow**
-   - Full COND with proper branching
-   - REPEAT loops
-   - Label generation and jumps
-
-3. **Object System** (Medium Priority)
-   - Property table generation
-   - Object tree construction
-   - Relationship management (parent/child/sibling)
-
-4. **Advanced Features** (Low Priority)
-   - Macro expansion (DEFMAC)
-   - Abbreviations table optimization
-   - Multi-file compilation
-   - String deduplication
-
-5. **Parser Integration**
-   - SYNTAX to verb mapping
-   - Parser global variables (PRSA, PRSO, PRSI)
-   - Action routine dispatch
-
----
-
-## Decompiler Status
-
-**Not yet started** - This is the next major component.
-
-### Plan for Decompiler
-
-1. **Header Parser**: Extract story file metadata
-2. **Disassembler**: Convert bytecode to assembly
-3. **Text Decoder**: ZSCII/Z-character to strings
-4. **Object Extractor**: Rebuild object definitions
-5. **Routine Decompiler**: Bytecode to ZIL-like forms
-6. **AST Builder**: Reconstruct high-level structures
-
-This would allow: `.z3` → ZIL source code (lossy, but functional)
-
----
-
-## Statistics
-
-### Lines of Code
-- **Specifications**: ~4,000 lines (markdown)
-- **Compiler**: ~2,500 lines (Python)
-- **Tests**: ~150 lines (ZIL examples)
-- **Total**: ~6,650 lines
-
-### Components
-- **Lexer**: ~280 lines
-- **Parser**: ~450 lines
-- **Code Generator**: ~700+ lines
-- **Z-machine Support**: ~600 lines
-- **Main Compiler**: ~150 lines
-
-### Opcodes Implemented
-- **50+ opcodes** across all categories
-- **~15%** of full Z-machine instruction set
-- **100%** of most commonly used instructions
-
----
-
-## Performance
-
-Compilation speed: **Very fast**
-- minimal.zil: <100ms
-- counter.zil: <150ms
-- Full Zork I would be: <1 second (estimated)
-
-Generated file sizes:
-- Minimal overhead: ~640 bytes for empty program
-- Efficient text encoding
-- Room for optimization (abbreviations, etc.)
-
----
-
-## How to Use
-
-### Compile a ZIL Program
-```bash
-./zorkie input.zil              # Creates input.z3
-./zorkie input.zil -v 5         # Target Z-machine v5
-./zorkie input.zil --verbose    # Show compilation steps
-```
-
-### Analyze Z-machine File
-```bash
-python3 tools/analyze_z3.py file.z3
-```
-
-### Run Compiled Game
-```bash
-frotz examples/minimal.z3
-# or
-dfrotz examples/minimal.z3
-```
-
----
-
-## Next Steps
-
-### Immediate (Complete Compiler)
-1. Implement routine calls with parameters
-2. Add remaining common opcodes (50-100 more)
-3. Build proper object/property tables
-4. Test with simple interactive game
-
-### Short-term (Decompiler)
-1. Create disassembler module
-2. Implement text decoder
-3. Build object extractor
-4. Create routine decompiler
-5. Test with Mini-Zork
-
-### Long-term (Full Toolchain)
-1. Macro system
-2. Debugger/stepper
-3. Optimization passes
-4. IDE integration
-5. Full Zork I compilation
-
----
-
-## Contributing
-
-The codebase is well-structured and documented:
-- Clear separation of concerns (lexer/parser/codegen)
-- Comprehensive inline documentation
-- Test suite for validation
-- Extensible architecture
-
-Adding new opcodes is straightforward:
-1. Add to `zmachine/opcodes.py`
-2. Add generation method in `codegen/codegen_improved.py`
-3. Test with example program
-
----
-
-## Resources Used
-
-### Documentation Sources
-- Z-Machine Standards Document (Graham Nelson)
-- Learning ZIL (Steve Meretzky)
-- ZILF compiler source code
-- Infocom historical source code
-- IF Archive
-
-### Test Files
-- Mini-Zork source and binary (IF Archive)
-- Zork I source code (GitHub/historicalsource)
-- Various Infocom games for reference
-
----
-
-## License
-
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
-
----
-
-## Acknowledgments
-
-- **Infocom**: Original ZIL language and Z-machine design
-- **Graham Nelson**: Z-machine specification and Inform
-- **Steve Meretzky**: Learning ZIL documentation
-- **Tara McGrew**: ZILF modern compiler
-- **IF Community**: Preservation and documentation efforts
-
----
-
----
-
-## Recent Session Updates (2025-11-15)
-
-### ✅ Multi-File Compilation (IFILE)
-- **Commit**: b056839
-- Added `compile_file_multi()` method for combining multiple ZIL files
-- CLI support: `-i/--include` (multiple files)
-- **Test**: multifile_test (3 files → 1,460 bytes)
-- **Essential for**: Planetfall (9 files)
-
-### ✅ PROPDEF Property Definitions
-- **Commit**: f38f729
-- Dynamic property number assignment from PROPDEF declarations
-- Standard properties: DESC=#1, LDESC=#2, user-defined start at #3
-- Auto-assignment for undeclared properties
-- **Test**: propdef_test.zil (5 properties → 1,847 bytes)
-- **Essential for**: Planetfall property system (SIZE, CAPACITY, VALUE)
-
-### ✅ Parser System (Previous Session)
-- Parser globals: PRSA, PRSO, PRSI, HERE, WINNER, MOVES
-- 32 verb action constants (V?TAKE, V?DROP, etc.)
-- VERB? predicate for action checking
-- PERFORM action dispatch
-- Vocabulary dictionary with SYNONYM/ADJECTIVE
-- SYNTAX to action mapping
-- **Tests**: parser_test, perform_test, vocabulary_test, syntax_test
-
-### 📊 Planetfall Progress: ~50% Complete
-Current feature implementation vs. Planetfall requirements:
-- ✅ Multi-file compilation (9 files)
-- ✅ PROPDEF (SIZE, CAPACITY, VALUE)
-- ✅ SYNTAX verb/action system
-- ✅ Vocabulary (SYNONYM, ADJECTIVE)
-- ✅ Parser globals
-- ✅ **DEFMAC macros** (ENABLE, DISABLE, ABS, OPENABLE?, etc.)
-- ✅ **Table operations** (GET, PUT, GETB, PUTB - 300+ uses)
-- ⚠️ **Missing**: Advanced DEFMAC features (TUPLE expansion, complex AUX)
-- ⚠️ Some advanced opcodes (FIRST?, IN?, INTBL?, ZERO?)
-- ⚠️ String optimization (BUZZ words)
-
----
-
-## Recent Session Updates (2025-11-16)
-
-### ✅ DEFMAC Macro System
-- **Commit**: ab5433a, 13e1fcf
-- Complete macro definition and expansion implementation
-- MacroNode AST type and MacroExpander class
-- Quote operator (') support in lexer/parser
-- Parameter binding and substitution (.VAR references)
-- FORM constructor for code generation templates
-- Quoted parameters ('PARAM), TUPLE, and AUX support
-- **Tests**: macro_test.zil, planetfall_macros.zil (both compile)
-- **Essential for**: Planetfall (ENABLE, DISABLE, ABS, OPENABLE?, VERB?, etc.)
-
-### Macro Features Implemented:
-- ✅ Basic macro definition: `<DEFMAC name (params) body>`
-- ✅ Parameter substitution with `.VAR`
-- ✅ Quoted parameters: `'PARAM`
-- ✅ FORM constructor: `<FORM op .arg1 .arg2>`
-- ✅ Recursive macro expansion
-- ✅ Integration with compiler pipeline
-- ⚠️ Partial: List splicing `!.VAR` (needs more work)
-- ⚠️ Partial: TUPLE variadic parameters (parsed but not fully expanded)
-- ⚠️ Partial: AUX variables with complex defaults
-
-### ✅ Table Operations (GET/PUT)
-- **Commit**: 7b17a35, 9d279a5
-- Complete table access operations for arrays/tables
-- GET/PUT for word-based access (1-based in ZIL)
-- GETB/PUTB for byte-based access (0-based)
-- Maps to Z-machine LOADW/STOREW/LOADB/STOREB
-- **Test**: table_test.zil (993 bytes)
-- **Essential for**: Planetfall (300+ uses of GET/PUT operations)
-
-### ✅ IN? Object Containment Predicate
-- **Commit**: c74fc09, 4a1d791
-- Tests if obj1 is directly contained in obj2 (parent check)
-- Uses GET_PARENT + JE branch instruction combination
-- **Test**: in_test.zil (1,195 bytes)
-- **Essential for**: Planetfall (133 uses)
-
-### ✅ ZERO? and Additional Predicates
-- **Commit**: f655318
-- ZERO? (0?) - test if value equals zero using JZ instruction
-- Enhanced predicate testing coverage
-- **Test**: predicate_test.zil (1,214 bytes)
-- Tests ZERO?, EQUAL?, L?, G? predicates
-
-### ✅ Print Operations (PRINTB, PRINTI, PRINTD)
-- **Commit**: c7c1356
-- PRINTB - Print from byte array (PRINT_PADDR) - 9 uses
-- PRINTI - Print inline strings (property values) - 1 use
-- PRINTD - Print decimal (alias for PRINTN) - 5 uses
-- **Test**: print_test.zil (976 bytes)
-
-### ✅ Property Operations (PTSIZE, NEXTP)
-- **Commit**: 442ee50
-- PTSIZE - Get property length (GET_PROP_LEN) - 7 uses
-- NEXTP - Get next property for iteration (GET_NEXT_PROP)
-- Completes core property manipulation system
-- **Test**: property_ops_test.zil (1,021 bytes)
-
----
-
-## Recent Session Updates (2025-11-16 continued)
-
-### ✅ Lexer Improvements - Backslash in Atoms
-- **Commit**: 1e5ee0f
-- Allow backslash `\` in atom characters for patterns like `!\=`
-- Enables parsing of ZIL source with special character sequences
-- **Test**: string_escape_test.zil (1,010 bytes)
-
-### ✅ String Escape Sequences
-- Regular string literals support: `\n`, `\t`, `\\`, `\"`
-- Documented in OPCODES_IMPLEMENTED.md
-- STRING form escapes (`!\"`, `!\\`, `!,VAR`) deferred - requires STRING opcode
-
-### 📋 Daemon System Design
-- **Document**: docs/DAEMON_SYSTEM_DESIGN.md
-- Complete specification for QUEUE/DEQUEUE/INT opcodes
-- Interrupt table format and runtime CLOCKER system
-- Critical for Planetfall (78 QUEUE uses, 45 INT uses)
-- **Status**: Designed, not yet implemented (HIGH complexity, 2-3 sessions)
-
----
-
-### ✅ Additional Opcodes - REST and JIGS-UP
-- **Commit**: (pending)
-- REST - Pointer arithmetic for list/table traversal (37 Planetfall uses)
-- JIGS-UP - Game over with death message (42 Planetfall uses)
-- **Tests**: rest_test.zil (1,047 bytes), jigs_up_test.zil (1,113 bytes)
-- Brings total to 66+ opcodes implemented
-
----
-
-### ✅ Additional Predicates - HELD? and IGRTR?
-- **Commit**: (pending)
-- HELD? - Test if object is held by player (18 Planetfall uses)
-- IGRTR? - Increment variable and test if greater (6 Planetfall uses)
-- **Tests**: held_test.zil (1,117 bytes), igrtr_test.zil (1,052 bytes)
-- **Bug Fix**: Fixed property extraction nonlocal scope issue
-
----
-
-### ✅ Game Utility Opcodes - PROB, PICK-ONE, GOTO
-- **Commit**: (pending)
-- PROB - Probability testing for random events (26 Planetfall uses)
-- PICK-ONE - Random selection from tables (17 uses)
-- GOTO - Player movement between rooms (14 uses)
-- **Tests**: prob_test.zil (1,036 bytes), pick_one_test.zil (1,116 bytes), goto_test.zil (1,120 bytes)
-- Brings total to 71+ opcodes implemented
-
----
-
-### ✅ Bitwise and Property Opcodes - GETPT, BTST, BAND
-- **Commit**: (pending)
-- GETPT - Get property table address (10 Planetfall uses)
-- BTST - Test if bit is set (15 uses)
-- BAND - Bitwise AND for bytes (7 uses)
-- **Test**: bitwise_test.zil (1,153 bytes)
-- Brings total to 74+ opcodes implemented
-
----
-
-### ✅ BOR Opcode - Completing Bitwise Operations
-- **Commit**: (pending)
-- BOR - Bitwise OR for bytes (2 Planetfall uses)
-- Complements BAND to provide full byte-oriented bit operations
-- Updated bitwise_test.zil to demonstrate all bitwise ops
-- Brings total to 75+ opcodes implemented
-
----
-
-### ✅ Control Flow Opcodes - RFATAL and AGAIN
-- **Commit**: 703541f
-- RFATAL - Return false for fatal conditions (24 Planetfall uses)
-- AGAIN - Restart current loop / continue (6 uses)
-- **Test**: control_flow_test.zil (1,110 bytes)
-- Brings total to 77+ opcodes implemented
-- **Milestone**: 60% Planetfall Complete!
-
----
-
-### ✅ Variable and Table Utilities - VALUE, LVAL, GVAL, LENGTH, NTH
-- **Commit**: 1ae2691
-- VALUE - Get variable value (general indirection)
-- LVAL - Get local variable value
-- GVAL - Get global variable value
-- LENGTH - Get table/string length
-- NTH - Get Nth element from table (0-based, complements GET)
-- **Test**: variable_and_table_utils.zil (1,300 bytes)
-- Brings total to 82 opcodes implemented
-
----
-
-### ✅ Arithmetic and Predicate Utilities - MIN, MAX, ASSIGNED?
-- **Commit**: 0917e2c
-- MIN - Minimum of two values
-- MAX - Maximum of two values
-- ASSIGNED? - Test if global variable is assigned
-- **Test**: min_max_test.zil (1,100 bytes)
-- Brings total to 85 opcodes implemented
-
----
-
-### ✅ MAJOR MILESTONE - Daemon System: QUEUE, INT, DEQUEUE
-- **Commit**: 093abf9
-- QUEUE - Schedule interrupt/daemon (78 Planetfall uses!)
-- INT - Get interrupt by name (45 Planetfall uses!)
-- DEQUEUE - Disable interrupt
-- Implements 8-byte interrupt structure format
-- Tracks interrupts in symbol table
-- **Test**: daemon_test.zil (1,200 bytes)
-- Brings total to 88 opcodes implemented
-- **Achievement**: 70% Planetfall Complete! 🎉
-
----
-
-### ✅ Daemon Control and Print Utilities - ENABLE, DISABLE, PRINTADDR
-- **Commit**: 61a7dd6
-- ENABLE - Enable interrupt (set enabled flag to 1)
-- DISABLE - Disable interrupt (alias for DEQUEUE)
-- PRINTADDR - Print string at byte address
-- Completes daemon system control opcodes
-- **Test**: daemon_extras_test.zil (1,100 bytes)
-- Brings total to 91 opcodes implemented
-
----
-
-### ✅ STRING and Arithmetic Shortcuts - STRING, 1+, 1-
-- **Commit**: 80837fc
-- STRING - Build strings (basic implementation, 15 Planetfall uses!)
-- 1+ - Add 1 (shorthand for common increment)
-- 1- - Subtract 1 (shorthand for common decrement)
-- STRING provides foundation for string building
-- Arithmetic shortcuts improve code readability
-- **Test**: string_and_shortcuts_test.zil (1,200 bytes)
-- Brings total to 94 opcodes implemented
-
----
-
-### 🎉 MAJOR MILESTONE - 75% Planetfall! Bit Ops & Object Utils
-- **Commit**: f7dac6e
-- EMPTY? - Test if object has no children (GET_CHILD+JZ)
-- LSH - Left shift (simulated with MUL for V3)
-- RSH - Right shift (simulated with DIV for V3)
-- Completes bitwise operations suite
-- Adds essential object tree predicate
-- **Test**: final_utilities_test.zil (1,300 bytes)
-- Brings total to 97 opcodes implemented
-- **ACHIEVEMENT**: 75% Planetfall Complete! 🎉
-
----
-
-### ✅ Routine Calls & Truth Predicates - CALL, APPLY, NOT?, TRUE?
-- **Commit**: 2572093
-- CALL - Call routine with arguments (uses CALL_VS)
-- APPLY - Apply routine with arguments from table
-- NOT? - Test if value is false/zero (alias for ZERO?)
-- TRUE? - Test if value is non-zero/true
-- Enables dynamic routine invocation
-- Completes predicate suite
-- **Test**: call_and_predicates_test.zil (1,300 bytes)
-- Brings total to 101 opcodes implemented
-
----
-
-### 🎉 80% PLANETFALL MILESTONE - Utility Opcodes: ABS, SOUND, CLEAR, SPLIT, SCREEN
-- **Commit**: 050b4b2
-- ABS - Absolute value
-- SOUND - Play sound effects (SOUND_EFFECT opcode)
-- CLEAR - Clear screen (ERASE_WINDOW opcode)
-- SPLIT - Split screen into upper/lower windows (SPLIT_WINDOW)
-- SCREEN - Select active window (SET_WINDOW)
-- Adds essential screen control for interactive fiction
-- Completes core utility opcode set
-- **Test**: utility_opcodes_test.zil (1,356 bytes)
-- Brings total to 105 opcodes implemented
-- **ACHIEVEMENT**: 🎉 80% Planetfall Complete! 🎉
-
----
-
-### ✅ IO and Screen Control - CURSET, HLIGHT, INPUT, BUFOUT, UXOR
-- **Commit**: ea84b44
-- CURSET - Set cursor position (SET_CURSOR VAR 0xF1)
-- HLIGHT - Set text style/highlighting (SET_TEXT_STYLE VAR 0xF1)
-- INPUT - Read line input from player (SREAD VAR 0xE1)
-- BUFOUT - Enable/disable output buffering (BUFFER_MODE VAR 0xF1)
-- UXOR - Unsigned XOR (compile-time evaluation for V3)
-- Completes interactive IO capabilities
-- Adds cursor control and text styling
-- **Test**: io_and_screen_test.zil (1,348 bytes)
-- Brings total to 110 opcodes implemented
-- **Milestone**: 82% Planetfall Complete!
-
----
-
-### ✅ Advanced Opcodes - USL, DIROUT, PRINTOBJ, READ
-- **Commit**: bb40266
-- USL - Unsigned shift left (alias for LSH)
-- DIROUT - Direct output to memory table (OUTPUT_STREAM VAR 0xF3)
-  - Stream 3 for table redirection
-  - Supports restore with parameter 0
-- PRINTOBJ - Print object short name (PRINT_OBJ 1OP 0x8A)
-- READ - Read line input (alias for INPUT/SREAD)
-- Adds memory output redirection capability
-- Completes object name printing
-- **Test**: advanced_opcodes_test.zil (1,276 bytes)
-- Brings total to 114 opcodes implemented
-- **Milestone**: 84% Planetfall Complete!
-
----
-
-### 🎉 85% PLANETFALL MILESTONE - DLESS? Predicate
-- **Commit**: 3f9dc26
-- DLESS? - Decrement and test if less (DEC+JL)
-  - Companion to IGRTR? for countdown loops
-  - Uses DEC (1OP 0x86) + JL (2OP 0x82)
-  - Essential for loop termination conditions
-- Completes decrement/test predicate family
-- Enables efficient countdown patterns
-- **Test**: dless_test.zil (1,098 bytes)
-- Brings total to 115 opcodes implemented
-- **ACHIEVEMENT**: 🎉 85% Planetfall Complete! 🎉
-- **MAJOR MILESTONE**: Version 1.0.0 Released!
-
----
-
-### ✅ Comparison and Parse Opcodes - G=?, L=?, CHECKU, LEXV
-- **Commit**: fd468db
-- G=? / >= - Greater than or equal (inverted JL)
-- L=? / <= - Less than or equal (inverted JG)
-- CHECKU - Check if object has property (GET_PROP_ADDR)
-  - Returns 0 if property doesn't exist
-  - Unrestricted property checking
-- LEXV - Get word from parse buffer (LOADW with offset calculation)
-  - Parses Nth word from lexical buffer
-  - Offset formula: (word_num - 1) * 4 + 1
-- Completes comparison operator suite
-- Adds essential parser word extraction
-- **Test**: comparison_and_parse_test.zil (1,463 bytes)
-- Brings total to 119 opcodes implemented
-- **Milestone**: 87% Planetfall Complete!
-
----
-
-### 🎉 90% PLANETFALL MILESTONE - Utility Predicates & Table Ops
-- **Commit**: 52da921
-- N=? / != - Not equal (inverted JE)
-- ZGET - Zero-based table get (alias for NTH)
-- ZPUT - Zero-based table put (0-based STOREW)
-- ORIGINAL? - Test if original (type check stub)
-- TEST-BIT - Test specific bit number (computed mask)
-  - Calculates mask as (1 << bit_num)
-  - Uses AND for bit testing
-- Completes full comparison operator set (=, !=, <, >, <=, >=)
-- Adds zero-based table access convenience
-- Enables bit-level manipulation
-- **Test**: utility_predicates_test.zil (1,428 bytes)
-- Brings total to 124 opcodes implemented
-- **ACHIEVEMENT**: 🎉 90% Planetfall Complete! 🎉
-
----
-
-### ✅ Final Opcodes & V5+ Compatibility - WINSIZE, COLOR, FONT
-- **Commit**: 391a587
-- WINSIZE - Set window size (working - uses SPLIT for window 1)
-- COLOR - Set text colors (V5+ stub for compatibility)
-- FONT - Set font (V5+ stub for compatibility)
-- Adds window sizing control
-- Provides V5+ compatibility layer
-- Enables forward compatibility for games
-- **Test**: final_opcodes_test.zil (1,230 bytes)
-- Brings total to 127 opcodes (124 working + 3 stubs)
-- **Milestone**: 92% Planetfall Complete!
-
----
-
-### 🎉 95% PLANETFALL MILESTONE - Memory Operations: GETB2, PUTB2, GETW2, PUTW2
-- **Commit**: (pending)
-- GETB2 - Get byte with base+offset addressing
-  - Computes effective address at compile-time
-  - Uses LOADB with calculated address
-- PUTB2 - Put byte with base+offset addressing
-  - Stores byte at base+offset location
-  - Uses STOREB with calculated address
-- GETW2 - Get word with base+offset addressing
-  - Word offset automatically scaled (*2)
-  - Uses LOADW with calculated address
-- PUTW2 - Put word with base+offset addressing
-  - Word offset automatically scaled (*2)
-  - Uses STOREW with calculated address
-- Completes base+offset addressing family
-- Enables pointer arithmetic patterns
-- Essential for array traversal
-- **Test**: memory_ops_test.zil (1,359 bytes)
-- Brings total to 131 opcodes (128 working + 3 stubs)
-- **ACHIEVEMENT**: 🎉 95% Planetfall Complete! 🎉
-
----
-
-### 🎯 96% PLANETFALL MILESTONE - System/Low-level Operations
-- **Commit**: (pending)
-- LOWCORE - Access low memory constants (header fields)
-  - Reads from Z-machine header area (addresses 0x00-0x40)
-  - Uses LOADW for word-sized header values
-- SCREEN-HEIGHT - Get screen height
-  - Returns constant 24 for V3 compatibility
-  - Standard terminal height
-- SCREEN-WIDTH - Get screen width
-  - Returns constant 80 for V3 compatibility
-  - Standard terminal width
-- ASR - Arithmetic shift right
-  - Alias for RSH (right shift)
-  - Same semantics in V3
-- NEW-LINE - Print newline
-  - Alias for CRLF
-  - Alternative naming convention
-- CATCH - Catch exception (V5+ stub)
-  - Forward compatibility for V5+ games
-  - No-op in V3
-- THROW - Throw exception (V5+ stub)
-  - Forward compatibility for V5+ games
-  - No-op in V3
-- SPACES - Print N spaces (stub)
-  - Needs loop generation
-  - Deferred for now
-- **Test**: system_info_test.zil (1.3 KB)
-- Brings total to 139 opcodes (133 working + 6 stubs)
-- **ACHIEVEMENT**: 🎯 96% Planetfall Complete! 🎯
-
----
-
-### 🚀 97% PLANETFALL MILESTONE - Control Flow: PROG and BIND
-- **Commit**: (pending)
-- PROG - Sequential execution block
-  - Executes body statements in order
-  - First operand is bindings (usually empty ())
-  - Remaining operands executed sequentially
-  - Essential for multi-statement blocks
-- BIND - Local variable binding block
-  - Similar to PROG but emphasizes local scope
-  - Creates local bindings for body execution
-  - Pattern: `<BIND ((X 10) (Y 20)) body...>`
-- Both opcodes critical for Planetfall's control flow patterns
-- Used extensively in parser, action routines, and game logic
-- **Test**: prog_test.zil (1.2 KB)
-- Brings total to 141 opcodes (135 working + 6 stubs)
-- **ACHIEVEMENT**: 🚀 97% Planetfall Complete! 🚀
-
----
-
-### 🎊 98% PLANETFALL MILESTONE - Logical Predicates: AND? and OR?
-- **Commit**: (pending)
-- AND? - Logical AND predicate with short-circuit evaluation
-  - Evaluates expressions left to right
-  - Returns false (0) if any expression is false
-  - Returns last expression value if all true
-  - Critical for conditional logic chains
-- OR? - Logical OR predicate with short-circuit evaluation
-  - Evaluates expressions left to right
-  - Returns first true (non-zero) value
-  - Returns false (0) if all expressions are false
-  - Essential for fallback logic patterns
-- Both predicates used extensively in Planetfall's parser and game logic
-- Pattern: `<COND (<AND? expr1 expr2> actions) ...>`
-- **Test**: logical_pred_test.zil (1.4 KB)
-- Brings total to 143 opcodes (137 working + 6 stubs)
-- **ACHIEVEMENT**: 🎊 98% Planetfall Complete! 🎊
-
----
-
-### 📚 98.5% PLANETFALL - List Operations: FIRST, MEMBER, MEMQ
-- **Commit**: (pending)
-- FIRST - Get first element of list/table
-  - Returns first element (offset 0)
-  - Equivalent to <GET table 1> with 1-based indexing
-  - Uses LOADW with index 1
-  - Essential for list head access
-- MEMBER - Search for element in list (stub)
-  - Would search for item in table
-  - Returns tail starting at found item or false
-  - Needs loop generation (deferred)
-- MEMQ - Search with EQUAL? test (stub)
-  - Similar to MEMBER but uses EQUAL? for comparison
-  - Needs loop generation (deferred)
-- FIRST provides working list head access
-- MEMBER/MEMQ stubs for future enhancement
-- **Test**: list_ops_test.zil (1.4 KB)
-- Brings total to 146 opcodes (138 working + 8 stubs)
-- New category: List Operations (15 categories total)
-
----
-
-### 🎉 99% PLANETFALL MILESTONE - Screen & Game Control
-- **Commit**: (pending)
-- BACK - Erase to beginning of line
-  - V3 implementation: prints newline
-  - Moves to next line (line erase approximation)
-  - Uses gen_newline() for V3 compatibility
-- DISPLAY - Update status line
-  - Automatic in V3, so implemented as no-op
-  - Status line updates handled by interpreter
-  - Compatibility stub for V4+ code
-- SCORE - Set game score
-  - Would set score global variable
-  - Stub implementation (needs score global location)
-  - Placeholder for score tracking
-- All three opcodes provide V3-compatible behavior
-- **Test**: misc_ops_test.zil (1.2 KB)
-- Brings total to 149 opcodes (140 working + 9 stubs)
-- **ACHIEVEMENT**: 🎉 99% Planetfall Complete! 🎉
-
----
-
-### 🌟 99.5% PLANETFALL - Extended V3 Compatibility Operations
-- **Commit**: (pending)
-- PRINTT - Print with tab formatting (working alias for PRINT)
-- CHRSET - Set character set (V3 no-op, V5+ compatibility)
-- MARGIN - Set text margins (V3 no-op, V4+ compatibility)
-- PICINF - Get picture info (V3 stub, V6+ graphics)
-- MOUSE-INFO - Get mouse information (V3 stub, V5+ feature)
-- TYPE? - Get type of value (stub, needs runtime inspection)
-- PRINTTYPE - Print type name (stub, debugging feature)
-- Total of 7 new opcodes for V3 compatibility
-- All provide graceful degradation for V3 target
-- Enable compilation of V4+ source code for V3
-- **Test**: extended_ops_test.zil (1.4 KB)
-- Brings total to 156 opcodes (141 working + 15 stubs)
-- **ACHIEVEMENT**: 🌟 99.5% Planetfall Complete! 🌟
-
----
-
-### 🔥 99.8% PLANETFALL - Advanced Stack & Bitwise Operations
-- **Commit**: (pending)
-- FSTACK - Get frame stack pointer (stub for stack introspection)
-- RSTACK - Get return stack pointer (stub for advanced stack ops)
-- IFFLAG - Conditional flag check (macro stub)
-- LOG-SHIFT - Logical shift operation (working, delegates to LSH)
-- XOR - Bitwise exclusive OR (stub, needs V3 emulation)
-- Total of 5 new advanced operations
-- Stack introspection stubs for low-level operations
-- Bitwise XOR placeholder for future implementation
-- **Test**: advanced_ops_test.zil (1.3 KB)
-- Brings total to 161 opcodes (142 working + 19 stubs)
-- **ACHIEVEMENT**: 🔥 99.8% Planetfall Complete! 🔥
-
----
-
-### 🎉🎊🔥 100% PLANETFALL MILESTONE - COMPLETE COVERAGE ACHIEVED! 🔥🎊🎉
-- **Commit**: (pending)
-- **MAJOR VERSION 2.0.0 RELEASE**
-- MUSIC - Play music track (working, delegates to SOUND)
-- VOLUME - Set sound volume (V3 stub)
-- COPYT - Copy table bytes (stub, needs loop generation)
-- ZERO - Zero out table (stub, needs loop generation)
-- SHIFT - General shift operation (working, alias for LOG-SHIFT)
-- Total of 5 final operations completing the compiler
-- **166 total opcodes implemented** (145 working + 21 stubs)
-- **ALL core ZIL operations now supported!**
-- **Test**: final_ops_test.zil (1.3 KB)
-- Brings total to 166 opcodes
-- 🎉 **PLANETFALL COVERAGE: 100% COMPLETE!** 🎉
-
-This is a HISTORIC milestone! The Zorkie ZIL compiler now supports 100% of
-the ZIL operations required to compile Planetfall and other Infocom games!
-
-**Achievement Unlocked**: Complete ZIL Compiler Implementation
-**Status**: Production Ready for Classic Infocom Game Compilation
-
----
-
-### 🚀 MULTI-VERSION SUPPORT - V3/V4/V5/V6 Targeting
-- **Commit**: (pending)
-- **Feature**: Multi-version Z-machine targeting
-- Added version detection system with feature flags
-- Implemented version-specific opcode behavior
-- COLOR opcode now works in V5+ (SET_COLOUR)
-- FONT opcode now works in V5+ (SET_FONT)
-- Graceful degradation for V3/V4 (no-ops for unsupported features)
-- Version feature flags:
-  - has_colors (V5+)
-  - has_sound (V3+)
-  - has_mouse (V5+)
-  - has_graphics (V6+)
-  - max_objects: 255 (V3) or 65535 (V4+)
-  - max_properties: 31 (V3) or 63 (V5+)
-- **Documentation**: MULTIVERSION_SUPPORT.md created
-- **Test**: multiversion_test_v5.zil for V5 features
-- Allows single source to target multiple versions
-- Forward compatibility: V3 code works in V5+
-- Backward compatibility: V5 code compiles for V3 (features disabled)
-- 🚀 **Multi-Version Architecture Complete!** 🚀
-
----
-
-### V5 Extended Opcodes and Loop Operations
-- **Session**: Multi-version expansion
-- Implemented V5 extended call opcodes:
-  - CALL_VS2 (EXT:0x0C) - call with up to 8 args, store result
-  - CALL_VN2 (EXT:0x0D) - call with up to 8 args, no store
-  - TOKENISE (EXT:0x00) - lexical analysis/tokenization
-  - CHECK_ARG_COUNT (EXT:0x0F) - verify argument count
-- Implemented loop-based table operations:
-  - COPYT - V5: COPY_TABLE opcode, V3: unrolled loop
-  - ZERO - V5: COPY_TABLE with zero, V3: unrolled STOREB
-  - SPACES - unrolled PRINT_CHAR for constants
-- MEMBER and MEMQ still stubs (need full loop generation)
-- **Test**: v5_extended_opcodes.zil created
-- **Stats**: 173 opcodes total (154 working, 19 stubs)
-- Version 2.0.0 → 2.1.0
-
----
-
-### V5 Advanced Text and Table Operations
-- **Session**: Extended V5 implementation
-- Added V5 text processing opcodes:
-  - ENCODE_TEXT (EXT:0x05) - encode text to dictionary format
-  - PRINT_TABLE (EXT:0x10) - formatted table output
-  - SCAN_TABLE (EXT:0x18) - binary search in sorted tables
-  - READ_CHAR (EXT:0x16) - single character input with timeout
-- V5 Extended Opcodes now: 8 total (was 4)
-- **Test**: v5_advanced_test.zil created
-- **Stats**: 177 opcodes total (158 working, 19 stubs)
-- V5 coverage improved: ~11 opcodes remaining (was ~15)
-- Version 2.1.0 → 2.2.0
-
----
-
-### V4/V5 Call Variants and Core V5 Completion
-- **Session**: V5 near-completion milestone
-- Implemented V4/V5 call variants:
-  - CALL_1S (1OP:0x08) - V4+ call with 0 args, store result
-  - CALL_1N (1OP:0x0F) - V5+ call with 0 args, no store
-  - CALL_2S (2OP:0x19) - V4+ call with 1 arg, store result
-  - CALL_2N (2OP:0x1A) - V5+ call with 1 arg, no store
-- Implemented V5 undo and text features:
-  - SAVE_UNDO (EXT:0x09) - save game state for undo
-  - RESTORE_UNDO (EXT:0x0A) - restore previous state
-  - PRINT_UNICODE (EXT:0x0B) - Unicode character output
-  - ERASE_LINE (EXT:0x0E) - erase current line
-  - SET_MARGINS (EXT:0x11) - configure text margins
-- V5 Extended Opcodes now: 13 total (was 8)
-- **Test**: v5_complete_test.zil created
-- **Stats**: 186 opcodes total (167 working, 19 stubs)
-- V5 core functionality: ~98% complete (2 opcodes remaining)
-- V4 coverage: ~85% complete (8 opcodes remaining)
-- Version 2.2.0 → 2.3.0
-
----
-
-### V5 100% COMPLETION
-- **Milestone**: Complete V5 Z-machine implementation
-- Implemented final V5 opcodes:
-  - CHECK_UNICODE (EXT:0x03) - check Unicode character availability
-  - PICTURE_TABLE (EXT:0x13) - graphics table setup (V6 backport)
-- V5 Extended Opcodes: 15 total (complete set)
-- **Stats**: 188 opcodes total (169 working, 19 stubs)
-- V5: 100% complete (all V5 opcodes implemented)
-- V4: ~85% complete (8 opcodes remaining)
-- V3: 100% complete (all Planetfall opcodes)
-- Version 2.3.0 → 2.4.0
-
-V5 Complete Feature List:
-- 15 extended opcodes (CALL_VS2, CALL_VN2, TOKENISE, etc.)
-- 4 call variants (CALL_1S, CALL_1N, CALL_2S, CALL_2N)
-- Full Unicode support
-- Undo system support
-- Advanced text processing and table operations
-- Graphics table configuration
-
----
-
----
-
-## 🔍 REALITY CHECK - Binary Compilation Testing (2025-11-18)
-
-### Test Results Summary
-
-After attempting to compile actual ZIL sources and compare with official binaries:
-
-**Finding #1: Compiler Incompleteness**
-- Tested: Zork1 (official Infocom source vs official binary)
-- Official binary: 86,838 bytes (Release 119, Serial 880429)
-- Our output: 622 bytes (minimal stub)
-- **Conclusion**: Compiler generates only header stubs, not complete games
-
-**Finding #2: ZILF vs Infocom ZIL**
-- Modern ZIL files use ZILF syntax (backtick operator, etc.)
-- Our compiler targets original Infocom ZIL
-- Cannot test against ZILF-compiled binaries
-
-### What's Actually Missing
-
-Despite 188 opcodes "implemented", the compiler lacks:
-
-1. **Complete Code Generation**
-   - Opcodes generate individual instructions
-   - Missing: Full routine body compilation
-   - Missing: Control flow graphs and branching
-   - Missing: Label resolution and jumps
-
-2. **Object Table Generation**
-   - Only minimal stub objects
-   - Missing: Complete property tables
-   - Missing: Object tree relationships
-   - Missing: Attribute packing
-
-3. **Dictionary Generation**
-   - Basic structure exists
-   - Missing: Full vocabulary integration
-   - Missing: Word encoding and sorting
-   - Missing: Synonym resolution
-
-4. **String Table**
-   - TELL works for inline strings
-   - Missing: String table optimization
-   - Missing: Abbreviations
-   - Missing: String deduplication
-
-5. **Memory Layout**
-   - Header generation works
-   - Missing: Proper section sizing
-   - Missing: Dynamic memory allocation
-   - Missing: High memory packing
-
-6. **Routine Compilation**
-   - Individual opcodes work
-   - Missing: Complete routine assembly
-   - Missing: Local variable allocation
-   - Missing: Stack frame management
-
-### What Actually Works
-
-- ✅ Header generation (64-byte Z-machine header)
-- ✅ Individual opcode instruction encoding
-- ✅ ZSCII text encoding
-- ✅ Basic memory structure
-- ✅ Lexer and parser (parse ZIL syntax)
-- ⚠️ Simple test programs (minimal.zil, hello.zil) - **but these are minimal stubs**
-
-### What's Left to Do
-
-**Phase 1: Complete Code Generation (3-5 sessions)**
-- Generate complete routine bodies with all instructions
-- Implement full COND branching with proper labels
-- Add REPEAT/DO loop generation
-- Complete control flow graph construction
-
-**Phase 2: Object System (2-3 sessions)**
-- Generate complete property tables
-- Build object tree with parent/child/sibling links
-- Pack attributes into bit vectors
-- Implement default property handling
-
-**Phase 3: Dictionary & Strings (2 sessions)**
-- Build complete dictionary from SYNTAX and vocabulary
-- Implement string table with deduplication
-- Add abbreviations table
-- Sort dictionary entries
-
-**Phase 4: Integration Testing (2-3 sessions)**
-- Compile Zork1 completely
-- Compare structure with official binary
-- Fix discrepancies
-- Validate with other Infocom games
-
-**Total Remaining: ~10-13 sessions of focused work**
-
-### Honest Assessment
-
-- **Opcode Coverage**: 90%+ (188 opcodes)
-- **Actual Compiler Completion**: ~30%
-- **Can compile real games**: No
-- **Can generate valid test programs**: Partially (minimal stubs only)
-
-The opcode implementations are mostly correct, but they're like having a box of parts without the assembly instructions. The compiler architecture needs the integration layer to produce complete, playable story files.
-
----
-
-**Last Updated**: 2025-11-18
-
-**Current Version**: 2.4.0 (opcode library) / 0.3.0 (actual compiler)
-
-**Status**: ⚠️ IN PROGRESS - Opcode library complete, compiler integration 30% complete
+# Zorkie STATUS
+
+Last measured: 2026-07-18 (session 5: **MINIZORK PLAYS TO A VERIFIED 350/350 WIN**
+-- the first real Infocom game zorkie compiles that plays end to end). This file is
+the single source of truth for project
+status and overrides any status claim in older docs. Reference/spec docs (Z-machine
+and ZIL specs, dialect notes, header/opcode references) live under docs/ and
+tests/test-games/ and are not status reports.
+
+zorkie = from-scratch ZIL -> Z-machine compiler in Python.
+zwalker = independent Z-machine interpreter (../zwalker) used as the end-to-end
+oracle: compile ZIL -> run the .z in zwalker -> replay a walkthrough to a verified win.
+
+## Headline
+
+- The Z-machine back end is broad (V3 is the only version that compiles real games):
+  instruction set, headers, object/property tables, dictionary, ZSCII + abbreviations,
+  routine/packed-address layout, multi-file compilation (INSERT-FILE/IFILE), COND
+  branching, object manipulation, and daemons (QUEUE/INT via gen_queue/gen_int in
+  zilc/codegen/codegen_improved.py).
+- The ZILF standard library parses fully (parser.zil/verbs.zil via INSERT-FILE),
+  including MDL quasiquote/unquote templates and %<...> compile-time forms.
+- **MILESTONE: minizork (the real 1987 Release-0 mini.zil) compiles and PLAYS TO A
+  VERIFIED 350/350 WIN in zwalker** -- the complete game, 420 commands, through the
+  Stone Barrow victory, with room/score progression lockstep-identical to the
+  official binary over the whole route. Verified replay:
+  ../zwalker/walkthroughs/minizork_zorkie_350.txt (RNG seed 1); reference build
+  kept locally at builds/minizork_zorkie.z3 (gitignored; reproducible from source).
+- zwalker L2 harness (../zwalker/scripts/test_zorkie_game.py) is green on 4 games
+  (microquest, mazekey, reactor, minizork): each is compiled with zorkie, run in
+  zwalker, and replayed to its real win. minizork recompiles mini.zil on every run.
+- Getting there took ~50 general codegen/assembler/dictionary fixes over 5 sessions
+  (catalogs below). The same fix classes plus the lockstep-differ method are the
+  roadmap for zork1, zork3 and starcross, which boot but do not yet win.
+
+## Real Infocom games: measured status
+
+Of zwalker's 50 verified solves, 26 are Infocom ZIL (the only zorkie candidates;
+the rest are Inform). Compile results for those 26 (source in
+tests/test-games/infocom-zil/<game>/):
+
+COMPILES to a valid .z3 and RUNS under zwalker:
+	minizork-1987	mini.zil	72KB	**WINS 350/350** -- the complete game plays to the Stone Barrow victory; verified replay ../zwalker/walkthroughs/minizork_zorkie_350.txt (420 cmds, seed 1), registered as a counted game in the zwalker L2 suite.
+	zork1		zork1.zil	108KB	boots "West of House", reaches READ, dispatches commands. Same parser pipeline as minizork -- NEXT TARGET: run the minizork lockstep-differ method against the official binary and fix divergences one by one.
+	starcross	starcross.zil	103KB	boots, reaches READ; vocabulary lookup fails -> every command "I beg your pardon?" (separate issue)
+	zork3		zork3.zil	109KB	boots, renders room; then "write to static memory at 0x2826" (a separate bad-store bug)
+
+CODE-GENERATES FULLY but EXCEEDS the story-file size limit (text-compression gap;
+see bucket 2) -- 9 games, the single biggest bucket:
+	V3 (>128KB): ballyhoo 198KB, moonmist 196KB, wishbringer 183KB,
+	  leathergoddesses 176KB, plunderedhearts 173KB, stationfall 157KB,
+	  hitchhikersguide 155KB
+	V4 (>256KB): trinity 349KB, amfv 324KB
+
+DOES NOT COMPILE yet (see buckets 3 and 4):
+	lurkinghorror, spellbreaker, zork2, deadline, suspect, witness, sorcerer,
+	planetfall, suspended, hollywoodhijinx, cutthroats, infidel, enchanter
+
+## Blocker buckets
+
+### 1a. FIXED: gen_or short-circuit branch-offset bug (was the shared derail)
+The shared object-description derail (minizork/zork1/zork3 crashing right after the
+first room) was a one-byte codegen bug in gen_or (short-circuit logical OR),
+codegen_improved.py ~15053. After evaluating an OR operand it emits
+`JZ stack ?skip` then a 3-byte `JUMP` to the success label. The JZ branch offset was
+hardcoded 0xC3 (offset 3), but the Z-machine branch rule is
+target = addr_after_branch + offset - 2, so offset 3 skips only ONE byte of the 3-byte
+JUMP -- landing the branch one byte into the JUMP. Execution then decodes misaligned
+bytes and eventually hits an illegal 2OP:0x00 and halts. Fix: offset must be 5 (0xC5)
+to clear the whole JUMP. (gen_and, the sibling, was already correct -- it patches its
+offsets with the proper formula.) This fix made minizork and zork1 run their main
+loop instead of crashing on the opening LOOK -> DESCRIBE-OBJECTS -> PRINT-CONT path.
+Minimal repro: `<COND (<OR .VAR <FSET? .Y ,F>> <TELL "x">)>` derailed before the fix.
+
+### 1b. FIXED: minizork PARSER div-by-zero (routine-call fixup misplacement)
+Was `div 109 P-AADJ` at PARSER+0x1ce: a nested routine-call fixup (the `<LIT? ,HERE>`
+call in the READ COND) was applied 2 bytes early, overwriting the call opcode with the
+resolved LIT? address (also written correctly at the real position by the backup
+scan). See the fixup-validation fix in Landed. minizork now reaches READ.
+
+### 1c. FIXED: minizork garbled banner (global-initialized-to-string)
+`<GLOBAL GUE-NAME "The Great Underground Empire">` left GUE-NAME=0 -> garbage. Fixed
+(see Landed). Banner and room text now render correctly.
+
+### 1d. RESOLVED by sessions 3-5 (kept for history): post-dispatch verb logic + a take/read crash
+Session 2 landed 13 general codegen fixes (below) that took minizork from "commands
+do nothing" all the way through parsing, verb+object binding, and verb dispatch --
+"examine mailbox" now prints "The small mailbox is closed." The parser subsystem is
+essentially working. Two remaining issues (both past the parser, in verb logic /
+object handling, so likely smaller):
+  (a) "open mailbox" -> "It is already open." V-OPEN's <FSET? ,PRSO ,OPENBIT>
+      returns true while the container description (examine) treats the mailbox as
+      closed -- an FSET?/flag-read inconsistency to isolate (test FSET? in the exact
+      V-OPEN context vs examine).
+  (b) "take leaflet" / "read leaflet" crash on a write to static memory at 0x213A.
+      The leaflet is inside the closed mailbox, so this is object scoping / a bad
+      store, not the core parser.
+
+## Landed sessions 3-5 (2026-07-15..18) -- from verb dispatch to the 350/350 WIN
+~25 more fixes on top of session 2, every one keeping the suite at 692 pass / 3
+pre-existing fails and the L2 suite green. Highlights by session (the full
+narrative lives in the zwalker session memory "zorkie-parser-frontier"):
+
+**Session 3 -- movement works end to end.** (1) THE root-cause scanner-corruption
+class: assembler.py's position-blind vocab/vword placeholder scanners misread
+already-resolved routine-address bytes 0xFA-0xFC as placeholders and clobbered
+them (LIT?'s packed 0x39FB -> every call to it redirected). Fix: routine fixups
+record protected_positions and the blind scanners skip them. (2) generate_cond
+4th pass re-adjusts recorded placeholder positions after branch-size growth.
+(3) value_context for a routine's tail COND (a clause ending <SETG X V> must
+return V -- MAIN-LOOP-1 gates on <SETG P-WON <PARSER>>). (4) V?<name> constants
+bind to the verb's OWN routine, not the verb word's first syntax line. (5)
+builtin-shadow check consults the complete pre-codegen routine-name set, so a
+user GOTO/PERFORM defined later beats the builtin. (6) A room's (GLOBAL obj...)
+property resolves atoms to object numbers as a BYTE array (local-globals scope).
+(7) _resolve_string_placeholders_in_story scans the globals table word-aligned
+(P-OTBL's legit 0x20FC low byte was eaten -> the P-VTBL static-memory crash).
+
+**Session 4 -- plays the full 405-command route crash-free.** (1) Negative SETG
+constants encode as 2-byte words (<SETG P-SLOCBITS -1> stored 255). (2) REPEAT
+loop-back JUMP appended after RETURN/AGAIN placeholder patching so the scans
+can't misread it. (3) A word that is both direction and adjective keeps the
+direction in dict byte 5 (WEST). (4) Dict "first part of speech" flag made
+deterministic (direction > verb > adjective), was set-iteration hash order.
+(5) gen_random evaluates nested-form operands (RANDOM <- .L .CNT> consumed a
+stale stack value -> wild PUT -> "ring bell" crash).
+
+**Session 5 -- the win.** Driven by lockstep.py: run the official binary and the
+zorkie build side by side, compare ROOM-NAME + SCORE each step; the first
+divergence IS the next bug. (1) Two-slot dictionary values matching the official
+dict; prepositions re-based into the 192..249 band (250-255 are scanner magic).
+(2) VERB? had emitted INC_CHK per verb -- incremented PRSA! Rewrote as chunked JE;
+PRSO?/PRSI?/ROOM? builtins; macro expander skips those DEFMACs. (3) <ITABLE NONE
+n> size specifier (all parser match tables had overlapped -- the "sand ghost").
+(4) Nested-form operand evaluation wired into ~40 2-/3-operand generators
+(getp/getpt/loadw/storew/putp/jin/...; PUTP had written a stale 0 into STRENGTH
+via I-CURE); gen_random/gen_prob rewritten; empty <> = constant 0 everywhere
+including call args. (5) Classic exit encodings UEXIT/NEXIT/FEXIT/CEXIT/DEXIT
+with a per-object property-data WALKER replacing every byte-blind object scan
+(one had rewritten CELLAR's property pointer 0x15FA). (6) String-placeholder
+namespaces separated (code 0xFC00-band vs data 0xF400-band, positions recorded
+at encode time -- point-wise resolution, no byte scans). (7) SYNTAX multi-flag
+groups merge onto the same object (take all); classic TELL prints bare forms via
+PRINT_PADDR; PSEUDO objects. Route adaptation: RNG streams differ from the
+official recording, so the walkthrough heals in sacred rooms (wait-loops) and
+never lingers in the Troll Room.
+
+## Landed session 2 (2026-07-15) -- THIRTEEN codegen correctness fixes
+All in zilc/codegen/codegen_improved.py unless noted. Each keeps the full test suite
+at 692 pass / 3 pre-existing fails and the green L2 suite at 3/3. These are general
+correctness fixes (not minizork hacks) and benefit every game. Combined effect:
+minizork went from "commands do nothing" to fully parsing a command, binding both the
+verb and the object, and executing the verb routine (e.g. "examine mailbox" ->
+"The small mailbox is closed.").
+1. **Comparison value forms materialize to the stack** (gen_less/gen_greater/
+   gen_grtr_or_equal/gen_less_or_equal via new _compare_materialize_tail): `<L?/G?/
+   G=?/L=?>` used the "branch to RTRUE / fall to RFALSE" idiom, which RETURNS from the
+   whole routine. Correct only in tail position; inside <AND>/<OR>/args it returned
+   early. This was THE thing blocking SYNTAX-CHECK from matching (a `<G=? .NUM 1>`
+   inside an AND returned false from SYNTAX-CHECK).
+2. **Predicate value forms materialize to the stack** (gen_zero_test, gen_one,
+   gen_true_predicate, gen_false_predicate, gen_btst): same routine-return idiom;
+   e.g. `<ZERO? x>` inside `<NOT <ZERO? x>>` inside `<AND>` returned from the routine.
+3. **G=?/L=? condition-context handlers evaluate nested-form operands**
+   (generate_condition_test now uses _resolve_two_cmp_operands): `<G=? <GET t i> 2>`
+   treated the GET as constant 0.
+4. **gen_put index/value operand swap** (gen_put): `<PUT tbl <+ .N 1> <REST ...>>`
+   pushed index then value but STOREW pops index first (top = value) -> swapped ->
+   a wild store. Now spills all but the last stack operand to a scratch global.
+5. **REPEAT-as-routine-tail returns its value** (generate_routine): a RepeatNode last
+   statement fell through to RET 0, discarding the value that `<RETURN v>` pushed.
+   The classic parser's CLAUSE is one big REPEAT ending in <RETURN -1>/<RETURN .PTR>,
+   so it always returned 0 -> PARSER RFALSE.
+6. **gen_and/gen_or loaded variable VALUES indirectly** (0xAE -> 0x9E): `load` with a
+   variable operand is an INDIRECT load (var[value-of-var]); `<OR .BUT .TBL>` loaded
+   var[0x20d4] (garbage) instead of TBL. Small-const operand (the var number) is the
+   direct load.
+7. **gen_routine_call evaluates nested-form arguments** (gen_routine_call): it assumed
+   FormNode args were already on the stack but never evaluated them; `<GET-OBJECT
+   <OR .BUT .TBL>>` passed garbage. Now evaluates each, spilling all but the last to
+   scratch globals for correct pop order.
+8. **PERFORM standard-library fallback** (compiler.py _maybe_inject_perform + a
+   dispatch check): real games define PERFORM inside an MDL `%<COND ...>` our front
+   end drops, and zorkie's builtin <PERFORM> was a stub that never dispatched the
+   verb's ACTIONS routine. We now inject a real PERFORM (WINNER/room/PREACTION/
+   object/ACTIONS chain) when the game calls PERFORM but defines none.
+9. **VERBS table dialect branching** (_generate_verbs_table -> _classic/_zilf): classic
+   MDL games (parser.zil with SYNTAX-CHECK) need the compact syntax table (byte0=line
+   count, per-line P-SPREP1/P-SACTION/P-SFWIM1/P-SLOC1 records, VERBS indexed by
+   verb-number). ZILF/toy games keep the byte-6 options layout indexed by action.
+   Detected by the presence of a SYNTAX-CHECK routine.
+10. **Dictionary verb-byte dialect** (compiler.py _dict_verb_num) + per-line action
+    numbers (verb_action_num): classic stores the verb-number in dict byte 5; ZILF
+    stores the action number. syntax_entries now carry both action_num (routine's,
+    for P-SACTION) and verb_action_num (V?/ACT? constant, for ZILF indexing).
+11. **Branch bytes must not collide with placeholder high-bytes** (generate_cond third
+    pass): a 1-byte COND branch byte >= 0xFA is misread by the vocab/routine
+    placeholder scanners (they scan for 0xFB.. etc.) and silently rewritten to a
+    dictionary/routine address. A 0xFB branch (on-true, offset 59) in GET-OBJECT got
+    clobbered to a word address, sending execution backwards into the "How about the
+    ?" disambiguation with a corrupt PRSO. Force the 2-byte branch form (first byte
+    always <= 0xBF) when the 1-byte byte would be >= 0xFA. (The vocab scanner in
+    zmachine/assembler.py is position-blind -- this sidesteps it; a proper fix would
+    track vocab-placeholder positions like routine placeholders.)
+12. **Bodyless (T) clause yields true** (generate_cond): the trailing (T) in
+    <COND (.LOSS ... <RFALSE>) (T)> pushed nothing, so as a routine value RET_POPPED
+    returned garbage -- MANY-CHECK reported failure and the parser dropped every
+    resolved object. Push 1 for a bodyless T/ELSE clause only (a bodyless *test*
+    clause used as a statement must not leak a value).
+13. **COND value with a local/global-var body** (generate_cond last-action): emitted
+    0x24 (dec_chk small,var) instead of 0x34 (add small,var) for "ADD 0 var -> stack",
+    so <COND (.PTBL .OBJ1) (T .OBJ)> returned garbage -- MAIN-LOOP-1 passed PRSO=-1 to
+    PERFORM. This was the last thing between a bound object and a dispatched verb.
+
+### 1e. OLDER NEXT (pre-session-2 notes, now superseded by 1d)
+minizork and zork1 DISPATCH commands but the deeper layers still needed work. Also:
+minizork's later commands returned empty and dfrotz reported a stack underflow -- likely the verbose
+add[0,0]/add[0,1] predicate-materialize pattern pushes booleans that aren't always
+consumed, leaking the stack. zork3 still crashes earlier on a write to static memory
+at 0x2826 (a separate bad STORE/PUT). starcross's vocabulary lookup is a separate
+issue.
+
+### 2. Too big for the story-file size limit (abbreviation/packing gap) -- BIGGEST BUCKET
+The 9 games above code-generate fully but exceed the version size limit because text
+compression is under-implemented (abbreviation selection is greedy/first-match; no
+better packing). Infra exists (zilc/zmachine/abbreviations.py, text_encoding.py;
+header field 0x18; --string-dedup flag) but selection is suboptimal. Better
+abbreviation selection is now the highest-leverage compile-unblock: it would let up
+to 9 games fit (7 V3 + 2 V4). Fixing INPUT (below) is what moved amfv/trinity into
+this bucket -- they now generate all code and are blocked only on size.
+
+### 3. Macro / builtin gaps
+- PRSO?/PRSI?/PRSA? not expanded as macros: blocks lurkinghorror (call gets >3 args
+  in V3), spellbreaker and zork2 (reported as undefined routine PRSO?/PRSI?).
+- Undefined routines block deadline (THIS-IT?), suspect (ERROR, QUITTER),
+  witness (PRINC), sorcerer (ADJ-CHECK, MOBY-FIND), zork2 (PUTREST, RETURN!-).
+- The toy cloak (ZILF stdlib) is past its old LIBRARY-MESSAGE 4-args-in-V3
+  blocker; current stop is the stdlib's ISAVE (a V5+ opcode) reached in a V3
+  build. The full compile-time MDL/DEFMAC evaluator is still the deeper gap.
+
+### 4. Single-game blockers
+	planetfall	parse error: unclosed property (planetfall.zil:13177)
+	suspended	CLEAR requires V4 or later (uses a V4+ opcode in a V3 build)
+	hollywoodhijinx	too many attributes (got 51, V3 max 32) -- attribute over-count
+	cutthroats / infidel	run a top-level compile-time PRINC then exit 1 with no error message
+	enchanter	entry-file resolution picks a stub subfile; real master is z4.zil
+
+## Landed this session (2026-07-15) -- FIVE codegen/assembler fixes
+Combined effect: minizork and zork1 went from crashing right after the first room to
+BOOTING CLEANLY, running the main loop, reaching the READ prompt, and DISPATCHING
+commands with real game responses. (Next layer: verb/object syntax matching -- see
+bucket 1.)
+- **gen_or short-circuit branch offset** (codegen_improved.py ~15053): hardcoded JZ
+  branch offset 0xC3 (offset 3) should be 0xC5 (offset 5) to skip the 3-byte success
+  JUMP; off-by-2 misaligned execution and crashed every game using `<OR value ...>`
+  right after the first room. THIS was the shared object-description derail.
+- **Routine-call fixup misplacement** (get_routine_fixups, codegen_improved.py ~2092):
+  a tracked routine-call fixup for a NESTED call could point a couple of bytes early
+  (at the call opcode instead of its address operand) while the backup scan also
+  recorded the real position -- so the resolved address was written twice, corrupting
+  the call opcode and derailing execution (minizork's div-by-zero in PARSER). Fix:
+  only apply a routine fixup where the bytes actually hold the placeholder value.
+- **Global initialized to a string constant** (codegen_improved.py ~661 +
+  assembler.py ~1547): `<GLOBAL X "text">` left the global 0 (no StringNode case), so
+  `<TELL ,X>` printed garbage from address 0. Now the global holds a 0xFC00 string
+  placeholder that the assembler resolves to the packed string address (in the globals
+  table too, not just code). Fixed minizork's garbled banner (GUE-NAME).
+- **Signed-constant call operand** (gen_routine_call, codegen_improved.py ~16877):
+  negative call arguments (e.g. the -1 tick in <QUEUE I-THIEF -1>) were encoded as a
+  1-byte small constant (0xFF = 255) instead of a 2-byte large constant (0xFFFF).
+  Missing lower bound on the small-const test (op_val <= 255 -> 0 <= op_val <= 255).
+- **INPUT was mis-compiled as sread** (new gen_input_readchar; dispatch ~3232):
+  in ZIL, <INPUT 1> reads ONE keystroke = read_char (VAR:0x16, a store instruction),
+  not line-input sread. zorkie routed INPUT to sread with a 2-3-operand V4 bound, so
+  the real single-operand form <INPUT 1> (used by amfv, trinity, zorkzero) could not
+  compile. New generator emits read_char with the correct 1-3-operand V4+ bound and a
+  store byte. Effect: amfv and trinity now code-generate fully (they moved into the
+  too-big bucket). The 4 existing INPUT opcode tests still pass; READ/sread and the
+  green suite are untouched (READ routes through gen_read, not gen_input).
+- Both fixes verified: green L2 suite still 3/3; INPUT unit tests 4/4.
+
+## Version support reality
+V3 is the only version that compiles real Infocom games. The CLI advertises
+choices=[1..8] (compiler.py:4741) but V4 is only partial (trinity blocked on V4
+INPUT operands; amfv/moonmist on bare-atom globals) and V5-V8 are unverified.
+
+## Oracle / reference
+- The test oracle is zwalker (play-and-win), not byte-diff against a reference .z3.
+- Official Zork I reference binary (Release 119, serial 880429, 86,838 bytes) lives
+  at tests/test-games/zork1/COMPILED/zork1.z3 and is still a valid behavioral oracle.
+
+## Prioritized next steps
+1. **zork1 via the lockstep-differ method** (the method that won minizork): run the
+   official Release-119 binary and the zorkie build side by side through
+   ../zwalker/walkthroughs' verified route, compare room+score per step, fix the
+   first divergence, repeat. zork3 next (same family).
+2. Fix starcross vocabulary lookup (wire up VERBS/PREACTIONS dispatch) so commands
+   stop returning "I beg your pardon?".
+3. Implement PRSO?/PRSI? macro expansion (bucket 3).
+4. Improve abbreviation selection / add packing so the 9 too-big games fit (bucket 2).
+5. Pick off the single-game parse blockers (bucket 4).
+6. Compile-time MDL/DEFMAC evaluator (LIBRARY-MESSAGE) to unblock the full ZILF
+   library path (cloak).

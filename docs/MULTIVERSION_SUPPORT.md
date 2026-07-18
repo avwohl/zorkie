@@ -1,5 +1,8 @@
 # Multi-Version Z-Machine Support in Zorkie
 
+> **Status note:** This document may contain outdated status/progress claims.
+> The authoritative, measured project status is in [STATUS.md](../STATUS.md).
+
 ## Overview
 
 The Zorkie compiler now supports targeting multiple Z-machine versions (V3, V4, V5, V6), allowing you to compile ZIL source code for different interpreter capabilities.

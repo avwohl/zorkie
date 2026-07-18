@@ -14,16 +14,24 @@ compiler now, decompiler (`.z` → ZIL) planned.
 
 Zorkie is a working compiler under active development. Honest snapshot:
 
+**The milestone: a real Infocom game compiles and plays to a verified win.**
+Zorkie compiles the historical **Mini-Zork I** source (`mini.zil`, Release 0,
+1987) to a `.z3` that plays the *complete game* to its 350/350 Stone Barrow
+victory under the zwalker interpreter — a 420-command verified replay whose
+room-by-room and score-by-score progression is lockstep-identical to the
+official binary over the whole route.
+
 **What works today**
 - **The Z-machine back end is broad and well-tested.** The instruction set,
   headers, object/property tables, dictionary, ZSCII text + abbreviations, and
-  routine/packed-address layout are implemented for V1–V8. The pytest suite —
-  much of it ported from ZILF's own integration and interpreter tests — runs at
-  **687 passing** (3 known-failing, unrelated to normal compilation).
+  routine/packed-address layout are implemented (V3 is the version that compiles
+  real games). The pytest suite — much of it ported from ZILF's own integration
+  and interpreter tests — runs green apart from a few known, unrelated failures.
 - **Small games compile and *run*, including interactive ones.** Games with a
   `READ` loop, a dictionary, verb dispatch, movement, objects, scoring and a real
   win condition compile to a story file that plays correctly in an interpreter.
-  The zwalker integration suite (below) drives three such games to a verified win.
+  The zwalker integration suite (below) drives four games — three purpose-built
+  ones plus the real Mini-Zork I — to a verified win.
 - **The ZILF standard library parses fully.** The library `parser.zil` /
   `verbs.zil` / `scope.zil` / … (pulled in via `<INSERT-FILE>`) lex and parse end
   to end, including MDL quasiquote/unquote templates and `%<…>` compile-time
@@ -31,14 +39,15 @@ Zorkie is a working compiler under active development. Honest snapshot:
   `tests/test-games/infocom-zil/` for compilation testing.
 
 **The frontier (not done yet)**
-- **Compiling a full ZILF-library game end to end.** A real library game such as
-  Cloak of Darkness parses completely but does not yet code-generate: the
-  library's message system (`LIBRARY-MESSAGE`) is a `DEFMAC` that must be
-  *evaluated at compile time* (running `DEFINE` routines over MDL data structures
-  to build strings/tables). That compile-time MDL evaluator, broader routine
-  codegen coverage, and the game runtime are the remaining work. See
-  [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) and
-  [docs/PENDING_FEATURES.md](docs/PENDING_FEATURES.md).
+- **The rest of the Infocom catalog.** zork1, zork3 and starcross compile and
+  boot but don't yet play to a win (next up: the lockstep-differ method that won
+  minizork — run the official binary and the zorkie build side by side and fix
+  the first divergence, repeatedly). A text-compression gap pushes nine more
+  games over the story-file size limit, `PRSO?`/`PRSI?` parser macros are
+  unexpanded (zork2 and others), and the compile-time MDL/`DEFMAC` evaluator
+  (e.g. `LIBRARY-MESSAGE` in the ZILF library, which blocks Cloak of Darkness)
+  is still open. See **[STATUS.md](STATUS.md)** for the measured, per-game
+  frontier.
 
 ## Installation
 
@@ -78,7 +87,7 @@ tables, TELL, parsing, and version differences — much of it converted from
 ZILF's own test suites:
 
 ```bash
-python -m pytest -q          # 687 passing
+python -m pytest -q          # green apart from a few known, unrelated failures
 ```
 
 **2. End-to-end "compile → play → win" (via zwalker).** The
@@ -87,11 +96,12 @@ zorkie, runs the resulting story file in its own Z-machine interpreter, and
 replays a walkthrough to the game's real winning ending — the strongest test
 that zorkie's output is not just structurally valid but *behaviorally correct*.
 Its `scripts/test_zorkie_game.py` keeps a green suite of self-contained games
-(a vault puzzle, a movement+key maze, an arithmetic reactor) plus Cloak of
-Darkness as the tracked frontier:
+(a vault puzzle, a movement+key maze, an arithmetic reactor) plus the real
+**Mini-Zork I** (compiled from `mini.zil` and replayed to its 350/350 win), with
+Cloak of Darkness as the tracked frontier:
 
 ```
-zorkie L2 suite: 3/3 games play-and-win  (microquest, mazekey, reactor)
+zorkie L2 suite: 4/4 games play-and-win  (microquest, mazekey, reactor, minizork)
 frontier (not counted): cloak -> not yet
 ```
 
@@ -117,11 +127,10 @@ zilc/
 
 ## Documentation
 
-- [STATUS.md](STATUS.md) — project status and development history
-- [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) — known bugs, limitations, unsupported constructs
-- [docs/PENDING_FEATURES.md](docs/PENDING_FEATURES.md) — remaining work and optimizations
+- [STATUS.md](STATUS.md) — measured project status, per-game frontier, next steps
 - [docs/ZIL_SPECIFICATION.md](docs/ZIL_SPECIFICATION.md) — the ZIL language
 - [docs/ZMACHINE_SPECIFICATION.md](docs/ZMACHINE_SPECIFICATION.md) — the Z-machine bytecode format
+- [docs/ZMACHINE_GAMES_BY_VERSION.md](docs/ZMACHINE_GAMES_BY_VERSION.md) — Z-machine version reference
 
 ## License
 

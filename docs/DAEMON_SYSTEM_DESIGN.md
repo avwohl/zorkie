@@ -1,5 +1,8 @@
 # ZIL Daemon/Interrupt System Design
 
+> **Status note:** This document may contain outdated status/progress claims.
+> The authoritative, measured project status is in [STATUS.md](../STATUS.md).
+
 ## Overview
 
 ZIL's daemon system allows routines to be scheduled to run automatically at specified intervals during gameplay. This is essential for Planetfall (78+ uses) and other complex Infocom games.
