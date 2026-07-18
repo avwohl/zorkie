@@ -1,9 +1,10 @@
 # Zorkie STATUS
 
-Last measured: 2026-07-18 (session 6: **ZORK 1 PLAYS 34 commands lockstep-identical
-to the official binary** -- parser, syntax tables, object lookup, scoring, and
-combat all work; frontier is the melee-message text + the F-DEAD death hook.
-Session 5: minizork verified 350/350 win). This file is
+Last measured: 2026-07-18 (session 7: **FOUR REAL INFOCOM GAMES COMPILE AND WIN**
+-- zork1 350/350, zork3 7/7 (lockstep-identical to the official binary over its
+whole 216-command route), starcross 400/400 (lockstep-identical over 240
+commands), plus minizork 350/350. The zwalker L2 suite is 7/7. ~30 additional
+general compiler fixes this session -- catalog below). This file is
 the single source of truth for project
 status and overrides any status claim in older docs. Reference/spec docs (Z-machine
 and ZIL specs, dialect notes, header/opcode references) live under docs/ and
@@ -22,18 +23,18 @@ oracle: compile ZIL -> run the .z in zwalker -> replay a walkthrough to a verifi
   zilc/codegen/codegen_improved.py).
 - The ZILF standard library parses fully (parser.zil/verbs.zil via INSERT-FILE),
   including MDL quasiquote/unquote templates and %<...> compile-time forms.
-- **MILESTONE: minizork (the real 1987 Release-0 mini.zil) compiles and PLAYS TO A
-  VERIFIED 350/350 WIN in zwalker** -- the complete game, 420 commands, through the
-  Stone Barrow victory, with room/score progression lockstep-identical to the
-  official binary over the whole route. Verified replay:
-  ../zwalker/walkthroughs/minizork_zorkie_350.txt (RNG seed 1); reference build
-  kept locally at builds/minizork_zorkie.z3 (gitignored; reproducible from source).
-- zwalker L2 harness (../zwalker/scripts/test_zorkie_game.py) is green on 4 games
-  (microquest, mazekey, reactor, minizork): each is compiled with zorkie, run in
-  zwalker, and replayed to its real win. minizork recompiles mini.zil on every run.
-- Getting there took ~50 general codegen/assembler/dictionary fixes over 5 sessions
-  (catalogs below). The same fix classes plus the lockstep-differ method are the
-  roadmap for zork1, zork3 and starcross, which boot but do not yet win.
+- **MILESTONE: four real Infocom games compile and PLAY TO VERIFIED WINS in
+  zwalker** -- minizork 350/350, ZORK I 350/350 (Master Adventurer), ZORK III
+  7/7, and Starcross 400/400. zork3 and starcross replay their OFFICIAL
+  verified routes lockstep-identical (rooms AND scores) to the official
+  binaries over the entire game; zork1's route was re-derived for this build's
+  RNG stream by ../zwalker/scripts/solve_zork1_zorkie_adaptive.py.
+- zwalker L2 harness (../zwalker/scripts/test_zorkie_game.py) is green on 7
+  games (microquest, mazekey, reactor, minizork, zork1, zork3, starcross):
+  each compiled from source on every run, replayed to its real win.
+- Getting there took ~80 general codegen/assembler/dictionary/compiler fixes
+  over 7 sessions (catalogs below). Next frontier: zork2/enchanter-family
+  compile blockers and the story-file size limit (abbreviation selection).
 
 ## Real Infocom games: measured status
 
@@ -43,9 +44,9 @@ tests/test-games/infocom-zil/<game>/):
 
 COMPILES to a valid .z3 and RUNS under zwalker:
 	minizork-1987	mini.zil	72KB	**WINS 350/350** -- the complete game plays to the Stone Barrow victory; verified replay ../zwalker/walkthroughs/minizork_zorkie_350.txt (420 cmds, seed 1), registered as a counted game in the zwalker L2 suite.
-	zork1		zork1.zil	108KB	**plays 34 commands lockstep-identical** to the official Release-119 binary at seed 3 (walkthroughs/zork1_verified_350.txt route in ../zwalker): mailbox/leaflet, window entry, lamp/sword, trap door, tree/egg, troll fight to the kill -- rooms AND scores match. 8 general compiler bugs fixed to get here (session-6 catalog below). Frontier: (a) melee-message tables print garbled z-text on the first blow (nested LTABLE-of-LTABLE-of-strings, likely a string-pointer resolution in inner tables); (b) after the villain-death text, <APPLY <GETP .VILLAIN ,P?ACTION> ,F-DEAD> does not set TROLL-FLAG (APPLY works in a minimal repro; context-specific), so the west exit stays blocked at cmd[34].
-	starcross	starcross.zil	103KB	vocabulary FIXED (ITABLE BYTE length-prefix, session 6): commands now parse; next blocker is the 1982-dialect syntax dispatch -> "I don't understand that sentence." on every command.
-	zork3		zork3.zil	109KB	static-write crash FIXED (ITABLE compile-time-form size, session 6): boots, renders the dream intro, takes commands; next quirk is a stray "(lamp)" in look output (dfrotz errors "Illegal attribute" at the same point).
+	zork1		zork1.zil	108KB	**WINS 350/350** (Master Adventurer) -- route re-derived for this build's RNG stream (../zwalker walkthroughs/zork1_zorkie_350.txt, seed 3, 402 cmds, recorded by scripts/solve_zork1_zorkie_adaptive.py). Counted L2 suite game.
+	starcross	starcross.zil	103KB	**WINS 400/400** -- the OFFICIAL verified route replays LOCKSTEP-IDENTICAL (rooms+scores) to the Release-18 binary over all 240 commands at seed 1. Counted L2 suite game.
+	zork3		zork3.zil	109KB	**WINS 7/7** -- the OFFICIAL verified route replays LOCKSTEP-IDENTICAL to the Release-25 binary over all 216 commands at seed 1, through the Treasury of Zork. Counted L2 suite game.
 
 CODE-GENERATES FULLY but EXCEEDS the story-file size limit (text-compression gap;
 see bucket 2) -- 9 games, the single biggest bucket:
@@ -97,6 +98,61 @@ object handling, so likely smaller):
   (b) "take leaflet" / "read leaflet" crash on a write to static memory at 0x213A.
       The leaflet is inside the closed mailbox, so this is object scoping / a bad
       store, not the core parser.
+
+## Landed sessions 6-7 (2026-07-18) -- zork1/zork3/starcross from boot to WINS
+~30 more general fixes, every one keeping pytest at 692 pass / 3 pre-existing
+fails and the L2 suite green. Found by four parallel diagnosis agents driving
+the lockstep differ, then integrated together. By theme:
+
+**Discovery is structural, not byte-pattern (family 1 retired further).**
+Routine-placeholder discovery in generate_routine now WALKS the instruction
+stream (_walk_large_const_positions) and only accepts placeholder words at
+large-constant operand positions -- the byte-blind scan had matched a 1-byte
+branch 0xF0 + insert_obj 0x2E as placeholder 0xF02E in TROLL-FCN's F-DEAD arm
+(TROLL-FLAG never set) and a live minizork case (ROB-MAZE). Branch-byte guards
+widened from >=0xFA to >=0xF0 everywhere (generate_cond, chunked JE, verb
+tests) and gen_and/gen_or NOP-pad their 2-byte branch/jump offsets away from
+the placeholder bands. The table 0xFB scan only matches table-emitted vocab
+indices; resolved table-routine addresses are skipped by the story string scan.
+
+**Positional fixups over scanning (more of family 1).** Depth>=2 nested-table
+pointers, strings/routines inside nested tables (_add_table scopes collectors
+per table), and bare atoms naming table-globals (VILLAINS rows naming
+TROLL-MELEE) all resolve via positions recorded at emission.
+
+**Capacity (family 2).** Property-routine placeholders dedup per routine name
+(zork3's >256 references overflowed into the vocab band and LAMP's ACTION
+became a dictionary address; hard error past 256 distinct).
+
+**Value semantics (ZILCH dialect, verified against official binaries).**
+"Void" ops (TELL/PUT/FSET/MOVE...) are truthy as clause values; <SET var
+LITERAL> is unconditionally true in predicate position (even 0); value_context
+flows into a clause's tail COND; bare object/constant/string clause values
+push; explicit (T <>) pushes 0; <> operand is constant 0; ,W?FOO routine tails
+return the dict address; ,OBJ local defaults resolve to object numbers
+(OTVAL-FROB trophy-case scoring); constants pre-register before global table
+encoding (DEF1/melee tables were all zeros).
+
+**Comparisons.** L?/G?/BTST emit via a general large-const-aware emitter
+(_emit_cmp_branch) with nested-form operands evaluated (a variable vs
+large-constant mix previously emitted NO instruction); G=?/L=? fallbacks no
+longer truncate. Multi-compare/FSET spills use dedicated scratch globals, not
+vars 0x10/0x11 (zork3's global 16 is HERE; the shadow fight broke).
+
+**Dictionary/dialect.** Adjective ids live in their own slot (a word that is
+both noun and adjective kept both values; zork3 'stone door', starcross
+'computer'); top-level <SYNONYM HEAD alias...> adds aliases with no part of
+speech and they inherit the head's dict data at build time (verb alias 'go',
+direction groups excluded from noun-typing); preposition synonyms get the
+head's prep number even when the head is also a direction (starcross
+'inside'); classic ACT?<verb> constants are DICT VERB NUMBERS while V?<name>
+keeps the action number ("master, ..." orders dispatched the wrong verb).
+
+**Macro expansion.** <TYPE? x FORM> matches LVAL/GVAL/COND nodes (starcross's
+1982 TELL DEFMAC dropped .STR -- every LDESC printed blank); runtime CONDs
+inside macro expansions are no longer compile-time-folded (FSET? door text was
+baked in); gen_tell evaluates inline COND string values; _gen_2op_store
+evaluates CondNode operands (CLOCKER's demons/ints REST).
 
 ## Landed sessions 3-5 (2026-07-15..18) -- from verb dispatch to the 350/350 WIN
 ~25 more fixes on top of session 2, every one keeping the suite at 692 pass / 3

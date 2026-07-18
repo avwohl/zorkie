@@ -84,13 +84,16 @@ class Dictionary:
         self.add_word(synonym, 'noun', obj_num)
 
     def add_adjective(self, adjective: str, obj_num: int):
-        """Add an ADJECTIVE word that can describe an object.
-
-        Args:
-            adjective: The adjective word
-            obj_num: The object number this adjective can describe
-        """
-        self.add_word(adjective, 'adjective', obj_num)
+        """Add an ADJECTIVE word. Keep the adjective value in its own
+        slot (adjective_values); word_objects is the NOUN value slot and the
+        old shared write let a later add_synonym clobber the A?-number
+        (zork3 'stone': A?STONE=26 lost to ROCK's object number 138, so
+        THIS-IT? never matched "stone door")."""
+        wl = adjective.lower()
+        self.add_word(wl, 'adjective', None)
+        if not hasattr(self, 'adjective_values'):
+            self.adjective_values = {}
+        self.adjective_values[wl] = obj_num
 
     def add_verb(self, word: str, verb_number: int):
         """Add a verb word with its verb number.
@@ -229,6 +232,32 @@ class Dictionary:
 
     def build(self) -> bytes:
         """Build dictionary bytes."""
+        # Alias words from top-level <SYNONYM HEAD alias...> that ended up
+        # with NO part of speech inherit the head word's types and values
+        # (zork3 "master, go ..." needed 'go' to stay a pure verb alias;
+        # starcross's <SYNONYM WITH USING THROUGH> shares WITH's prep number).
+        for _grp in getattr(self, 'synonym_alias_groups', []) or []:
+            _head = _grp[0]
+            _htypes = self.word_types.get(_head, set()) - {'unknown'}
+            if not _htypes:
+                continue
+            for _al in _grp[1:]:
+                _atypes = self.word_types.get(_al, set()) - {'unknown'}
+                if _atypes:
+                    continue
+                self.word_types[_al] = set(_htypes)
+                if _head in self.word_objects and _al not in self.word_objects:
+                    self.word_objects[_al] = self.word_objects[_head]
+                _av = getattr(self, 'adjective_values', {})
+                if _head in _av and _al not in _av:
+                    _av[_al] = _av[_head]
+                if _head in self.verb_numbers and _al not in self.verb_numbers:
+                    self.verb_numbers[_al] = self.verb_numbers[_head]
+                if _head in self.preposition_numbers and _al not in self.preposition_numbers:
+                    self.preposition_numbers[_al] = self.preposition_numbers[_head]
+                _dv = getattr(self, 'direction_values', {})
+                if _head in _dv and _al not in _dv:
+                    _dv[_al] = _dv[_head]
         result = bytearray()
         self.collision_warnings = []  # Reset warnings
 
@@ -400,8 +429,16 @@ class Dictionary:
                 has_verb = 'verb' in word_types and verb_num > 0
                 has_adj = 'adjective' in word_types or 'adj' in word_types
                 has_obj = 'noun' in word_types or 'synonym' in word_types
-                # (slot-kind, value) in first-slot priority order; adj and obj share
-                # the word_objects value (obj_num).
+                # Adjective value has its own slot (adjective_values),
+                # separate from the noun value (word_objects) -- a word that is
+                # BOTH (zork3 'stone', starcross 'computer') keeps the A?-id in
+                # the primary slot and the noun value in the second.
+                avals = getattr(self, 'adjective_values', {})
+                adj_val = obj_num
+                for w in encoded_words:
+                    if w in avals:
+                        adj_val = avals[w]
+                        break
                 slots = []
                 if has_prep:
                     slots.append(('prep', prep_num))
@@ -409,15 +446,17 @@ class Dictionary:
                     slots.append(('dir', dir_val))
                 if has_verb:
                     slots.append(('verb', verb_num))
-                if has_adj or has_obj:
-                    slots.append(('objadj', obj_num))
+                if has_adj:
+                    slots.append(('adj', adj_val))
+                if has_obj:
+                    slots.append(('obj', obj_num))
                 if not slots:
-                    slots.append(('objadj', obj_num))
+                    slots.append(('obj', obj_num))
                 first = slots[0]
                 # Second slot: highest-priority OTHER value, preferring
-                # dir > verb > adj/obj (matches what the official dicts keep).
+                # dir > verb > adj > obj (matches what the official dicts keep).
                 second_val = 0
-                for kind in ('dir', 'verb', 'objadj', 'prep'):
+                for kind in ('dir', 'verb', 'adj', 'obj', 'prep'):
                     for k, v in slots[1:]:
                         if k == kind:
                             second_val = v

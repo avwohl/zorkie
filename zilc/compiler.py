@@ -2456,7 +2456,15 @@ class ZILCompiler:
                     action_suffix = action_routine[2:].upper()
                     act_const_name = f'ACT?{action_suffix}'
                     if act_const_name not in verb_constants:
-                        verb_constants[act_const_name] = action_num
+                        # Classic-parser code uses ,ACT?FOO where the DICT VERB
+                        # NUMBER lives (P-ITBL P-VERB, WT? .VERB): storing the
+                        # ACTION number made <PUT ,P-ITBL ,P-VERB ,ACT?TELL>
+                        # select verb 188 = LAUNCH, so "master, ..." orders
+                        # dispatched V-LAUNCH instead of TELL.
+                        if getattr(self, '_is_classic_parser', False) and action_suffix in verb_numbers:
+                            verb_constants[act_const_name] = verb_numbers[action_suffix]
+                        else:
+                            verb_constants[act_const_name] = action_num
                     # Also create V?ACTION for PERFORM calls like <PERFORM ,V?ALARM>
                     v_const_name = f'V?{action_suffix}'
                     if v_const_name not in verb_constants:
@@ -2476,7 +2484,10 @@ class ZILCompiler:
                     # This allows code like <EQUAL? .ACT ,ACT?FLY> when FLY maps to V-WALK
                     act_const_name = f'ACT?{verb_word.upper()}'
                     if act_const_name not in verb_constants:
-                        verb_constants[act_const_name] = current_action_num
+                        if getattr(self, '_is_classic_parser', False) and verb_word.upper() in verb_numbers:
+                            verb_constants[act_const_name] = verb_numbers[verb_word.upper()]
+                        else:
+                            verb_constants[act_const_name] = current_action_num
 
             if preaction_routine and preaction_routine not in preactions:
                 # Preactions share action numbers with their main action
@@ -2495,6 +2506,13 @@ class ZILCompiler:
         for _routine_name, _act_num in actions.items():
             if _routine_name.startswith('V-'):
                 verb_constants[f'V?{_routine_name[2:].upper()}'] = _act_num
+        # Post-pass: in the classic dialect ACT?<verbword> must be the DICT
+        # VERB NUMBER (used against P-ITBL P-VERB / WT? .VERB values); V?<name>
+        # keeps the action number for PRSA comparisons. Assign after the loop
+        # so every verb's number exists.
+        if getattr(self, '_is_classic_parser', False):
+            for _w, _vn in verb_numbers.items():
+                verb_constants[f'ACT?{_w}'] = _vn
 
         # Collect prepositions from SYNTAX patterns
         # Prepositions are non-verb words that appear in syntax patterns
@@ -3098,10 +3116,43 @@ class ZILCompiler:
             preposition_words = set()
             if action_table_info and 'prepositions' in action_table_info:
                 preposition_words = set(action_table_info['prepositions'].keys())
+            # A top-level <SYNONYM DIR alias...> group is a DIRECTION alias
+            # declaration; none of its words are object nouns. Adding them as
+            # 'synonym' set PS?OBJECT on 'south' etc., so the classic parser
+            # bound "push machine south" as noun 'south' instead of the
+            # INTDIR direction path.
+            _dir_set_early = set(d.upper() for d in program.directions) if program.directions else set()
+            _dir_group_words = set()
+            for _words in getattr(program, 'verb_synonym_groups', []) or []:
+                if any(_w.upper() in _dir_set_early for _w in _words):
+                    _dir_group_words.update(_w.upper() for _w in _words)
             filtered_synonyms = [w for w in program.synonym_words
-                                 if w.upper() not in removed and w.upper() not in preposition_words]
+                                 if w.upper() not in removed and w.upper() not in preposition_words
+                                 and w.upper() not in _dir_group_words]
             if filtered_synonyms:
-                dictionary.add_words(filtered_synonyms, 'synonym')
+                # Top-level <SYNONYM HEAD alias...> declares word ALIASES, not
+                # object nouns. Blanket 'synonym' typing set PS?OBJECT on every
+                # verb alias ('go'), so CLAUSE consumed "master, go to the
+                # parapet"'s 'go' as a NOUN. Add with no part of speech;
+                # aliases inherit the head word's dict data at build time.
+                dictionary.add_words(filtered_synonyms, 'unknown')
+            _alias_groups = []
+            for _words in getattr(program, 'verb_synonym_groups', []) or []:
+                if len(_words) >= 2:
+                    _alias_groups.append([str(_w).lower() for _w in _words])
+            dictionary.synonym_alias_groups = _alias_groups
+            # Preposition synonyms: <SYNONYM WITH USING THROUGH> (or a head
+            # that is also a direction, like IN/INSIDE) must give each alias
+            # the head's prep number -- build()-time inheritance can't when
+            # the alias was filtered out (direction group) or the head's
+            # primary dict role is direction. starcross 'look inside gun'.
+            _preps_map = action_table_info.get('prepositions', {}) if isinstance(action_table_info, dict) else {}
+            for _words in getattr(program, 'verb_synonym_groups', []) or []:
+                if len(_words) >= 2 and str(_words[0]).upper() in _preps_map:
+                    _pn = _preps_map[str(_words[0]).upper()]
+                    for _al in _words[1:]:
+                        if str(_al).lower() not in dictionary.preposition_numbers:
+                            dictionary.add_preposition(str(_al).lower(), _pn)
 
         # Add direction words with their property numbers
         # This is needed so <GETB ,W?DIRECTION 5> returns the property number
@@ -4117,8 +4168,15 @@ class ZILCompiler:
                     return val
             # Check if it's a routine name - create placeholder for later fixup
             if atom_name in routine_names:
-                # Create a placeholder value: 0xFA00 | idx
-                # The assembler will replace this with the actual packed routine address
+                # One placeholder index PER ROUTINE NAME (dedup): a fresh idx
+                # per REFERENCE overflowed the 8-bit band in zork3 (>256 refs:
+                # 0xFA00|265 = 0xFB09 aliased the vocab band and LAMP's ACTION
+                # prop became a dictionary address).
+                for _pidx, _rn in property_routine_map.items():
+                    if _rn == atom_name:
+                        return 0xFA00 | _pidx
+                if next_routine_placeholder_idx > 0xFF:
+                    raise ValueError('property routine placeholder overflow (>256 distinct routines)')
                 placeholder_idx = next_routine_placeholder_idx
                 next_routine_placeholder_idx += 1
                 property_routine_map[placeholder_idx] = atom_name
@@ -4798,6 +4856,8 @@ class ZILCompiler:
         # Assemble story file
         self.log("Assembling story file...")
         assembler = ZAssembler(self.version)
+        # Table 0xFB scan may only match table-emitted vocab indices.
+        assembler._table_vocab_indices = set(getattr(codegen, '_table_vocab_indices', set()) or set())
         story = assembler.build_story_file(
             routines_code,
             objects_data,

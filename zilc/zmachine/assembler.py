@@ -396,7 +396,8 @@ class ZAssembler:
                                                start_offset: int,
                                                length: int,
                                                step: int = 2,
-                                               data_placeholders: dict = None) -> None:
+                                               data_placeholders: dict = None,
+                                               skip_positions: set = None) -> None:
         """
         Resolve string operand placeholders in a section of the story file.
 
@@ -427,8 +428,12 @@ class ZAssembler:
         # both bytes of each patched marker.
         end_offset = min(start_offset + length, len(story) - 1)
         data_ph = data_placeholders or {}
+        _skip = skip_positions or set()
         i = start_offset
         while i < end_offset:
+            if i in _skip:
+                i += step
+                continue
             hi = story[i]
             text = None
             # Code-namespace marker (0xFC00|idx) or data-namespace marker
@@ -595,6 +600,14 @@ class ZAssembler:
         for placeholder_idx, word_offset in vocab_fixups:
             word_addr = dict_addr + word_offset
             fixup_map[placeholder_idx] = word_addr
+
+        # Only indices actually EMITTED into table data may match here.
+        # Code-emitted indices are resolved by the code passes; letting them
+        # match table bytes turned CPEXITS's '-5, P?NW' word pair into a
+        # dictionary address (zork3 Royal Puzzle).
+        _tv = getattr(self, '_table_vocab_indices', None)
+        if _tv is not None:
+            fixup_map = {k: v for k, v in fixup_map.items() if k in _tv}
 
         # Scan for 0xFB00 | index patterns against the PRISTINE input, skipping
         # positions the vword pass already patched, and never rescanning our own
@@ -1690,6 +1703,7 @@ class ZAssembler:
 
         # Resolve table routine fixups (for ACTIONS table packed addresses)
         # Now that we know high_mem_base, patch table data with routine addresses
+        table_routine_patched = set()
         if table_routine_fixups and table_data:
             for table_offset, routine_offset in table_routine_fixups:
                 # Calculate actual byte address of routine
@@ -1717,6 +1731,12 @@ class ZAssembler:
                 if story_offset + 1 < len(story):
                     story[story_offset] = (packed_addr >> 8) & 0xFF
                     story[story_offset + 1] = packed_addr & 0xFF
+                    # These bytes are a RESOLVED packed routine address; the
+                    # byte-stepped 0xFC string scan over table data must not
+                    # rescan them (PRE-BOARD packed 0x4bfc: 'fc 00' was eaten
+                    # as string placeholder 0 and PREACTIONS[30] broke).
+                    table_routine_patched.add(story_offset)
+                    table_routine_patched.add(story_offset + 1)
 
         # Resolve property routine placeholders in object data
         # Now that we know high_mem_base, we can patch 0xFA00 | idx values
@@ -1830,7 +1850,8 @@ class ZAssembler:
                 self._resolve_string_placeholders_in_story(
                     story, string_placeholders or {}, string_table,
                     table_data_start, table_data_len, step=1,
-                    data_placeholders=string_data_placeholders
+                    data_placeholders=string_data_placeholders,
+                    skip_positions=table_routine_patched
                 )
 
             # Point-wise data-string markers inside tables (positions recorded at

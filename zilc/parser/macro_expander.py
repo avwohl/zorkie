@@ -22,6 +22,33 @@ class MapRet(Exception):
         self.values = values
 
 
+# Predicates that are meaningful at COMPILE time inside a macro expansion.
+# A COND built entirely from these may be folded by _evaluate_mdl; anything
+# else (FSET?, GETP, ...) is runtime and must reach codegen intact.
+_CT_COND_OPS = {'ASSIGNED?', 'GASSIGNED?', 'TYPE?', 'NOT', 'AND', 'OR', 'EMPTY?',
+                'LENGTH?', 'LENGTH', '==?', '=?', 'N==?', 'N=?', 'G?', 'L?',
+                'G=?', 'L=?', '0?', '1?', 'SPNAME'}
+
+
+def _cond_is_compile_time_mdl(node):
+    def ok(n):
+        if isinstance(n, (NumberNode, StringNode, LocalVarNode)):
+            return True
+        if isinstance(n, AtomNode):
+            return True
+        if isinstance(n, FormNode):
+            if not isinstance(n.operator, AtomNode):
+                return False
+            if n.operator.value.upper() not in _CT_COND_OPS:
+                return False
+            return all(ok(op) for op in n.operands)
+        return False
+    for _c, _a in getattr(node, 'clauses', []):
+        if not ok(_c):
+            return False
+    return True
+
+
 class MDLEvaluator:
     """
     Compile-time MDL evaluator for macro expansion.
@@ -624,7 +651,11 @@ class MDLEvaluator:
                     return True
                 if type_name == 'LIST' and isinstance(val, list):
                     return True
-                if type_name == 'FORM' and isinstance(val, FormNode):
+                # In MDL, .STR reads as <LVAL STR> and ,X as <GVAL X> -- both
+                # TYPE FORM (and a COND is a FORM too). starcross's 1982 TELL
+                # DEFMAC sent .STR to its (ELSE <ERROR ...>) arm otherwise and
+                # dropped the operand (every LDESC printed blank).
+                if type_name == 'FORM' and isinstance(val, (FormNode, CondNode, LocalVarNode, GlobalVarNode)):
                     return True
                 if type_name == 'LVAL' and isinstance(val, LocalVarNode):
                     return True
@@ -1890,12 +1921,20 @@ class MacroExpander:
         Also handles COND with compile-time predicates like ASSIGNED?.
         """
         if isinstance(node, CondNode):
-            # Evaluate COND at compile time if it contains ASSIGNED? or other
-            # compile-time predicates
-            result = self.mdl_evaluator.evaluate(node, bindings)
-            if isinstance(result, ASTNode):
-                return self._evaluate_mdl(result, bindings)
-            return self._convert_to_ast(result)
+            # Only fold CONDs whose conditions are compile-time predicates
+            # (ASSIGNED? etc.); a runtime COND (FSET?, GETP, ...) must survive
+            # into the generated code -- starcross's TELL DEFMAC passes
+            # runtime CONDs through, and folding baked "open." into BRIDGE-FCN.
+            if _cond_is_compile_time_mdl(node):
+                result = self.mdl_evaluator.evaluate(node, bindings)
+                if isinstance(result, ASTNode):
+                    return self._evaluate_mdl(result, bindings)
+                return self._convert_to_ast(result)
+            new_clauses = []
+            for _c, _a in node.clauses:
+                new_clauses.append((_c, [self._evaluate_mdl(s, bindings) for s in _a]))
+            node.clauses = new_clauses
+            return node
 
         # Handle list of expressions (macro body with multiple statements)
         if isinstance(node, list):
