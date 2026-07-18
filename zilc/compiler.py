@@ -1809,6 +1809,31 @@ class ZILCompiler:
                 return self.compile_globals[var_name] == var_value
             return False
 
+        # Match <OR test...> / <AND test...> over nested tests. Without this,
+        # zork1's %<COND (<OR <==? ,ZORK-NUMBER 1> <==? ,ZORK-NUMBER 2>>
+        # '<SCORE-OBJ ,PRSO>)> fell through to the T arm and compiled the
+        # treasure scoring out of ITAKE.
+        or_and = re.match(r'<\s*(OR|AND)\s+(.*)>\s*$', test, re.DOTALL | re.IGNORECASE)
+        if or_and:
+            op = or_and.group(1).upper()
+            body = or_and.group(2)
+            subs = []
+            depth = 0
+            cur = ''
+            for ch in body:
+                if ch == '<':
+                    depth += 1
+                elif ch == '>':
+                    depth -= 1
+                cur += ch
+                if depth == 0:
+                    tok = cur.strip()
+                    if tok:
+                        subs.append(tok)
+                    cur = ''
+            vals = [self._evaluate_compile_test(s) for s in subs]
+            return any(vals) if op == 'OR' else bool(vals) and all(vals)
+
         # Default: can't evaluate, return False
         return False
 
@@ -4196,10 +4221,17 @@ class ZILCompiler:
                     for w in words[:4]:
                         word_lower = self._unescape_vocab_word(str(w)).lower()
                         if word_lower in dict_word_offsets:
-                            # 0x8000 | word_offset: the assembler's property-data
-                            # scan rewrites each such word to dict_addr + offset.
+                            # The marker word is a placeholder only; the REAL
+                            # patch is positional via dict_word_fixups
+                            # (obj, prop, byte_off, word_offset). In-band
+                            # markers can't work here: a 12-bit offset field
+                            # truncated zork1's 'window' (offset 0x15FE), and
+                            # widening the match range made minizork's GLOBAL
+                            # prop bytes 9a 8f a false positive.
+                            dict_word_fixups.append(
+                                (obj_idx, prop_num, 2 * len(marker_words),
+                                 dict_word_offsets[word_lower]))
                             marker_words.append(0x8000 | (dict_word_offsets[word_lower] & 0x0FFF))
-                            dict_word_fixups.append((word_lower, obj_idx, prop_num))
                     if marker_words:
                         data = bytearray()
                         for mw in marker_words:
@@ -4243,7 +4275,7 @@ class ZILCompiler:
                         if word_lower in dict_word_offsets:
                             word_offset = dict_word_offsets[word_lower]
                             props[prop_num] = 0xFE00 | (word_offset & 0xFF)
-                            dict_word_fixups.append((word_lower, obj_idx, prop_num))
+                            dict_word_fixups.append((obj_idx, prop_num, 0, word_offset))
                         else:
                             props[prop_num] = 0
                 elif key == 'PSEUDO' and getattr(self, '_is_classic_parser', False):
@@ -4272,9 +4304,9 @@ class ZILCompiler:
                         rmark = resolve_atom_value(rname)
                         if not isinstance(rmark, int):
                             rmark = 0
+                        dict_word_fixups.append((obj_idx, prop_num, len(data), dict_word_offsets[wl]))
                         data.extend([(wmark >> 8) & 0xFF, wmark & 0xFF,
                                      (rmark >> 8) & 0xFF, rmark & 0xFF])
-                        dict_word_fixups.append((wl, obj_idx, prop_num))
                     if data:
                         props[prop_num] = bytes(data)
                 elif key == 'GLOBAL':
@@ -4798,6 +4830,10 @@ class ZILCompiler:
             # register_data_string): the routines scanner only accepts these.
             string_code_index_max=codegen._next_string_operand_index,
             string_data_placeholders=codegen.get_string_data_placeholders(),
+            table_addr_fixups=getattr(codegen, 'table_addr_fixups', None),
+            # Positional dict-word patches for SYNONYM/PSEUDO/ADJECTIVE prop
+            # data (see _resolve_dict_placeholders).
+            prop_dict_fixups=dict_word_fixups,
             table_string_fixups=codegen._table_string_fixups
         )
 

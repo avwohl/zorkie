@@ -2139,6 +2139,15 @@ class Parser:
             # SAND-F/CHALICE-F action calls, PRSI pollution).
             while self.current_token.type == TokenType.ATOM and \
                   self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH', 'NONE'):
+                # A bare BYTE/WORD *specifier* (old ZILCH syntax, e.g.
+                # <ITABLE BYTE 100>, starcross P-INBUF) means a LENGTH-PREFIXED
+                # table: byte/word 0 holds the element count, then count zero
+                # elements -- equivalent to <ITABLE 100 (BYTE LENGTH)>. It
+                # differs from the parenthesized (BYTE) flag, which is
+                # elements-only with no prefix.
+                if self.current_token.value in ('BYTE', 'WORD') and \
+                        'LENGTH' not in flags and 'NONE' not in flags:
+                    flags.append('LENGTH')
                 flags.append(self.current_token.value)
                 self.advance()
             if self.current_token.type == TokenType.NUMBER:

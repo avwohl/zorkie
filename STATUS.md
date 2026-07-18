@@ -1,7 +1,9 @@
 # Zorkie STATUS
 
-Last measured: 2026-07-18 (session 5: **MINIZORK PLAYS TO A VERIFIED 350/350 WIN**
--- the first real Infocom game zorkie compiles that plays end to end). This file is
+Last measured: 2026-07-18 (session 6: **ZORK 1 PLAYS 34 commands lockstep-identical
+to the official binary** -- parser, syntax tables, object lookup, scoring, and
+combat all work; frontier is the melee-message text + the F-DEAD death hook.
+Session 5: minizork verified 350/350 win). This file is
 the single source of truth for project
 status and overrides any status claim in older docs. Reference/spec docs (Z-machine
 and ZIL specs, dialect notes, header/opcode references) live under docs/ and
@@ -41,9 +43,9 @@ tests/test-games/infocom-zil/<game>/):
 
 COMPILES to a valid .z3 and RUNS under zwalker:
 	minizork-1987	mini.zil	72KB	**WINS 350/350** -- the complete game plays to the Stone Barrow victory; verified replay ../zwalker/walkthroughs/minizork_zorkie_350.txt (420 cmds, seed 1), registered as a counted game in the zwalker L2 suite.
-	zork1		zork1.zil	108KB	boots "West of House", reaches READ, dispatches commands. Same parser pipeline as minizork -- NEXT TARGET: run the minizork lockstep-differ method against the official binary and fix divergences one by one.
-	starcross	starcross.zil	103KB	boots, reaches READ; vocabulary lookup fails -> every command "I beg your pardon?" (separate issue)
-	zork3		zork3.zil	109KB	boots, renders room; then "write to static memory at 0x2826" (a separate bad-store bug)
+	zork1		zork1.zil	108KB	**plays 34 commands lockstep-identical** to the official Release-119 binary at seed 3 (walkthroughs/zork1_verified_350.txt route in ../zwalker): mailbox/leaflet, window entry, lamp/sword, trap door, tree/egg, troll fight to the kill -- rooms AND scores match. 8 general compiler bugs fixed to get here (session-6 catalog below). Frontier: (a) melee-message tables print garbled z-text on the first blow (nested LTABLE-of-LTABLE-of-strings, likely a string-pointer resolution in inner tables); (b) after the villain-death text, <APPLY <GETP .VILLAIN ,P?ACTION> ,F-DEAD> does not set TROLL-FLAG (APPLY works in a minimal repro; context-specific), so the west exit stays blocked at cmd[34].
+	starcross	starcross.zil	103KB	vocabulary FIXED (ITABLE BYTE length-prefix, session 6): commands now parse; next blocker is the 1982-dialect syntax dispatch -> "I don't understand that sentence." on every command.
+	zork3		zork3.zil	109KB	static-write crash FIXED (ITABLE compile-time-form size, session 6): boots, renders the dream intro, takes commands; next quirk is a stray "(lamp)" in look output (dfrotz errors "Illegal attribute" at the same point).
 
 CODE-GENERATES FULLY but EXCEEDS the story-file size limit (text-compression gap;
 see bucket 2) -- 9 games, the single biggest bucket:

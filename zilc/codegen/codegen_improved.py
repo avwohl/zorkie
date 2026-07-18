@@ -128,6 +128,17 @@ class ImprovedCodeGenerator:
         self.tables: List[Tuple[str, bytes, bool, bool]] = []
         self.table_counter = 0
         self.table_offsets: Dict[int, int] = {}  # table_index -> offset within table data
+        # Positional table-address fixups: (dst_table_index, dst_byte_offset,
+        # src_table_index, src_addend). The assembler patches the word at
+        # dst with (address of src table + addend). Used for VERBS -> syntax
+        # blob pointers, where 0xFF00|index placeholders can't reach
+        # table indices > 255.
+        self.table_addr_fixups: List[Tuple[int, int, int, int]] = []
+        # Names of tables whose DATA embeds 0xFF00|idx nested-table pointers
+        # (e.g. _GLOBAL_VILLAINS); get_tables_with_placeholders includes their
+        # ranges so the assembler resolves those pointers.
+        self._tables_with_nested_ptrs: set = set()
+        self._emitted_nested_table_ptr = False
         self._table_data_size = 0  # Running total of table data size
 
         # Special header tables - track their table indices for header field population
@@ -1010,10 +1021,29 @@ class ImprovedCodeGenerator:
 
         values = table_node.values
 
+        # ITABLE size may be a compile-time constant FORM: <ITABLE NONE <* 8 2 36>>
+        # (zork3 CPOBJS/CELLOBJS) or a named-constant expression. The parser only
+        # accepts a literal NUMBER token as the size, so a form lands in
+        # values[0]; fold it here where constants are known. Without this the
+        # table shrinks to one zero word and every PUT past it corrupts the
+        # neighboring tables / crashes on the static-memory boundary.
+        if table_type == 'ITABLE' and table_node.size is None and values:
+            _folded = self._eval_compile_time_value(values[0])
+            if _folded is not None and _folded > 0:
+                table_node.size = _folded
+                values = values[1:]
+
         # Handle (BYTE LENGTH) format for ITABLE - text buffer format
         # Format: byte 0 = max length, then size bytes initialized to init value
         if is_length and is_byte and table_type == 'ITABLE':
             initial_size = table_node.size or 1
+            if initial_size > 255:
+                self.compiler.warn(
+                    "MDL0430",
+                    f"ITABLE size {initial_size} overflows byte length prefix (max 255)"
+                )
+                # Cap size to prevent memory overflow
+                initial_size = 1
             init_value = 0
             if values and isinstance(values[0], NumberNode):
                 init_value = values[0].value & 0xFF
@@ -1106,8 +1136,11 @@ class ImprovedCodeGenerator:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
             self._encode_string_marker_offsets = []
             self._encode_routine_marker_offsets = []
+            self._emitted_nested_table_ptr = False
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
+            if self._emitted_nested_table_ptr:
+                self._tables_with_nested_ptrs.add(f"_GLOBAL_{global_name}")
             _str_marker_offs = list(self._encode_string_marker_offsets)
             _rtn_marker_offs = list(self._encode_routine_marker_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
@@ -1222,9 +1255,17 @@ class ImprovedCodeGenerator:
 
         # Handle ITABLE size prefix
         initial_size = None
-        if table_type == 'ITABLE' and values and isinstance(values[0], NumberNode):
-            initial_size = values[0].value
-            values = values[1:]
+        if table_type == 'ITABLE' and values:
+            if isinstance(values[0], NumberNode):
+                initial_size = values[0].value
+                values = values[1:]
+            else:
+                # Size may be a compile-time constant form (see
+                # _compile_global_table_node)
+                _folded = self._eval_compile_time_value(values[0])
+                if _folded is not None and _folded > 0:
+                    initial_size = _folded
+                    values = values[1:]
 
         # Handle (BYTE LENGTH) format for ITABLE - text buffer format
         # Format: byte 0 = max length, then size bytes initialized to init value
@@ -1310,8 +1351,11 @@ class ImprovedCodeGenerator:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
             self._encode_string_marker_offsets = []
             self._encode_routine_marker_offsets = []
+            self._emitted_nested_table_ptr = False
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
+            if self._emitted_nested_table_ptr:
+                self._tables_with_nested_ptrs.add(f"_GLOBAL_{global_name}")
             _str_marker_offs = list(self._encode_string_marker_offsets)
             _rtn_marker_offs = list(self._encode_routine_marker_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
@@ -1663,6 +1707,26 @@ class ImprovedCodeGenerator:
                         name = node.operands[0].value
                         if name in self.global_values:
                             return self.global_values[name]
+                elif op_name in ('*', '+', '-', '/', 'MOD'):
+                    # Compile-time arithmetic, e.g. an ITABLE size of
+                    # <* 8 2 36> (zork3 CPOBJS)
+                    vals = [self._eval_compile_time_value(o) for o in node.operands]
+                    if vals and all(v is not None for v in vals):
+                        if op_name == '-' and len(vals) == 1:
+                            return -vals[0]
+                        r = vals[0]
+                        for v in vals[1:]:
+                            if op_name == '*':
+                                r *= v
+                            elif op_name == '+':
+                                r += v
+                            elif op_name == '-':
+                                r -= v
+                            elif op_name == '/':
+                                r = int(r / v) if v else 0
+                            elif op_name == 'MOD':
+                                r = (r % v) if v else 0
+                        return r
                 # Add more compile-time operations as needed
             return None
         return None
@@ -2023,19 +2087,43 @@ class ImprovedCodeGenerator:
                 i += 1
             return fwim & 0xFF, loc & 0xFF
 
+        # Two classic dialects share the VERBS pointer array but differ in the
+        # per-line record: the 1987 compact records above (minizork's
+        # parser.zil, which declares P-SYNLEN-0/1/2 = 2/4/7), and the earlier
+        # mainline parser's FIXED 8-byte records (zork1's gparser.zil and most
+        # other Infocom games, which declare <CONSTANT P-SYNLEN 8>):
+        #
+        #     byte 0 P-SBITS:   num_objects in the low 2 bits (P-SONUMS mask)
+        #     byte 1 P-SPREP1   byte 2 P-SPREP2
+        #     byte 3 P-SFWIM1   byte 4 P-SFWIM2
+        #     byte 5 P-SLOC1    byte 6 P-SLOC2
+        #     byte 7 P-SACTION
+        #
+        # SYNTAX-CHECK there steps <REST .SYN ,P-SYNLEN>, so emitting compact
+        # records made it read garbage and orphan every command.
+        fixed8 = self.constants.get('P-SYNLEN') == 8
+
         # Group every SYNTAX line under its verb word.
         verb_to_lines = {}
         for entry in syntax_entries:
             verb_to_lines.setdefault(entry['verb'], []).append(entry)
 
-        # Build one compact syntax structure per verb.
-        verbnum_to_table_index = {}  # verb_number -> table index of its structure
+        # Build ALL per-verb syntax structures into ONE blob table (as ZILCH
+        # did). One self.tables entry keeps the table count low: zork1 has 135
+        # verbs, and per-verb tables pushed the count past 255 -- the
+        # 0xFF00|index table placeholder only encodes 8-bit indices, so every
+        # high-index pointer silently aliased a low table. The VERBS pointer
+        # slots are patched positionally via table_addr_fixups instead of
+        # scan-resolved placeholders.
+        blob = bytearray()
+        verbnum_to_block_offset = {}  # verb_number -> offset of its structure in blob
         for verb, lines in verb_to_lines.items():
             vnum = verb_numbers.get(verb)
             if vnum is None:
                 continue
 
-            struct = bytearray()
+            struct = blob
+            verbnum_to_block_offset[vnum] = len(blob)
             struct.append(len(lines) & 0xFF)  # byte 0: number of syntax lines
 
             for line in lines:
@@ -2045,40 +2133,56 @@ class ImprovedCodeGenerator:
                 action = int(line.get('action_num', 0) or 0)
                 oflags = line.get('object_flags', []) or []
 
-                struct.append(((nobj & 0x3) << 6) | (prep1 & 0x3F))  # P-SPREP1
-                struct.append(action & 0xFF)                          # P-SACTION
-                if nobj >= 1:
+                if fixed8:
                     fwim1, loc1 = encode_obj(oflags[0] if len(oflags) > 0 else [])
-                    struct.append(fwim1)                              # P-SFWIM1
-                    struct.append(loc1)                               # P-SLOC1
-                if nobj >= 2:
                     fwim2, loc2 = encode_obj(oflags[1] if len(oflags) > 1 else [])
+                    if nobj < 1:
+                        fwim1 = loc1 = 0
+                    if nobj < 2:
+                        fwim2 = loc2 = 0
+                    struct.append(nobj & 0x3)                         # P-SBITS
+                    struct.append(prep1 & 0xFF)                       # P-SPREP1
                     struct.append(prep2 & 0xFF)                       # P-SPREP2
+                    struct.append(fwim1)                              # P-SFWIM1
                     struct.append(fwim2)                              # P-SFWIM2
+                    struct.append(loc1)                               # P-SLOC1
                     struct.append(loc2)                               # P-SLOC2
+                    struct.append(action & 0xFF)                      # P-SACTION
+                else:
+                    struct.append(((nobj & 0x3) << 6) | (prep1 & 0x3F))  # P-SPREP1
+                    struct.append(action & 0xFF)                          # P-SACTION
+                    if nobj >= 1:
+                        fwim1, loc1 = encode_obj(oflags[0] if len(oflags) > 0 else [])
+                        struct.append(fwim1)                              # P-SFWIM1
+                        struct.append(loc1)                               # P-SLOC1
+                    if nobj >= 2:
+                        fwim2, loc2 = encode_obj(oflags[1] if len(oflags) > 1 else [])
+                        struct.append(prep2 & 0xFF)                       # P-SPREP2
+                        struct.append(fwim2)                              # P-SFWIM2
+                        struct.append(loc2)                               # P-SLOC2
 
-            table_index = len(self.tables)
-            self.table_offsets[table_index] = self._table_data_size
-            self._table_data_size += len(struct)
-            self.tables.append((f'_SYNTAX_ENTRY_{verb}', bytes(struct), True, False))
-            verbnum_to_table_index[vnum] = table_index
+        blob_index = len(self.tables)
+        self.table_offsets[blob_index] = self._table_data_size
+        self._table_data_size += len(blob)
+        self.tables.append(('_SYNTAX_ENTRIES', bytes(blob), True, False))
 
         # VERBS: 256-entry word array of pointers, indexed by (255 - verb_number).
+        # Pointer slots start as zero and are patched positionally by the
+        # assembler (table_addr_fixups) to blob_address + block_offset.
+        verbs_table_index = blob_index + 1
         verbs_data = bytearray()
         for i in range(256):
             vnum = 255 - i
-            if vnum in verbnum_to_table_index:
-                placeholder = 0xFF00 | verbnum_to_table_index[vnum]
-                verbs_data.append((placeholder >> 8) & 0xFF)
-                verbs_data.append(placeholder & 0xFF)
-            else:
-                verbs_data.extend([0x00, 0x00])
+            if vnum in verbnum_to_block_offset:
+                self.table_addr_fixups.append(
+                    (verbs_table_index, len(verbs_data), blob_index,
+                     verbnum_to_block_offset[vnum]))
+            verbs_data.extend([0x00, 0x00])
 
-        table_index = len(self.tables)
-        self.table_offsets[table_index] = self._table_data_size
+        self.table_offsets[verbs_table_index] = self._table_data_size
         self._table_data_size += len(verbs_data)
         self.tables.append(("_VERBS", bytes(verbs_data), True, False))
-        self.global_values['VERBS'] = 0xFF00 | table_index
+        self.global_values['VERBS'] = 0xFF00 | verbs_table_index
 
     def _generate_verbs_table_zilf(self):
         """Generate the ZILF-dialect VERBS table (byte-6 options, action-indexed).
@@ -17466,6 +17570,11 @@ class ImprovedCodeGenerator:
             table_index = self._add_table(node)
             # Return a marker value that will be patched later
             # Use high byte 0xFF to indicate table reference
+            # Flag the emission so the ENCLOSING table gets registered for
+            # placeholder resolution (see get_tables_with_placeholders):
+            # zork1's <GLOBAL VILLAINS <LTABLE <TABLE TROLL ...> ...>> held
+            # unresolved 0xFFxx pointers and every HERO-BLOW missed.
+            self._emitted_nested_table_ptr = True
             return 0xFF00 | table_index
         return None
 
@@ -21096,9 +21205,17 @@ class ImprovedCodeGenerator:
                 table_data.extend(struct.pack('>H', len(values)))
 
         # For ITABLE, first value might be the size (repeat count)
-        if table_type == 'ITABLE' and values and isinstance(values[0], NumberNode):
-            initial_size = values[0].value
-            values = values[1:]  # Rest are initial values
+        if table_type == 'ITABLE' and values:
+            if isinstance(values[0], NumberNode):
+                initial_size = values[0].value
+                values = values[1:]  # Rest are initial values
+            else:
+                # Size may be a compile-time constant form (see
+                # _compile_global_table_node)
+                _folded = self._eval_compile_time_value(values[0])
+                if _folded is not None and _folded > 0:
+                    initial_size = _folded
+                    values = values[1:]
 
         # Handle ITABLE with repeat count
         if initial_size and table_type == 'ITABLE' and values:
@@ -21243,9 +21360,12 @@ class ImprovedCodeGenerator:
         result = []
         offset = 0
         for _, table_name, data, _, _ in sorted_tables:
-            # _VERBS and _VWORD_* tables contain table address placeholders
+            # _VERBS and _VWORD_* tables contain table address placeholders,
+            # as does any table that embedded a nested anonymous <TABLE ...>
+            # (e.g. _GLOBAL_VILLAINS).
             # Note: _VERB_DATA_* tables do NOT - they contain literal values like -1
-            if table_name == '_VERBS' or table_name.startswith('_VWORD_'):
+            if (table_name == '_VERBS' or table_name.startswith('_VWORD_')
+                    or table_name in getattr(self, '_tables_with_nested_ptrs', ())):
                 result.append((offset, offset + len(data)))
             offset += len(data)
         return result

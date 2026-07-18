@@ -171,7 +171,8 @@ class ZAssembler:
 
     def _resolve_string_markers(self, routines: bytes, string_table,
                                    string_placeholders: dict = None,
-                                   placeholder_positions: list = None) -> bytes:
+                                   placeholder_positions: list = None,
+                                   patched_positions: set = None) -> bytes:
         """
         Resolve string table markers in routine bytecode.
 
@@ -212,6 +213,9 @@ class ZAssembler:
                         # Patch in place: keep 0x8D, update the address bytes
                         result[byte_offset + 1] = (packed_addr >> 8) & 0xFF
                         result[byte_offset + 2] = packed_addr & 0xFF
+                        if patched_positions is not None:
+                            patched_positions.add(byte_offset + 1)
+                            patched_positions.add(byte_offset + 2)
             return bytes(result)
 
         # Fallback: scan-based resolution (for old format or when positions not available)
@@ -323,7 +327,8 @@ class ZAssembler:
 
     def _resolve_string_placeholders(self, routines: bytes, string_placeholders: dict,
                                        string_table,
-                                       code_index_max: int = None) -> bytes:
+                                       code_index_max: int = None,
+                                       patched_positions: set = None) -> bytes:
         """
         Resolve string operand placeholders in routine bytecode.
 
@@ -353,15 +358,23 @@ class ZAssembler:
 
         result = bytearray(routines)
 
-        # Scan for 0xFC00 | index patterns (16-bit values)
+        # Scan for 0xFC00 | index patterns (16-bit values). Match against the
+        # PRISTINE input and skip bytes earlier passes already wrote (a resolved
+        # marker address from _resolve_string_markers can contain 0xFC).
+        protected = patched_positions if patched_positions is not None else set()
         i = 0
         while i < len(result) - 1:
             # Check for 0xFC high byte
-            if result[i] == 0xFC:
-                placeholder_idx = result[i + 1]
+            if routines[i] == 0xFC and i not in protected:
+                placeholder_idx = routines[i + 1]
+                # A JUMP (0x8C) offset can contain 0xFC in either byte: as the
+                # HIGH byte of a backward jump (0x8C directly before the match)
+                # or as the LOW byte of a forward jump (0x8C two bytes back,
+                # e.g. zork1's `jump #02fc` in MAIN-LOOP-1) -- skip both.
                 if ((placeholder_idx in string_placeholders)
                         and (code_index_max is None or placeholder_idx < code_index_max)
-                        and not (i >= 1 and result[i - 1] == 0x8C)):
+                        and not (i >= 1 and routines[i - 1] == 0x8C)
+                        and not (i >= 2 and routines[i - 2] == 0x8C)):
                     text = string_placeholders[placeholder_idx]
                     # Get packed address from string table
                     packed_addr = string_table.get_packed_address(text, self.version)
@@ -369,6 +382,8 @@ class ZAssembler:
                         # Patch the 16-bit address
                         result[i] = (packed_addr >> 8) & 0xFF
                         result[i + 1] = packed_addr & 0xFF
+                        protected.add(i)
+                        protected.add(i + 1)
                         i += 2
                         continue
             i += 1
@@ -460,7 +475,7 @@ class ZAssembler:
             return routines
 
         result = bytearray(routines)
-        protected = protected_positions or set()
+        protected = protected_positions if protected_positions is not None else set()
 
         # Build a map from placeholder_idx to word address
         fixup_map = {}
@@ -470,17 +485,30 @@ class ZAssembler:
             word_addr = dict_addr + word_offset
             fixup_map[placeholder_idx] = word_addr
 
-        # Scan for 0xFB00 | index patterns (16-bit values)
+        # Scan for 0xFB00 | index patterns (16-bit values). Match against the
+        # PRISTINE input (routines), never the partially patched result: a
+        # resolved word address can itself contain 0xFB as its LOW byte (zork1's
+        # '"' entry landed at dict 0x3EFB), and rescanning our own write made
+        # the scanner read that 0xFB plus the following je branch byte as a
+        # fresh placeholder, corrupting both the operand and the branch.
+        # Patched positions join `protected` so the vword pass below can't
+        # misread the bytes this pass wrote.
         i = 0
         while i < len(result) - 1:
-            # Check for 0xFB high byte
-            if result[i] == 0xFB and i not in protected:
-                placeholder_idx = result[i + 1]
+            # Skip 0xFB bytes that are JUMP (0x8C) offset bytes, not
+            # placeholders (either byte of the 16-bit offset can be 0xFB).
+            if (routines[i] == 0xFB and i not in protected
+                    and not (i >= 1 and routines[i - 1] == 0x8C)
+                    and not (i >= 2 and routines[i - 2] == 0x8C)):
+                placeholder_idx = routines[i + 1]
                 if placeholder_idx in fixup_map:
                     word_addr = fixup_map[placeholder_idx]
-                    # Patch the 16-bit address
                     result[i] = (word_addr >> 8) & 0xFF
                     result[i + 1] = word_addr & 0xFF
+                    protected.add(i)
+                    protected.add(i + 1)
+                    i += 2
+                    continue
             i += 1
 
         return bytes(result)
@@ -507,7 +535,7 @@ class ZAssembler:
             return routines
 
         result = bytearray(routines)
-        protected = protected_positions or set()
+        protected = protected_positions if protected_positions is not None else set()
 
         # Build a map from placeholder_idx to VWORD table address
         fixup_map = {}
@@ -517,24 +545,31 @@ class ZAssembler:
                 fixup_map[placeholder_idx] = table_addr
 
         # Scan for 0xFB00 | index patterns (16-bit values). Skip bytes already
-        # written as routine-call operands (see _resolve_vocab_placeholders).
+        # written as routine-call or vocab operands, match against the pristine
+        # input, and never rescan a just-written low byte (see
+        # _resolve_vocab_placeholders for the zork1 0x3EFB collision).
         i = 0
         while i < len(result) - 1:
-            # Check for 0xFB high byte
-            if result[i] == 0xFB and i not in protected:
-                placeholder_idx = result[i + 1]
+            if (routines[i] == 0xFB and i not in protected
+                    and not (i >= 1 and routines[i - 1] == 0x8C)
+                    and not (i >= 2 and routines[i - 2] == 0x8C)):
+                placeholder_idx = routines[i + 1]
                 if placeholder_idx in fixup_map:
                     table_addr = fixup_map[placeholder_idx]
-                    # Patch the 16-bit address
                     result[i] = (table_addr >> 8) & 0xFF
                     result[i + 1] = table_addr & 0xFF
+                    protected.add(i)
+                    protected.add(i + 1)
+                    i += 2
+                    continue
             i += 1
 
         return bytes(result)
 
     def _resolve_table_vocab_placeholders(self, table_data: bytes,
                                            vocab_fixups: list,
-                                           dict_addr: int) -> bytes:
+                                           dict_addr: int,
+                                           protected_positions: set = None) -> bytes:
         """
         Resolve vocabulary word placeholders in table data.
 
@@ -553,6 +588,7 @@ class ZAssembler:
             return table_data
 
         result = bytearray(table_data)
+        protected = protected_positions if protected_positions is not None else set()
 
         # Build a map from placeholder_idx to word address
         fixup_map = {}
@@ -560,15 +596,21 @@ class ZAssembler:
             word_addr = dict_addr + word_offset
             fixup_map[placeholder_idx] = word_addr
 
-        # Scan for 0xFB00 | index patterns (16-bit values, word-aligned)
+        # Scan for 0xFB00 | index patterns against the PRISTINE input, skipping
+        # positions the vword pass already patched, and never rescanning our own
+        # writes (see _resolve_vocab_placeholders for the 0x3EFB collision).
         i = 0
         while i < len(result) - 1:
-            if result[i] == 0xFB:
-                placeholder_idx = result[i + 1]
+            if table_data[i] == 0xFB and i not in protected:
+                placeholder_idx = table_data[i + 1]
                 if placeholder_idx in fixup_map:
                     word_addr = fixup_map[placeholder_idx]
                     result[i] = (word_addr >> 8) & 0xFF
                     result[i + 1] = word_addr & 0xFF
+                    protected.add(i)
+                    protected.add(i + 1)
+                    i += 2
+                    continue
             i += 1
 
         return bytes(result)
@@ -576,7 +618,8 @@ class ZAssembler:
     def _resolve_table_vword_placeholders(self, table_data: bytes,
                                           vword_fixups: list,
                                           table_base_addr: int,
-                                          table_offsets: dict) -> bytes:
+                                          table_offsets: dict,
+                                          protected_positions: set = None) -> bytes:
         """
         Resolve VWORD table placeholders in table data.
 
@@ -596,6 +639,7 @@ class ZAssembler:
             return table_data
 
         result = bytearray(table_data)
+        protected = protected_positions if protected_positions is not None else set()
 
         # Build a map from placeholder_idx to VWORD table address
         fixup_map = {}
@@ -604,15 +648,20 @@ class ZAssembler:
                 table_addr = table_base_addr + table_offsets[table_index]
                 fixup_map[placeholder_idx] = table_addr
 
-        # Scan for 0xFB00 | index patterns (16-bit values)
+        # Scan for 0xFB00 | index patterns against the PRISTINE input and never
+        # rescan our own writes (see _resolve_vocab_placeholders).
         i = 0
         while i < len(result) - 1:
-            if result[i] == 0xFB:
-                placeholder_idx = result[i + 1]
+            if table_data[i] == 0xFB and i not in protected:
+                placeholder_idx = table_data[i + 1]
                 if placeholder_idx in fixup_map:
                     table_addr = fixup_map[placeholder_idx]
                     result[i] = (table_addr >> 8) & 0xFF
                     result[i + 1] = table_addr & 0xFF
+                    protected.add(i)
+                    protected.add(i + 1)
+                    i += 2
+                    continue
             i += 1
 
         return bytes(result)
@@ -705,7 +754,8 @@ class ZAssembler:
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
                                      prop_defaults_size: int,
                                      vocab_fixups: list = None,
-                                     dir_prop_min: int = None) -> bytes:
+                                     dir_prop_min: int = None,
+                                     prop_dict_fixups: list = None) -> bytes:
         """
         Resolve dictionary word placeholders in object property tables.
 
@@ -723,6 +773,48 @@ class ZAssembler:
             Modified object data with dictionary addresses resolved
         """
         result = bytearray(objects_data)
+
+        # POSITIONAL dict-word patches (obj_num, prop_num, byte_off,
+        # word_offset), recorded at emission. These replace the SYNONYM marker
+        # scan entirely: in-band 0x8000|offset markers both truncated large
+        # dictionaries (zork1) and false-matched neighboring object-number
+        # bytes (minizork's GLOBAL prop 9a 8f).
+        if prop_dict_fixups:
+            obj_entry_sz = 9 if self.version <= 3 else 14
+            for obj_idx, prop_num, byte_off, word_offset in prop_dict_fixups:
+                # obj_idx is the 0-based object index from the compiler's
+                # emission loop (object number minus 1).
+                entry = prop_defaults_size + obj_idx * obj_entry_sz
+                ptr_at = entry + obj_entry_sz - 2
+                if ptr_at + 1 >= len(result):
+                    continue
+                pt = (result[ptr_at] << 8) | result[ptr_at + 1]
+                if pt >= len(result):
+                    continue
+                p = pt + 1 + 2 * result[pt]  # skip short-name
+                while p < len(result) and result[p] != 0:
+                    sz = result[p]
+                    if self.version <= 3:
+                        dlen = (sz >> 5) + 1
+                        pn = sz & 0x1F
+                        p += 1
+                    else:
+                        if sz & 0x80:
+                            dlen = result[p + 1] & 0x3F or 64
+                            pn = sz & 0x3F
+                            p += 2
+                        else:
+                            dlen = 2 if (sz & 0x40) else 1
+                            pn = sz & 0x3F
+                            p += 1
+                    if pn == prop_num:
+                        j = p + byte_off
+                        if j + 1 < len(result):
+                            addr = dict_addr + word_offset
+                            result[j] = (addr >> 8) & 0xFF
+                            result[j + 1] = addr & 0xFF
+                        break
+                    p += dlen
 
         # Build lookup for vocab fixups: idx -> word_offset
         vocab_lookup = {}
@@ -793,8 +885,11 @@ class ZAssembler:
                 while j + 1 < prop_end and j + 1 < len(result):
                     word = (result[j] << 8) | result[j + 1]
 
-                    # Check for SYNONYM placeholder: 0x8000 | word_offset
-                    if (word & 0xF000) == 0x8000:
+                    # Check for SYNONYM placeholder: 0x8000 | word_offset.
+                    # Skipped when positional prop_dict_fixups were supplied --
+                    # those patches are authoritative and scanning is both
+                    # truncation-prone and false-positive-prone.
+                    if (word & 0xF000) == 0x8000 and not prop_dict_fixups:
                         word_offset = word & 0x0FFF
                         actual_addr = dict_addr + word_offset
                         result[j] = (actual_addr >> 8) & 0xFF
@@ -1139,7 +1234,9 @@ class ZAssembler:
                         dir_prop_min: int = None,
                         string_code_index_max: int = None,
                         string_data_placeholders: dict = None,
-                        table_string_fixups: list = None) -> bytes:
+                        table_string_fixups: list = None,
+                        table_addr_fixups: list = None,
+                        prop_dict_fixups: list = None) -> bytes:
         """
         Build complete story file.
 
@@ -1331,7 +1428,7 @@ class ZAssembler:
             # or 0xFB00 (VOC from PROPDEF) - the low bits contain word offset or index
             objects_fixed = bytearray(self._resolve_dict_placeholders(
                 bytes(objects_fixed), dict_addr_calc, prop_defaults_size, vocab_fixups,
-                dir_prop_min
+                dir_prop_min, prop_dict_fixups
             ))
 
             # Resolve table address placeholders (0xFD00 | table_idx) in property values
@@ -1407,9 +1504,13 @@ class ZAssembler:
 
             # Resolve VWORD placeholders in table data first (NEW-PARSER? mode)
             # This must happen before vocab_fixups so vword placeholders get VWORD addresses
+            # Positions either pass patches are shared so the second pass can't
+            # misread a resolved address whose low byte is 0xFB.
+            table_patched_positions = set()
             if vword_fixups and table_offsets:
                 table_data = self._resolve_table_vword_placeholders(
-                    table_data, vword_fixups, table_base_addr, table_offsets
+                    table_data, vword_fixups, table_base_addr, table_offsets,
+                    table_patched_positions
                 )
                 # Re-split after resolution
                 impure_table_data = table_data[:impure_tables_size]
@@ -1418,9 +1519,28 @@ class ZAssembler:
             # Resolve vocabulary word placeholders in table data (all tables)
             if vocab_fixups:
                 table_data = self._resolve_table_vocab_placeholders(
-                    table_data, vocab_fixups, dict_addr_for_tables
+                    table_data, vocab_fixups, dict_addr_for_tables,
+                    table_patched_positions
                 )
                 # Re-split after resolution
+                impure_table_data = table_data[:impure_tables_size]
+                pure_table_data = table_data[impure_tables_size:]
+
+            # Positional table-address fixups (VERBS -> syntax-entry blob):
+            # patch the word at dst_table+dst_offset with the address of
+            # src_table + addend. Positions recorded at encode time -- no
+            # scanning, no 8-bit index limit.
+            if table_addr_fixups and table_offsets:
+                table_data = bytearray(table_data)
+                for dst_idx, dst_off, src_idx, addend in table_addr_fixups:
+                    if dst_idx not in table_offsets or src_idx not in table_offsets:
+                        continue
+                    pos = table_offsets[dst_idx] + dst_off
+                    addr = table_base_addr + table_offsets[src_idx] + addend
+                    if pos + 1 < len(table_data):
+                        table_data[pos] = (addr >> 8) & 0xFF
+                        table_data[pos + 1] = addr & 0xFF
+                table_data = bytes(table_data)
                 impure_table_data = table_data[:impure_tables_size]
                 pure_table_data = table_data[impure_tables_size:]
 
@@ -1632,6 +1752,12 @@ class ZAssembler:
                 lambda j: (fixup_map.get(story[j + 1])
                            if story[j] == 0xFA else None))
 
+        # Byte positions in `routines` that any resolution pass has already
+        # written. Later scanners (vocab/vword) must skip them: resolved packed
+        # string addresses can contain 0xFB/0xFC bytes that look like
+        # placeholders (see _resolve_vocab_placeholders).
+        code_patched_positions = set()
+
         # If string table is present, add string table after routines and resolve markers
         if string_table is not None:
             # Calculate final routine length AFTER marker resolution
@@ -1680,15 +1806,21 @@ class ZAssembler:
             # Now resolve string table markers with correct addresses
             # Pass tell_string_placeholders and positions to handle the 0x8D format (TELL strings)
             # Using position-based resolution to avoid false matches when 0x8D appears as operand data
+            # Every byte these passes write is recorded in code_patched_positions:
+            # a packed string address may legally contain 0xFB/0xFC bytes, and the
+            # later vocab/vword scanners must not misread them as placeholders
+            # (zork1's PARSER had a je branch clobbered exactly this way).
             routines = self._resolve_string_markers(
-                routines, string_table, tell_string_placeholders, tell_placeholder_positions
+                routines, string_table, tell_string_placeholders, tell_placeholder_positions,
+                patched_positions=code_patched_positions
             )
 
             # Resolve string operand placeholders (0xFC00 | index -> packed address)
             if string_placeholders:
                 routines = self._resolve_string_placeholders(
                     routines, string_placeholders, string_table,
-                    string_code_index_max
+                    string_code_index_max,
+                    patched_positions=code_patched_positions
                 )
 
             # Also resolve string placeholders in table data (LONG-WORD-TABLE,
@@ -1748,8 +1880,9 @@ class ZAssembler:
         # position-blind vocab/vword scanners below must not touch them, or a
         # routine address containing 0xFB (a legal low byte, e.g. LIT? at 0x39FB)
         # gets misread as a W?* placeholder and every call to it is silently
-        # redirected. Both bytes of each 2-byte operand are protected.
-        protected_positions = set()
+        # redirected. Both bytes of each 2-byte operand are protected, as are
+        # all bytes the string-resolution passes wrote (code_patched_positions).
+        protected_positions = set(code_patched_positions)
         if routine_fixups:
             routines = self._resolve_routine_fixups(routines, routine_fixups)
             for code_offset, _routine_offset in routine_fixups:
