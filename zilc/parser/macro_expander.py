@@ -1696,6 +1696,16 @@ class MacroExpander:
         if macro_name not in self.macros:
             return None
 
+        # The classic-game parser predicates are DEFMACs built on MULTIFROB, a
+        # DEFINE that needs real MDL list evaluation (REPEAT/PUTREST/CHTYPE) this
+        # expander doesn't have. Expanding them here produced empty/garbage forms
+        # -- <PRSI? ,PRSO> in minizork's V-PUT compiled to a bare branch byte and
+        # the instruction stream desynced. The code generator has exact builtin
+        # equivalents (gen_verb_test / gen_parser_eq_test), so leave these
+        # unexpanded for it.
+        if macro_name in ('VERB?', 'PRSO?', 'PRSI?', 'ROOM?'):
+            return None
+
         macro = self.macros[macro_name]
 
         # Validate argument count

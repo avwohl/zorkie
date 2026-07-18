@@ -322,17 +322,28 @@ class ZAssembler:
         return bytes(result)
 
     def _resolve_string_placeholders(self, routines: bytes, string_placeholders: dict,
-                                       string_table) -> bytes:
+                                       string_table,
+                                       code_index_max: int = None) -> bytes:
         """
         Resolve string operand placeholders in routine bytecode.
 
         Scans bytecode for 0xFC00 | index values and replaces them with actual
         packed string addresses.
 
+        This scan is position-blind, and 0xFC is a common HIGH byte of backward
+        JUMP offsets (-769..-1024). Two guards keep it from rewriting real code:
+        * code_index_max: only indices in the ROUTINE-code namespace (an
+          ascending prefix; data-region markers allocate from 255 down) are
+          accepted. A jump offset byte pairing with a data index (e.g. 0xFC9D
+          in minizork's CLAUSE loop) is rejected outright.
+        * a match immediately preceded by the JUMP opcode 0x8C is skipped --
+          that byte is a jump offset, never a string operand.
+
         Args:
             routines: Routine bytecode with string placeholders
             string_placeholders: Dict mapping placeholder index to string text
             string_table: StringTable instance with resolved addresses
+            code_index_max: exclusive upper bound of routine-code marker indices
 
         Returns:
             Patched routine bytecode
@@ -348,7 +359,9 @@ class ZAssembler:
             # Check for 0xFC high byte
             if result[i] == 0xFC:
                 placeholder_idx = result[i + 1]
-                if placeholder_idx in string_placeholders:
+                if ((placeholder_idx in string_placeholders)
+                        and (code_index_max is None or placeholder_idx < code_index_max)
+                        and not (i >= 1 and result[i - 1] == 0x8C)):
                     text = string_placeholders[placeholder_idx]
                     # Get packed address from string table
                     packed_addr = string_table.get_packed_address(text, self.version)
@@ -356,6 +369,8 @@ class ZAssembler:
                         # Patch the 16-bit address
                         result[i] = (packed_addr >> 8) & 0xFF
                         result[i + 1] = packed_addr & 0xFF
+                        i += 2
+                        continue
             i += 1
 
         return bytes(result)
@@ -364,7 +379,9 @@ class ZAssembler:
                                                string_placeholders: dict,
                                                string_table,
                                                start_offset: int,
-                                               length: int) -> None:
+                                               length: int,
+                                               step: int = 2,
+                                               data_placeholders: dict = None) -> None:
         """
         Resolve string operand placeholders in a section of the story file.
 
@@ -381,25 +398,44 @@ class ZAssembler:
         if not string_placeholders or string_table is None or length == 0:
             return
 
-        # Scan for 0xFC00 | index patterns (16-bit values)
+        # Scan for 0xFC00 | index patterns (16-bit values).
+        #
+        # step=2 (globals table): slots are word-aligned from the even
+        # start_offset, so a 0xFC00|idx marker's high byte is always at an EVEN
+        # position. Scanning word-aligned avoids matching a 0xFC that is merely
+        # the LOW byte of an already-resolved table address (P-OTBL legitimately
+        # resolved to 0x20FC; a byte-blind scan misread it as a placeholder and
+        # clobbered P-VTBL to 0xF010 -> "Store out of dynamic memory").
+        #
+        # step=1 (table data): tables of mixed byte/word layout make region-wide
+        # word alignment meaningless, so scan byte-by-byte there and skip past
+        # both bytes of each patched marker.
         end_offset = min(start_offset + length, len(story) - 1)
+        data_ph = data_placeholders or {}
         i = start_offset
         while i < end_offset:
-            # Check for 0xFC high byte
-            if story[i] == 0xFC:
-                placeholder_idx = story[i + 1]
-                if placeholder_idx in string_placeholders:
-                    text = string_placeholders[placeholder_idx]
-                    # Get packed address from string table
-                    packed_addr = string_table.get_packed_address(text, self.version)
-                    if packed_addr is not None:
-                        # Patch the 16-bit address
-                        story[i] = (packed_addr >> 8) & 0xFF
-                        story[i + 1] = packed_addr & 0xFF
-            i += 1
+            hi = story[i]
+            text = None
+            # Code-namespace marker (0xFC00|idx) or data-namespace marker
+            # (0xF400|id, high bytes 0xF4-0xF7 carrying the id's top 2 bits).
+            # The data band is only matched in WORD-ALIGNED regions (globals):
+            # a byte-stepped scan over table data rewrote packed routine
+            # addresses whose LOW byte was 0xF4-0xF7 (ACTIONS[V?PRAY]=0x46F4).
+            if hi == 0xFC:
+                text = string_placeholders.get(story[i + 1])
+            elif 0xF4 <= hi <= 0xF7 and step == 2:
+                text = data_ph.get(((hi & 0x03) << 8) | story[i + 1])
+            if text is not None:
+                packed_addr = string_table.get_packed_address(text, self.version)
+                if packed_addr is not None:
+                    story[i] = (packed_addr >> 8) & 0xFF
+                    story[i + 1] = packed_addr & 0xFF
+                    i += 2
+                    continue
+            i += step
 
     def _resolve_vocab_placeholders(self, routines: bytes, vocab_fixups: list,
-                                       dict_addr: int) -> bytes:
+                                       dict_addr: int, protected_positions: set = None) -> bytes:
         """
         Resolve vocabulary word placeholders (W?*) in routine bytecode.
 
@@ -410,6 +446,12 @@ class ZAssembler:
             routines: Routine bytecode with vocab placeholders
             vocab_fixups: List of (placeholder_idx, word_offset) tuples
             dict_addr: Base address of dictionary in story file
+            protected_positions: Byte offsets already resolved as routine-call
+                operands. This scan is position-BLIND, so a routine whose packed
+                address happens to contain 0xFB (e.g. LIT? at packed 0x39FB) would
+                otherwise have that byte misread as a vocab placeholder and
+                clobbered, silently redirecting every call to it. Skipping the
+                bytes routine fixups already wrote prevents that collision.
 
         Returns:
             Patched routine bytecode
@@ -418,6 +460,7 @@ class ZAssembler:
             return routines
 
         result = bytearray(routines)
+        protected = protected_positions or set()
 
         # Build a map from placeholder_idx to word address
         fixup_map = {}
@@ -431,7 +474,7 @@ class ZAssembler:
         i = 0
         while i < len(result) - 1:
             # Check for 0xFB high byte
-            if result[i] == 0xFB:
+            if result[i] == 0xFB and i not in protected:
                 placeholder_idx = result[i + 1]
                 if placeholder_idx in fixup_map:
                     word_addr = fixup_map[placeholder_idx]
@@ -443,7 +486,8 @@ class ZAssembler:
         return bytes(result)
 
     def _resolve_vword_placeholders(self, routines: bytes, vword_fixups: list,
-                                     table_base_addr: int, table_offsets: dict) -> bytes:
+                                     table_base_addr: int, table_offsets: dict,
+                                     protected_positions: set = None) -> bytes:
         """
         Resolve VWORD table placeholders (W?*) in routine bytecode.
 
@@ -463,6 +507,7 @@ class ZAssembler:
             return routines
 
         result = bytearray(routines)
+        protected = protected_positions or set()
 
         # Build a map from placeholder_idx to VWORD table address
         fixup_map = {}
@@ -471,11 +516,12 @@ class ZAssembler:
                 table_addr = table_base_addr + table_offsets[table_index]
                 fixup_map[placeholder_idx] = table_addr
 
-        # Scan for 0xFB00 | index patterns (16-bit values)
+        # Scan for 0xFB00 | index patterns (16-bit values). Skip bytes already
+        # written as routine-call operands (see _resolve_vocab_placeholders).
         i = 0
         while i < len(result) - 1:
             # Check for 0xFB high byte
-            if result[i] == 0xFB:
+            if result[i] == 0xFB and i not in protected:
                 placeholder_idx = result[i + 1]
                 if placeholder_idx in fixup_map:
                     table_addr = fixup_map[placeholder_idx]
@@ -598,7 +644,11 @@ class ZAssembler:
             word_addr = dict_addr + word_offset
             fixup_map[placeholder_idx] = word_addr
 
-        # Scan for 0xFB00 | index patterns (16-bit values)
+        # Scan for 0xFB00 | index patterns. WORD-ALIGNED: the globals region is
+        # 2-byte slots, and a byte-blind scan matched the LOW byte of an
+        # already-resolved table address (OOPS-INBUF's 0x1FFB) and rewrote it to
+        # a dictionary address, shrinking the OOPS buffer pointer so the input
+        # buffer copy overran into P-INBUF and every 2nd command read empty.
         end_offset = min(start_offset + length, len(story) - 1)
         i = start_offset
         while i < end_offset:
@@ -608,7 +658,7 @@ class ZAssembler:
                     word_addr = fixup_map[placeholder_idx]
                     story[i] = (word_addr >> 8) & 0xFF
                     story[i + 1] = word_addr & 0xFF
-            i += 1
+            i += 2
 
     def _resolve_vword_placeholders_in_story(self, story: bytearray,
                                               vword_fixups: list,
@@ -654,7 +704,8 @@ class ZAssembler:
 
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
                                      prop_defaults_size: int,
-                                     vocab_fixups: list = None) -> bytes:
+                                     vocab_fixups: list = None,
+                                     dir_prop_min: int = None) -> bytes:
         """
         Resolve dictionary word placeholders in object property tables.
 
@@ -730,6 +781,14 @@ class ZAssembler:
 
                 # Scan property DATA for placeholders (aligned to 2-byte boundaries)
                 prop_end = i + data_len
+                # Direction (exit) properties hold raw room/object/flag bytes, not
+                # dict-word placeholders. A CEXIT like [room=0x8n, flag#] forms a
+                # word that LOOKS like a 0x8000|offset SYNONYM marker and would be
+                # rewritten to a dictionary address, corrupting the exit. Skip them.
+                if (dir_prop_min is not None and self.version <= 3
+                        and (size_byte & 0x1F) >= dir_prop_min):
+                    i = prop_end
+                    continue
                 j = i
                 while j + 1 < prop_end and j + 1 < len(result):
                     word = (result[j] << 8) | result[j + 1]
@@ -767,6 +826,91 @@ class ZAssembler:
                 i += 1
 
         return bytes(result)
+
+    def _resolve_string_placeholders_in_properties(self, story: bytearray,
+                                                    objects_addr: int,
+                                                    objects_len: int,
+                                                    prop_defaults_size: int,
+                                                    string_placeholders: dict,
+                                                    string_table,
+                                                    data_placeholders: dict = None) -> None:
+        """Resolve 0xFC00|idx string markers inside object PROPERTY data.
+
+        Classic direction exits (NEXIT/CEXIT/DEXIT) embed the packed address of
+        their refusal message in the property; the marker can only be resolved
+        after the string table is placed, so this walks the property tables in
+        the assembled story (addresses already absolute) and patches in place.
+        """
+        if not string_placeholders or string_table is None:
+            return
+
+        data_ph = data_placeholders or {}
+
+        def patch(j):
+            hi = story[j]
+            if hi == 0xFC:
+                text = string_placeholders.get(story[j + 1])
+            elif 0xF4 <= hi <= 0xF7:
+                text = data_ph.get(((hi & 0x03) << 8) | story[j + 1])
+            else:
+                return None
+            if text is None:
+                return None
+            return string_table.get_packed_address(text, self.version)
+
+        self._walk_property_data(story, objects_addr, objects_len,
+                                 prop_defaults_size, patch)
+
+    def _walk_property_data(self, story: bytearray, objects_addr: int,
+                            objects_len: int, prop_defaults_size: int,
+                            patch_fn) -> None:
+        """Walk every object's property DATA (never names, entries, or defaults)
+        and let patch_fn replace 16-bit marker words.
+
+        patch_fn(j) inspects story[j], story[j+1] (a word-aligned position within
+        one property's data) and returns a 16-bit value to write there, or None.
+        Walking per-object via each entry's own table pointer is the ONLY safe
+        iteration: sequential region scans desync on layout and byte-blind scans
+        rewrite entry pointers / name z-text whose bytes look like markers.
+        """
+        obj_entry_size = 9 if self.version <= 3 else 14
+        region_end = min(objects_addr + objects_len, len(story))
+        entries_base = objects_addr + prop_defaults_size
+        first_prop = entries_base + obj_entry_size - 2
+        if first_prop + 2 > len(story):
+            return
+        lowest_table = (story[first_prop] << 8) | story[first_prop + 1]
+        num_objects = max(0, (lowest_table - entries_base) // obj_entry_size)
+        # Clamp: with no real objects the "first property pointer" is garbage.
+        num_objects = min(num_objects, max(0, (region_end - entries_base) // obj_entry_size))
+        for n in range(num_objects):
+            pptr = entries_base + n * obj_entry_size + obj_entry_size - 2
+            if pptr + 1 >= len(story):
+                break
+            i = (story[pptr] << 8) | story[pptr + 1]
+            if not (objects_addr < i < region_end):
+                continue
+            name_len = story[i]
+            i += 1 + name_len * 2
+            while i < region_end and story[i] != 0x00:
+                size_byte = story[i]
+                i += 1
+                if self.version <= 3:
+                    data_len = (size_byte >> 5) + 1
+                else:
+                    if size_byte & 0x80:
+                        data_len = story[i] & 0x3F or 64
+                        i += 1
+                    else:
+                        data_len = 2 if (size_byte & 0x40) else 1
+                j = i
+                while j + 1 < i + data_len and j + 1 < region_end:
+                    val = patch_fn(j)
+                    if val is not None:
+                        story[j] = (val >> 8) & 0xFF
+                        story[j + 1] = val & 0xFF
+                    j += 2
+                i += data_len
 
     def _resolve_property_routine_placeholders(self, objects_data: bytes,
                                                 property_routine_fixups: list,
@@ -991,7 +1135,11 @@ class ZAssembler:
                         tell_placeholder_positions: list = None,
                         vocab_fixups: list = None,
                         vword_fixups: list = None,
-                        tchars_table_idx: int = None) -> bytes:
+                        tchars_table_idx: int = None,
+                        dir_prop_min: int = None,
+                        string_code_index_max: int = None,
+                        string_data_placeholders: dict = None,
+                        table_string_fixups: list = None) -> bytes:
         """
         Build complete story file.
 
@@ -1182,7 +1330,8 @@ class ZAssembler:
             # Placeholders are marked with 0x8000 bit set (SYNONYM), 0xFE00 (ADJECTIVE),
             # or 0xFB00 (VOC from PROPDEF) - the low bits contain word offset or index
             objects_fixed = bytearray(self._resolve_dict_placeholders(
-                bytes(objects_fixed), dict_addr_calc, prop_defaults_size, vocab_fixups
+                bytes(objects_fixed), dict_addr_calc, prop_defaults_size, vocab_fixups,
+                dir_prop_min
             ))
 
             # Resolve table address placeholders (0xFD00 | table_idx) in property values
@@ -1472,18 +1621,16 @@ class ZAssembler:
 
                 fixup_map[placeholder_idx] = packed_addr
 
-            # Scan object data section in story for 0xFA placeholders
-            obj_len = len(objects)
-            obj_end = objects_addr + obj_len
-            i = objects_addr
-            while i < obj_end - 1:
-                if story[i] == 0xFA:
-                    placeholder_idx = story[i + 1]
-                    if placeholder_idx in fixup_map:
-                        packed_addr = fixup_map[placeholder_idx]
-                        story[i] = (packed_addr >> 8) & 0xFF
-                        story[i + 1] = packed_addr & 0xFF
-                i += 1
+            # Patch 0xFA00|idx markers inside PROPERTY DATA only, by walking each
+            # object's property table. The old byte-blind scan covered the WHOLE
+            # objects region including the entry headers -- an object whose
+            # property-table pointer low byte happened to be 0xFA (minizork's
+            # CELLAR at 0x15FA) had its pointer rewritten to a routine address,
+            # so the room printed a garbage name and its neighbor's description.
+            self._walk_property_data(
+                story, objects_addr, len(objects), prop_defaults_size,
+                lambda j: (fixup_map.get(story[j + 1])
+                           if story[j] == 0xFA else None))
 
         # If string table is present, add string table after routines and resolve markers
         if string_table is not None:
@@ -1540,27 +1687,84 @@ class ZAssembler:
             # Resolve string operand placeholders (0xFC00 | index -> packed address)
             if string_placeholders:
                 routines = self._resolve_string_placeholders(
-                    routines, string_placeholders, string_table
+                    routines, string_placeholders, string_table,
+                    string_code_index_max
                 )
 
-            # Also resolve string placeholders in table data (for LONG-WORD-TABLE)
-            if string_placeholders and table_data_len > 0:
+            # Also resolve string placeholders in table data (LONG-WORD-TABLE,
+            # string elements of global tables like INDENTS). Byte-stepped: table
+            # data has mixed byte/word layouts.
+            if (string_placeholders or string_data_placeholders) and table_data_len > 0:
                 self._resolve_string_placeholders_in_story(
-                    story, string_placeholders, string_table,
-                    table_data_start, table_data_len
+                    story, string_placeholders or {}, string_table,
+                    table_data_start, table_data_len, step=1,
+                    data_placeholders=string_data_placeholders
+                )
+
+            # Point-wise data-string markers inside tables (positions recorded at
+            # encode time -- scanning can't distinguish a marker from a packed
+            # routine address with an 0xF4-0xF7 low byte).
+            if table_string_fixups and string_data_placeholders and table_offsets:
+                for _tidx, _off in table_string_fixups:
+                    if _tidx not in table_offsets:
+                        continue
+                    toff = table_offsets[_tidx] + _off
+                    if toff < impure_tables_size:
+                        pos = impure_story_start + toff
+                    else:
+                        pos = pure_story_start + (toff - impure_tables_size)
+                    if pos + 1 >= len(story):
+                        continue
+                    w = (story[pos] << 8) | story[pos + 1]
+                    if 0xF400 <= w <= 0xF7FF:
+                        text = string_data_placeholders.get(w & 0x3FF)
+                        if text is not None:
+                            paddr = string_table.get_packed_address(text, self.version)
+                            if paddr is not None:
+                                story[pos] = (paddr >> 8) & 0xFF
+                                story[pos + 1] = paddr & 0xFF
+
+            # Also resolve string placeholders in the globals table: a global
+            # initialized to a string constant (<GLOBAL X "text">) holds a 0xFC00|idx
+            # placeholder that must become the packed string address.
+            if (string_placeholders or string_data_placeholders) and globals_len > 0:
+                self._resolve_string_placeholders_in_story(
+                    story, string_placeholders or {}, string_table,
+                    globals_addr, globals_len,
+                    data_placeholders=string_data_placeholders
+                )
+
+            # And in object property data: classic direction exits (NEXIT/CEXIT/
+            # DEXIT) embed their refusal-message string address in the property.
+            if (string_placeholders or string_data_placeholders) and objects:
+                self._resolve_string_placeholders_in_properties(
+                    story, objects_addr, len(objects), prop_defaults_size,
+                    string_placeholders or {}, string_table,
+                    data_placeholders=string_data_placeholders
                 )
 
         # Resolve routine call fixups (patch call addresses)
+        # Remember which byte positions now hold routine packed addresses -- the
+        # position-blind vocab/vword scanners below must not touch them, or a
+        # routine address containing 0xFB (a legal low byte, e.g. LIT? at 0x39FB)
+        # gets misread as a W?* placeholder and every call to it is silently
+        # redirected. Both bytes of each 2-byte operand are protected.
+        protected_positions = set()
         if routine_fixups:
             routines = self._resolve_routine_fixups(routines, routine_fixups)
+            for code_offset, _routine_offset in routine_fixups:
+                protected_positions.add(code_offset)
+                protected_positions.add(code_offset + 1)
 
         # Resolve vocabulary word placeholders (W?* -> dictionary addresses)
         if vocab_fixups:
-            routines = self._resolve_vocab_placeholders(routines, vocab_fixups, dict_addr)
+            routines = self._resolve_vocab_placeholders(routines, vocab_fixups, dict_addr,
+                                                        protected_positions)
 
         # Resolve VWORD table placeholders (NEW-PARSER? mode: W?* -> table addresses)
         if vword_fixups and table_offsets:
-            routines = self._resolve_vword_placeholders(routines, vword_fixups, table_base_addr, table_offsets)
+            routines = self._resolve_vword_placeholders(routines, vword_fixups, table_base_addr,
+                                                       table_offsets, protected_positions)
 
         # Add routines
         story.extend(routines)

@@ -147,6 +147,16 @@ class Dictionary:
             self.word_types[word_lower] = set()
         self.word_types[word_lower].add('direction')
         self.word_objects[word_lower] = prop_num
+        # A word can be BOTH a direction and an adjective/synonym of an object
+        # (minizork: WEST is a direction AND an object adjective in
+        # `(ADJECTIVE WOODEN GOTHIC STRANGE WEST)`). Those registrations share
+        # word_objects and the last write wins, clobbering the direction property
+        # number -- byte 5 then held the adjective id, so <WT? WRD PS?DIRECTION>
+        # returned garbage and westward movement failed. Keep the direction value
+        # separately; it is DirectionFirst, so it owns byte 5.
+        if not hasattr(self, 'direction_values'):
+            self.direction_values = {}
+        self.direction_values[word_lower] = prop_num
 
     def add_preposition(self, word: str, prep_number: int):
         """Add a preposition word with its preposition number (PR? value).
@@ -172,33 +182,48 @@ class Dictionary:
             The type byte with all applicable flags set
         """
         type_byte = 0
-        first_set = False
 
+        # Set every present part-of-speech flag.
+        has_noun = 'noun' in word_types or 'synonym' in word_types
+        has_verb = 'verb' in word_types
+        has_adj = 'adjective' in word_types or 'adj' in word_types
+        has_dir = 'direction' in word_types or 'dir' in word_types
+        if has_noun:
+            type_byte |= 0x80  # Object = 128
+        if has_verb:
+            type_byte |= 0x40  # Verb = 64
+        if has_adj:
+            type_byte |= 0x20  # Adjective = 32
+        if has_dir:
+            type_byte |= 0x10  # Direction = 16
         for word_type in word_types:
-            if word_type in ('noun', 'synonym'):
-                type_byte |= 0x80  # Object = 128
-            elif word_type == 'verb':
-                type_byte |= 0x40  # Verb = 64
-                if not first_set:
-                    type_byte |= 0x01  # VerbFirst = 1
-                    first_set = True
-            elif word_type in ('adjective', 'adj'):
-                type_byte |= 0x20  # Adjective = 32
-                if not first_set:
-                    type_byte |= 0x02  # AdjectiveFirst = 2
-                    first_set = True
-            elif word_type in ('direction', 'dir'):
-                type_byte |= 0x10  # Direction = 16
-                if not first_set:
-                    type_byte |= 0x03  # DirectionFirst = 3
-                    first_set = True
-            elif word_type in ('preposition', 'prep'):
+            if word_type in ('preposition', 'prep'):
                 type_byte |= 0x08  # Preposition = 8
             elif word_type == 'buzz':
                 type_byte |= 0x04  # Buzzword = 4
-            elif word_type != 'unknown':
+            elif word_type not in ('unknown', 'noun', 'synonym', 'verb',
+                                    'adjective', 'adj', 'direction', 'dir'):
                 print(f"[dictionary] Warning: Unrecognized word type '{word_type}' - using no flags",
                       file=sys.stderr)
+
+        # The "first" (primary) flag in bits 0-1 decides which value the parser
+        # reads from byte 5 (P1) vs byte 6 (P2). It MUST be deterministic and match
+        # the byte-5 two-slot encoding in build(): preposition (P1 code 0) >
+        # direction (3) > verb (1) > adjective (2) > object (0). Official Infocom
+        # dicts confirm: "in" (dir+prep) is prep-first with P?IN in byte 6;
+        # "west" (dir+adj) is DirectionFirst with the adjective id in byte 6.
+        # (Iterating the word_types SET previously picked a hash-order-dependent
+        # primary, so WEST sometimes encoded AdjectiveFirst and westward movement
+        # silently failed.)
+        has_prep = 'preposition' in word_types or 'prep' in word_types
+        if has_prep:
+            pass  # PrepositionFirst shares P1 code 0 -- low bits stay 0
+        elif has_dir:
+            type_byte |= 0x03  # DirectionFirst = 3
+        elif has_verb:
+            type_byte |= 0x01  # VerbFirst = 1
+        elif has_adj:
+            type_byte |= 0x02  # AdjectiveFirst = 2
 
         return type_byte
 
@@ -350,18 +375,57 @@ class Dictionary:
                 type_byte = self._compute_type_byte(word_types)
                 result.append(type_byte)
 
-                # Bytes 2-3: parser info
+                # Bytes 2-3 (dict bytes 5-6): the classic TWO-SLOT value scheme.
+                # A word can carry values for several parts of speech at once; byte 5
+                # holds the value of the "first" PoS (whose P1? code is stored in the
+                # type byte's low 2 bits) and byte 6 holds the value of ONE other PoS.
+                # WT? (parser.zil) reads byte 5 when the requested P1? code equals the
+                # first-code, byte 6 otherwise. The old single-value encoding dropped
+                # the second value: "in" (direction+preposition) had its PR?IN lost,
+                # so <PUT X IN Y> died with [You used the word "in" in a way...], and
+                # official builds confirm the scheme (minizork.z3 "in": b5=prep,
+                # b6=P?IN; "west": b5=P?WEST, b6=adjective; "light": obj + verb).
+                #
+                # First-slot priority (must match _compute_type_byte): preposition
+                # (P1 code 0) > direction (3) > verb (1) > adjective (2) > object (0).
+                dvals = getattr(self, 'direction_values', {})
+                dir_val = None
                 if 'direction' in word_types or 'dir' in word_types:
-                    result.append(obj_num & 0xFF)
-                    result.append(0)
-                elif 'verb' in word_types and verb_num > 0:
-                    result.append(verb_num & 0xFF)
-                    result.append(0)
-                elif ('preposition' in word_types or 'prep' in word_types) and prep_num > 0:
-                    result.append(prep_num & 0xFF)
-                    result.append(0)
-                else:
-                    result.extend(struct.pack('>H', obj_num & 0xFFFF))
+                    dir_val = obj_num
+                    for w in encoded_words:
+                        if w in dvals:
+                            dir_val = dvals[w]
+                            break
+                has_prep = ('preposition' in word_types or 'prep' in word_types) and prep_num > 0
+                has_verb = 'verb' in word_types and verb_num > 0
+                has_adj = 'adjective' in word_types or 'adj' in word_types
+                has_obj = 'noun' in word_types or 'synonym' in word_types
+                # (slot-kind, value) in first-slot priority order; adj and obj share
+                # the word_objects value (obj_num).
+                slots = []
+                if has_prep:
+                    slots.append(('prep', prep_num))
+                if dir_val is not None:
+                    slots.append(('dir', dir_val))
+                if has_verb:
+                    slots.append(('verb', verb_num))
+                if has_adj or has_obj:
+                    slots.append(('objadj', obj_num))
+                if not slots:
+                    slots.append(('objadj', obj_num))
+                first = slots[0]
+                # Second slot: highest-priority OTHER value, preferring
+                # dir > verb > adj/obj (matches what the official dicts keep).
+                second_val = 0
+                for kind in ('dir', 'verb', 'objadj', 'prep'):
+                    for k, v in slots[1:]:
+                        if k == kind:
+                            second_val = v
+                            break
+                    if second_val:
+                        break
+                result.append(first[1] & 0xFF)
+                result.append(second_val & 0xFF)
 
         return bytes(result)
 

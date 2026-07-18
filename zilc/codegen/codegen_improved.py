@@ -184,6 +184,36 @@ class ImprovedCodeGenerator:
         self._string_operand_placeholders: Dict[int, str] = {}
         self._next_string_operand_index = 0
         self._max_string_operand_index = 255
+        # DATA-region string markers (globals-init / table elements / object
+        # properties) allocate DESCENDING from 255 so the ROUTINE-code namespace
+        # stays a small ascending prefix. The assembler's position-blind scan over
+        # routine bytecode then only accepts indices below the code boundary --
+        # with one shared 0..255 space, a backward JUMP offset like 0xFC9D matched
+        # a (data) marker and was rewritten to a string address, teleporting the
+        # parser into the object table.
+        # Data namespace v2: ids 0..1023 mapped to markers 0xF400|id (high bytes
+        # 0xF4-0xF7). 256 shared slots overflowed on zork1 (~400 unique
+        # property/exit strings). The 0xF4-0xF7 band collides with no other
+        # placeholder family (routines 0xF0xx < 0xF400 asserted at allocation,
+        # VOCAB 0xFA, vocab words 0xFB, code strings 0xFC, tables 0xFD/0xFF,
+        # dict words 0x8xxx/0xFE).
+        self._string_data_placeholders = {}
+        self._string_data_to_placeholder = {}
+        self._next_string_data_index = 0
+        # Exact positions of data-string markers inside compiled tables:
+        # list of (table_idx, byte_offset). The 0xF4-0xF7 markers CANNOT be
+        # found by scanning table data (a packed routine address like V-PRAY's
+        # 0x46F4 contains the same bytes and got rewritten), so positions are
+        # recorded at encode time and resolved point-wise.
+        self._table_string_fixups = []
+        self._encode_string_marker_offsets = []
+        # Exact positions of ROUTINE placeholders inside compiled tables:
+        # (table_idx, byte_offset). get_table_routine_fixups used to word-scan
+        # ALL table data for 0xF0xx values -- a classic syntax entry's
+        # [loc=0xF0][action] byte pair matched and the scanner overwrote it with
+        # a routine address, wrecking OPEN/TAKE scope flags.
+        self._table_routine_marker_offsets = []
+        self._encode_routine_marker_offsets = []
         self._string_operand_to_placeholder: Dict[str, int] = {}
 
         # Legacy alias for backward compatibility with assembler
@@ -475,6 +505,8 @@ class ImprovedCodeGenerator:
         self._routine_placeholders[placeholder_val] = routine_name
         self._routine_to_placeholder[routine_name] = placeholder_val
         self._next_placeholder_value += 1
+        assert self._next_placeholder_value <= 0xF400, \
+            'routine placeholders overflow into the data-string band'
         return placeholder_val
 
     def _is_routine_placeholder(self, value: int) -> bool:
@@ -658,6 +690,14 @@ class ImprovedCodeGenerator:
                             # <VOC "word" pos> - vocabulary word reference
                             voc_val = self._handle_voc_form(global_node.initial_value)
                             self.global_values[global_node.name] = voc_val
+                elif isinstance(global_node.initial_value, StringNode):
+                    # <GLOBAL X "string"> -- the global holds the PACKED address of the
+                    # string. Register the string and store a 0xFC00|idx placeholder that
+                    # the assembler resolves to the packed string address (same mechanism
+                    # as string-valued CONSTANTs). Without this the global stays 0 and any
+                    # <TELL ,X> prints from address 0 (garbage).
+                    text = global_node.initial_value.value
+                    self.global_values[global_node.name] = self.register_data_string(text)
                 elif isinstance(global_node.initial_value, GlobalVarNode):
                     # Reference to another global - copy its initial value
                     # (could be scalar or table reference marker like 0xFF00 | idx)
@@ -1064,8 +1104,12 @@ class ImprovedCodeGenerator:
                     table_data.extend(struct.pack('>H', 0))
         else:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
+            self._encode_string_marker_offsets = []
+            self._encode_routine_marker_offsets = []
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
+            _str_marker_offs = list(self._encode_string_marker_offsets)
+            _rtn_marker_offs = list(self._encode_routine_marker_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1075,7 +1119,10 @@ class ImprovedCodeGenerator:
                         f"TABLE size {data_len} overflows byte length prefix (max 255)"
                     )
                 table_data.append(min(data_len, 255))
+            _prefix = len(table_data)
             table_data.extend(encoded_data)
+            _pending_marker_offs = [_prefix + o for o in _str_marker_offs]
+            _pending_rtn_offs = [_prefix + o for o in _rtn_marker_offs]
 
         # Store the table
         table_idx = len(self.tables)
@@ -1083,6 +1130,10 @@ class ImprovedCodeGenerator:
         self._table_data_size += len(table_data)
         self.table_counter += 1
         self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
+        for _o in locals().get('_pending_marker_offs') or []:
+            self._table_string_fixups.append((table_idx, _o))
+        for _o in locals().get('_pending_rtn_offs') or []:
+            self._table_routine_marker_offsets.append((table_idx, _o))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = 0xFF00 | table_idx
@@ -1257,8 +1308,12 @@ class ImprovedCodeGenerator:
                     table_data.extend(struct.pack('>H', 0))
         else:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
+            self._encode_string_marker_offsets = []
+            self._encode_routine_marker_offsets = []
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
+            _str_marker_offs = list(self._encode_string_marker_offsets)
+            _rtn_marker_offs = list(self._encode_routine_marker_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1268,7 +1323,10 @@ class ImprovedCodeGenerator:
                         f"TABLE size {data_len} overflows byte length prefix (max 255)"
                     )
                 table_data.append(min(data_len, 255))
+            _prefix = len(table_data)
             table_data.extend(encoded_data)
+            _pending_marker_offs = [_prefix + o for o in _str_marker_offs]
+            _pending_rtn_offs = [_prefix + o for o in _rtn_marker_offs]
 
         # Legacy padding for ITABLE - shouldn't be needed with new logic
         if False and initial_size and table_type == 'ITABLE':
@@ -1285,6 +1343,10 @@ class ImprovedCodeGenerator:
         self._table_data_size += len(table_data)
         self.table_counter += 1
         self.tables.append((f"_GLOBAL_{global_name}", bytes(table_data), is_pure, is_parser_table))
+        for _o in locals().get('_pending_marker_offs') or []:
+            self._table_string_fixups.append((table_idx, _o))
+        for _o in locals().get('_pending_rtn_offs') or []:
+            self._table_routine_marker_offsets.append((table_idx, _o))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = 0xFF00 | table_idx
@@ -1726,11 +1788,13 @@ class ImprovedCodeGenerator:
             table_data = bytearray()
             table_data.extend([0x00, 0x00])  # Entry 0 is reserved (no action)
 
+            _marker_offs = []
             for action_num in range(1, max_action + 1):
                 routine_name = action_num_to_routine.get(action_num)
                 if routine_name and routine_name in self.routines:
                     # Get placeholder value (16-bit, reused for same routine)
                     placeholder_val = self._get_routine_placeholder(routine_name)
+                    _marker_offs.append(len(table_data))
                     table_data.append((placeholder_val >> 8) & 0xFF)  # High byte
                     table_data.append(placeholder_val & 0xFF)          # Low byte
                 else:
@@ -1741,6 +1805,8 @@ class ImprovedCodeGenerator:
             table_index = len(self.tables)
             self.table_offsets[table_index] = self._table_data_size
             self._table_data_size += len(table_data)
+            for _o in _marker_offs:
+                self._table_routine_marker_offsets.append((table_index, _o))
 
             # Store table
             table_name = f'_ACTIONS_TABLE_{self.table_counter}'
@@ -1800,6 +1866,12 @@ class ImprovedCodeGenerator:
             table_index = len(self.tables)
             self.table_offsets[table_index] = self._table_data_size
             self._table_data_size += len(table_data)
+            # Record routine-placeholder positions (scoped scan: inside THIS
+            # table the only 0xF0xx words ARE placeholders).
+            for _o in range(0, len(table_data) - 1, 2):
+                _w = (table_data[_o] << 8) | table_data[_o + 1]
+                if _w in self._routine_placeholders:
+                    self._table_routine_marker_offsets.append((table_index, _o))
 
             # Store table
             table_name = f'_PREACTIONS_TABLE_{self.table_counter}'
@@ -1874,10 +1946,147 @@ class ImprovedCodeGenerator:
         self._generate_verbs_table()
 
     def _generate_verbs_table(self):
-        """Generate VERBS table with syntax entries for each action.
+        """Emit the VERBS table in the dialect the game's parser expects.
 
-        The VERBS table is indexed by (255 - action_num) and points to
-        syntax entry structures. Each syntax entry has options byte at offset 6.
+        Classic MDL Infocom games (minizork, zork1, ...) ship a parser.zil that
+        reads the compact syntax table; ZILF-library and toy games read the older
+        byte-6 "options" layout. We detect the classic dialect by the presence of a
+        SYNTAX-CHECK routine (only the classic parser defines one).
+        """
+        if hasattr(self, '_routine_names') and 'SYNTAX-CHECK' in self._routine_names:
+            self._generate_verbs_table_classic()
+        else:
+            self._generate_verbs_table_zilf()
+
+    def _generate_verbs_table_classic(self):
+        """Generate VERBS as the Infocom compact syntax table.
+
+        SYNTAX-CHECK reads: VERB (the per-verb dictionary number stored in
+        P-ITBL) -> SYN = <GET ,VERBS <- 255 .VERB>> (a POINTER to that verb's
+        syntax structure) -> LEN = <GETB SYN 0> (number of syntax lines) ->
+        <REST SYN> to the first line. Each line is a compact record:
+
+            byte P-SPREP1 (0): (num_objects << 6) | (prep1 & 63)
+            byte P-SACTION (1): action number (becomes PRSA)
+            if num_objects >= 1:
+              byte P-SFWIM1 (2): fwim1 (GWIM FIND attribute number)
+              byte P-SLOC1  (3): loc1  (SNARF search-scope bitmask)
+            if num_objects == 2:
+              byte P-SPREP2 (4): prep2
+              byte P-SFWIM2 (5): fwim2
+              byte P-SLOC2  (6): loc2
+
+        Record lengths are 2 / 4 / 7 bytes (P-SYNLEN-0/1/2). VERBS itself is a
+        256-entry word array of pointers indexed by (255 - verb_number); the
+        dictionary stores that same verb_number in byte 5, so <GET ,VERBS
+        <- 255 <verb byte5>>> lands on the verb's structure.
+        """
+        if not self.action_table or 'syntax_entries' not in self.action_table:
+            return
+
+        syntax_entries = self.action_table['syntax_entries']
+        if not syntax_entries:
+            return
+
+        verb_numbers = self.action_table.get('verb_numbers', {})
+
+        # Reserve VERBS global
+        if 'VERBS' not in self.globals:
+            self.globals['VERBS'] = self.next_global
+            self.next_global += 1
+
+        # Search-scope bit values, from parser.zil (SH..SHAVE). The loc byte is a
+        # bitmask of where SNARF-OBJECTS looks for the object.
+        SCOPE_BITS = {
+            'HELD': 128, 'CARRIED': 64, 'IN-ROOM': 32, 'ON-GROUND': 16,
+            'TAKE': 8, 'MANY': 4, 'HAVE': 2,
+        }
+
+        def encode_obj(flags):
+            """Return (fwim, loc) bytes for one object's SYNTAX flag list.
+
+            'FIND <attr>' sets fwim to the attribute (flag) number GWIM should
+            look for; scope words OR into the loc bitmask.
+            """
+            fwim = 0
+            loc = 0
+            flist = list(flags or [])
+            i = 0
+            while i < len(flist):
+                f = str(flist[i]).upper()
+                if f == 'FIND' and i + 1 < len(flist):
+                    fwim = self.constants.get(str(flist[i + 1]).upper(), 0)
+                    i += 2
+                    continue
+                if f in SCOPE_BITS:
+                    loc |= SCOPE_BITS[f]
+                i += 1
+            return fwim & 0xFF, loc & 0xFF
+
+        # Group every SYNTAX line under its verb word.
+        verb_to_lines = {}
+        for entry in syntax_entries:
+            verb_to_lines.setdefault(entry['verb'], []).append(entry)
+
+        # Build one compact syntax structure per verb.
+        verbnum_to_table_index = {}  # verb_number -> table index of its structure
+        for verb, lines in verb_to_lines.items():
+            vnum = verb_numbers.get(verb)
+            if vnum is None:
+                continue
+
+            struct = bytearray()
+            struct.append(len(lines) & 0xFF)  # byte 0: number of syntax lines
+
+            for line in lines:
+                nobj = int(line.get('num_objects', 0) or 0)
+                prep1 = int(line.get('prep1', 0) or 0)
+                prep2 = int(line.get('prep2', 0) or 0)
+                action = int(line.get('action_num', 0) or 0)
+                oflags = line.get('object_flags', []) or []
+
+                struct.append(((nobj & 0x3) << 6) | (prep1 & 0x3F))  # P-SPREP1
+                struct.append(action & 0xFF)                          # P-SACTION
+                if nobj >= 1:
+                    fwim1, loc1 = encode_obj(oflags[0] if len(oflags) > 0 else [])
+                    struct.append(fwim1)                              # P-SFWIM1
+                    struct.append(loc1)                               # P-SLOC1
+                if nobj >= 2:
+                    fwim2, loc2 = encode_obj(oflags[1] if len(oflags) > 1 else [])
+                    struct.append(prep2 & 0xFF)                       # P-SPREP2
+                    struct.append(fwim2)                              # P-SFWIM2
+                    struct.append(loc2)                               # P-SLOC2
+
+            table_index = len(self.tables)
+            self.table_offsets[table_index] = self._table_data_size
+            self._table_data_size += len(struct)
+            self.tables.append((f'_SYNTAX_ENTRY_{verb}', bytes(struct), True, False))
+            verbnum_to_table_index[vnum] = table_index
+
+        # VERBS: 256-entry word array of pointers, indexed by (255 - verb_number).
+        verbs_data = bytearray()
+        for i in range(256):
+            vnum = 255 - i
+            if vnum in verbnum_to_table_index:
+                placeholder = 0xFF00 | verbnum_to_table_index[vnum]
+                verbs_data.append((placeholder >> 8) & 0xFF)
+                verbs_data.append(placeholder & 0xFF)
+            else:
+                verbs_data.extend([0x00, 0x00])
+
+        table_index = len(self.tables)
+        self.table_offsets[table_index] = self._table_data_size
+        self._table_data_size += len(verbs_data)
+        self.tables.append(("_VERBS", bytes(verbs_data), True, False))
+        self.global_values['VERBS'] = 0xFF00 | table_index
+
+    def _generate_verbs_table_zilf(self):
+        """Generate the ZILF-dialect VERBS table (byte-6 options, action-indexed).
+
+        The ZILF library and toy games read VERBS[255 - action_num] and pull the
+        search-scope options from byte 6 of an 8-byte entry. This is the original
+        zorkie layout; the classic MDL compact format lives in
+        _generate_verbs_table_classic.
         """
         if not self.action_table or 'syntax_entries' not in self.action_table:
             return
@@ -1899,7 +2108,6 @@ class ImprovedCodeGenerator:
         # Get constant values for NEW-SFLAGS lookups
         sflags_values = {}
         for flag_name, const_name in new_sflags.items():
-            # Look up constant value
             if const_name in self.constants:
                 sflags_values[flag_name] = self.constants[const_name]
 
@@ -1909,33 +2117,25 @@ class ImprovedCodeGenerator:
         SEARCH_MANY = 4
         SEARCH_STANDARD = 8
 
-        # Group syntax entries by action number
+        # Group syntax entries by the per-verb action number (ZILF indexes VERBS by
+        # the verb's own V?/ACT? constant, so verbs that share a routine still get
+        # distinct slots). Keep the first entry per action.
         action_to_entry = {}
         for entry in syntax_entries:
-            action_num = entry['action_num']
+            action_num = entry.get('verb_action_num') or entry['action_num']
             if action_num not in action_to_entry:
                 action_to_entry[action_num] = entry
-            # Keep first entry for each action
 
         if not action_to_entry:
             return
 
-        max_action = max(action_to_entry.keys())
-
         # Create individual syntax entry tables for each action
-        # Then create VERBS as a table of pointers
         entry_table_indices = {}  # action_num -> table_index
-
         for action_num in sorted(action_to_entry.keys()):
             entry = action_to_entry[action_num]
             object_flags = entry.get('object_flags', [])
 
-            # Build the syntax entry table
-            # Format: [word0, word1, word2, options_byte, ...]
-            # Byte 6 is the options byte (offset 6 from start)
             entry_data = bytearray()
-
-            # Words 0-2: verb pointer, obj1 flags, obj2 flags (6 bytes)
             entry_data.extend([0x00, 0x00])  # verb pointer (unused here)
             entry_data.extend([0x00, 0x00])  # obj1 flags
             entry_data.extend([0x00, 0x00])  # obj2 flags
@@ -1943,14 +2143,10 @@ class ImprovedCodeGenerator:
             # Byte 6: options byte - computed from scope flags
             options = 0
             has_new_sflag = False
-
-            # Get first object's flags (slot 1 options)
             slot1_flags = object_flags[0] if object_flags else []
-
             for flag in slot1_flags:
                 flag_upper = flag.upper()
                 if flag_upper in sflags_values:
-                    # NEW-SFLAGS custom flag
                     options |= sflags_values[flag_upper]
                     has_new_sflag = True
                 elif flag_upper == 'HAVE':
@@ -1959,50 +2155,32 @@ class ImprovedCodeGenerator:
                     options |= SEARCH_DO_TAKE
                 elif flag_upper == 'MANY':
                     options |= SEARCH_MANY
-
-            # If no NEW-SFLAGS custom flag was used, default is SEARCH-STANDARD
-            # But only if we have any flags at all
             if slot1_flags and not has_new_sflag:
                 options |= SEARCH_STANDARD
-
             entry_data.append(options & 0xFF)
+            entry_data.append(0x00)  # padding to 8 bytes
 
-            # Padding to make entry 8 bytes (common format)
-            entry_data.append(0x00)
-
-            # Register this entry table
             table_index = len(self.tables)
             self.table_offsets[table_index] = self._table_data_size
             self._table_data_size += len(entry_data)
-
-            table_name = f'_SYNTAX_ENTRY_{action_num}'
-            self.tables.append((table_name, bytes(entry_data), True, False))  # is_pure=True, is_parser_table=False
+            self.tables.append((f'_SYNTAX_ENTRY_{action_num}', bytes(entry_data), True, False))
             entry_table_indices[action_num] = table_index
 
-        # Now build VERBS table: array of pointers indexed by (255 - action_num)
-        # VERBS[255 - action_num] = pointer to syntax entry
+        # VERBS: array of pointers indexed by (255 - action_num)
         verbs_data = bytearray()
-
         for i in range(256):
             action_num = 255 - i
             if action_num in entry_table_indices:
-                # Use table placeholder format (0xFF00 | index)
-                table_idx = entry_table_indices[action_num]
-                placeholder = 0xFF00 | table_idx
+                placeholder = 0xFF00 | entry_table_indices[action_num]
                 verbs_data.append((placeholder >> 8) & 0xFF)
                 verbs_data.append(placeholder & 0xFF)
             else:
-                # No syntax entry for this action
                 verbs_data.extend([0x00, 0x00])
 
-        # Register VERBS table
         table_index = len(self.tables)
         self.table_offsets[table_index] = self._table_data_size
         self._table_data_size += len(verbs_data)
-
-        self.tables.append(("_VERBS", bytes(verbs_data), True, False))  # is_pure=True, is_parser_table=False
-
-        # Link VERBS global to the table
+        self.tables.append(("_VERBS", bytes(verbs_data), True, False))
         self.global_values['VERBS'] = 0xFF00 | table_index
 
     def generate_long_word_table(self, long_words: List[str]):
@@ -2087,10 +2265,25 @@ class ImprovedCodeGenerator:
         using high_mem_base and patch at byte_offset_in_code.
         """
         fixups = []
+        seen = set()
 
         # Use tracked placeholder positions
         for offset, placeholder_idx in self._placeholder_positions:
             if placeholder_idx in self._routine_placeholders:
+                # Validate that the two bytes at this position actually hold the
+                # placeholder value. A tracked routine-call fixup for a NESTED call
+                # can end up pointing a couple of bytes early (at the call's opcode
+                # instead of its address operand) while the backup scan also records
+                # the real position -- applying the stray one would overwrite a real
+                # instruction byte and derail execution. Only patch where the bytes
+                # are genuinely the placeholder, and de-dup identical positions.
+                if offset + 1 >= len(self.code):
+                    continue
+                if ((self.code[offset] << 8) | self.code[offset + 1]) != placeholder_idx:
+                    continue
+                if offset in seen:
+                    continue
+                seen.add(offset)
                 routine_name = self._routine_placeholders[placeholder_idx]
                 if routine_name in self.routines:
                     routine_offset = self.routines[routine_name]
@@ -2114,31 +2307,28 @@ class ImprovedCodeGenerator:
         The assembler should convert routine_byte_offset to packed address
         and patch the table data at byte_offset_in_tables.
         """
+        # Point-wise resolution from positions recorded at table-build time.
+        # The old word-aligned SCAN over all table data misread a classic syntax
+        # entry's [loc=0xF0][action] byte pair as a routine placeholder and
+        # overwrote it -- OPEN/TAKE lost their scope flags.
         fixups = []
         table_data = self.get_table_data()
-
-        # Scan table data for placeholder markers (16-bit values in 0xF000-0xFFFE range)
-        # Scan word-aligned (every 2 bytes) since placeholders are always full 16-bit values
-        # This prevents false matches from unaligned byte sequences like [00 F0 00 FE]
-        # where scanning at odd positions would see [F0 00] as 0xF000
-        i = 0
-        while i < len(table_data) - 1:
-            high_byte = table_data[i]
-            low_byte = table_data[i + 1]
-            # Check if this could be a routine placeholder (0xF0-0xFF high byte)
-            if high_byte >= 0xF0:
-                placeholder_val = (high_byte << 8) | low_byte
-                if placeholder_val in self._routine_placeholders:
-                    routine_name = self._routine_placeholders[placeholder_val]
-                    if routine_name in self.routines:
-                        routine_offset = self.routines[routine_name]
-                        fixups.append((i, routine_offset))
-                    else:
-                        # Missing routine - track it and use offset 0
-                        self._missing_routines.add(routine_name)
-                        fixups.append((i, 0))  # Will become 0x0000
-            i += 2  # Step by words, not bytes
-
+        for table_idx, off in self._table_routine_marker_offsets:
+            base = self.table_offsets.get(table_idx)
+            if base is None:
+                continue
+            i = base + off
+            if i + 1 >= len(table_data):
+                continue
+            placeholder_val = (table_data[i] << 8) | table_data[i + 1]
+            routine_name = self._routine_placeholders.get(placeholder_val)
+            if routine_name is None:
+                continue
+            if routine_name in self.routines:
+                fixups.append((i, self.routines[routine_name]))
+            else:
+                self._missing_routines.add(routine_name)
+                fixups.append((i, 0))
         return fixups
 
     def get_missing_routines(self) -> set:
@@ -2166,6 +2356,30 @@ class ImprovedCodeGenerator:
         The assembler should replace these with actual packed addresses.
         """
         return self._string_operand_placeholders.copy()
+
+    def register_data_string(self, text: str) -> int:
+        """Register a string referenced from DATA (global initializer, table
+        element, object property) and return its 0xF400|id marker (id 0..1023).
+
+        Separate from routine-code string operands (0xFC00|idx): the code
+        scanner is position-blind and must validate against a SMALL index set;
+        data regions are patched by position-aware resolvers that accept the
+        wide 0xF4-0xF7 band."""
+        if self.string_table is not None:
+            self.string_table.add_string(text)
+        if text in self._string_data_to_placeholder:
+            return 0xF400 | self._string_data_to_placeholder[text]
+        idx = self._next_string_data_index
+        if idx > 0x3FF:
+            raise ValueError("too many unique data strings (max 1024)")
+        self._string_data_placeholders[idx] = text
+        self._string_data_to_placeholder[text] = idx
+        self._next_string_data_index += 1
+        return 0xF400 | idx
+
+    def get_string_data_placeholders(self):
+        """Data-string markers: id (0..1023) -> text; marker word = 0xF400|id."""
+        return self._string_data_placeholders.copy()
 
     def get_tell_string_placeholders(self) -> Dict[int, str]:
         """Get TELL string placeholders for the assembler to resolve.
@@ -2429,6 +2643,28 @@ class ImprovedCodeGenerator:
             for item in node:
                 self._find_undeclared_set_vars(item, declared, found)
 
+    def _resolve_constant_default(self, node) -> Optional[int]:
+        """Resolve a local-default value node that references a compile-time
+        constant (e.g. (PTR ,P-LEXSTART) or (X FOO)) to its integer value.
+        Returns None if it isn't a resolvable constant reference."""
+        # <> is the constant FALSE (0). Without this, a local defaulted to <>
+        # (e.g. (VERB <>)) hits the FormNode init path, which evaluates <> to nothing
+        # and then stores whatever garbage is on the stack into the local -- so VERB
+        # started at a stray 1 and <NOT .VERB> was false, skipping the verb clause.
+        if (isinstance(node, FormNode) and isinstance(node.operator, AtomNode)
+                and node.operator.value == '<>' and not node.operands):
+            return 0
+        name = None
+        if isinstance(node, GlobalVarNode):
+            name = node.name
+        elif isinstance(node, AtomNode):
+            name = node.value
+        if name is not None and name in self.constants:
+            val = self.constants[name]
+            if isinstance(val, int):
+                return val
+        return None
+
     def generate_routine(self, routine: RoutineNode) -> bytes:
         """Generate bytecode for a routine."""
         self._current_routine = routine.name  # Track for warnings
@@ -2560,9 +2796,16 @@ class ImprovedCodeGenerator:
                 init_val = 0
                 if local_name in routine.local_defaults:
                     default_node = routine.local_defaults[local_name]
-                    # Only handle simple number literals for initial values
                     if isinstance(default_node, NumberNode):
                         init_val = default_node.value & 0xFFFF
+                    else:
+                        # A local default can reference a constant, e.g.
+                        # (PTR ,P-LEXSTART) -- resolve it, else the local wrongly
+                        # defaults to 0 (this is why minizork's PARSER read from
+                        # parse-buffer offset 0 and hit UNKNOWN-WORD).
+                        cv = self._resolve_constant_default(default_node)
+                        if cv is not None:
+                            init_val = cv & 0xFFFF
                 routine_code.extend(struct.pack('>H', init_val))
 
         # Track position for routine-level AGAIN (local initialization start)
@@ -2572,12 +2815,22 @@ class ImprovedCodeGenerator:
         # Generate local initialization code
         # V5+: Required for initial values since header doesn't have them
         # V3/V4: Needed for routine-level AGAIN to reset locals
+        # BUT: never emit a reset STORE for a required OR optional PARAMETER. Those
+        # locals receive their values from the CALL (the header default only applies
+        # to an OPTIONAL that wasn't passed); resetting them at entry would clobber a
+        # passed argument -- e.g. <WT? .WRD ,PS?VERB ,P1?VERB> passed B1=1 but the
+        # reset forced B1 back to its default 5, so WT? returned true instead of the
+        # verb number and no game verb ever resolved.
+        _num_passable = len(routine.params) + len(getattr(routine, 'opt_params', None) or [])
         for local_name in local_names:
             if local_name in routine.local_defaults:
                 default_node = routine.local_defaults[local_name]
                 local_num = self.locals[local_name]
-                if isinstance(default_node, NumberNode):
-                    init_val = default_node.value
+                if local_num <= _num_passable:
+                    continue
+                _const_default = None if isinstance(default_node, NumberNode) else self._resolve_constant_default(default_node)
+                if isinstance(default_node, NumberNode) or _const_default is not None:
+                    init_val = default_node.value if isinstance(default_node, NumberNode) else _const_default
                     # Generate STORE instruction: store local init_val
                     if 0 <= init_val <= 255:
                         # Small constant: long form 0 0 0D = 0x0D
@@ -2630,10 +2883,18 @@ class ImprovedCodeGenerator:
         self._current_routine_activation = routine.activation
 
         # Generate code for routine body
-        for stmt in routine.body:
+        for _stmt_i, stmt in enumerate(routine.body):
             # Clear per-statement tracking before generating
             self._current_stmt_routine_offsets.clear()
-            stmt_code = self.generate_statement(stmt)
+            # A COND as the routine's LAST statement IS the routine's return value
+            # (an implicit RET_POPPED follows). Generate it in value context so a
+            # clause ending in <SETG ...> returns the assigned value, not 0 --
+            # PARSER's direction branch ends <SETG AGAIN-DIR .DIR> and that value is
+            # what tells MAIN-LOOP the parse succeeded (movement was silently a no-op).
+            if _stmt_i == len(routine.body) - 1 and isinstance(stmt, CondNode):
+                stmt_code = self.generate_cond(stmt, value_context=True)
+            else:
+                stmt_code = self.generate_statement(stmt)
             stmt_offset = len(routine_code)
 
             # Collect directly-tracked placeholder positions (from gen_routine_call)
@@ -2842,6 +3103,19 @@ class ImprovedCodeGenerator:
                     else:
                         # COND pushes its result to the stack
                         # Use RET_POPPED to return that value
+                        routine_code.append(0xB8)  # RET_POPPED
+                    implicit_ret_generated = True
+                elif isinstance(last_stmt, RepeatNode):
+                    # A REPEAT is exited by <RETURN value>, which pushes its value to
+                    # the stack before jumping to the loop exit (see _gen_block_return);
+                    # the routine's value is that RETURN value, so pop it. Without this
+                    # branch the loop fell through to a RET 0 that discarded the value,
+                    # so e.g. the classic parser's CLAUSE (whose whole body is a REPEAT
+                    # ending in <RETURN -1>/<RETURN .PTR>) always returned 0. A loop
+                    # that never RETURNs makes this instruction unreachable.
+                    if routine.name == "GO":
+                        routine_code.append(0xBA)  # QUIT
+                    else:
                         routine_code.append(0xB8)  # RET_POPPED
                     implicit_ret_generated = True
                 elif isinstance(last_stmt, AtomNode):
@@ -3053,7 +3327,9 @@ class ImprovedCodeGenerator:
         if isinstance(node, FormNode):
             return self.generate_form(node)
         elif isinstance(node, CondNode):
-            return self.generate_cond(node)
+            # Plain statement context: the COND's value is discarded, so don't let a
+            # clause's final SET/SETG leak a value onto the stack.
+            return self.generate_cond(node, value_context=False)
         elif isinstance(node, RepeatNode):
             return self.generate_repeat(node)
         elif isinstance(node, TableNode):
@@ -3083,8 +3359,15 @@ class ImprovedCodeGenerator:
 
         # Check if this is a user-defined routine BEFORE checking opcodes
         # This allows user routines to shadow built-in opcode names
-        # (e.g., GET-CURSOR routine in journey shadows the V6 GET-CURSOR opcode)
-        if form.operator.value in self.routines:
+        # (e.g., GET-CURSOR routine in journey shadows the V6 GET-CURSOR opcode).
+        # Check _routine_names (the COMPLETE set, built pre-codegen) as well as
+        # self.routines (populated incrementally): a routine that calls a
+        # builtin-named user routine defined LATER -- e.g. V-WALK does <GOTO room>
+        # but GOTO is compiled after V-WALK -- would otherwise fall through to the
+        # builtin gen_goto and never move the player. gen_routine_call emits a
+        # forward-reference placeholder that the fixup pass resolves.
+        if form.operator.value in self.routines or (
+            form.operator.value in self._routine_names):
             return self.gen_routine_call(form.operator.value, form.operands)
 
         # Control flow
@@ -3229,7 +3512,7 @@ class ImprovedCodeGenerator:
         elif op_name == 'FONT':
             return self.gen_font(form.operands)
         elif op_name == 'INPUT':
-            return self.gen_input(form.operands)
+            return self.gen_input_readchar(form.operands)
         elif op_name == 'BUFOUT':
             return self.gen_bufout(form.operands)
         elif op_name == 'UXOR':
@@ -3621,7 +3904,19 @@ class ImprovedCodeGenerator:
         # Parser predicates
         elif op_name == 'VERB?':
             return self.gen_verb_test(form.operands)
+        elif op_name in ('PRSO?', 'PRSI?', 'ROOM?'):
+            # Classic-game MULTIFROB macros: <PRSO? a b> == <EQUAL? ,PRSO a b>.
+            # The MDL DEFMAC/MULTIFROB machinery isn't expanded by the front end,
+            # so handle them as builtins (same shape as VERB?).
+            return self.gen_parser_eq_test(
+                {'PRSO?': 'PRSO', 'PRSI?': 'PRSI', 'ROOM?': 'HERE'}[op_name],
+                form.operands)
         elif op_name == 'PERFORM':
+            # If a PERFORM routine exists (the game's own, or our injected
+            # standard-library fallback), dispatch to it so the full action chain
+            # runs. gen_perform is only a stub for toy games with no PERFORM.
+            if hasattr(self, '_routine_names') and 'PERFORM' in self._routine_names:
+                return self.gen_routine_call('PERFORM', form.operands)
             return self.gen_perform(form.operands)
         elif op_name == 'CALL':
             return self.gen_call(form.operands)
@@ -3875,6 +4170,13 @@ class ImprovedCodeGenerator:
             if use_byte:
                 table_data.append(val_int & 0xFF)
             else:
+                if 0xF400 <= (val_int & 0xFFFF) <= 0xF7FF:
+                    # data-string marker: record its exact offset for point-wise
+                    # resolution (see _table_string_fixups)
+                    self._encode_string_marker_offsets.append(len(table_data))
+                elif (val_int & 0xFFFF) in self._routine_placeholders:
+                    # routine placeholder: same point-wise treatment
+                    self._encode_routine_marker_offsets.append(len(table_data))
                 table_data.extend(struct.pack('>H', val_int & 0xFFFF))
             i += 1
             pattern_idx += 1
@@ -3938,8 +4240,11 @@ class ImprovedCodeGenerator:
             name = val.value
             if name in self.objects:
                 return self.objects[name]
-            elif name in self.routines:
-                return self.routines[name]
+            elif name in self.routines or (hasattr(self, '_routine_names') and name in self._routine_names):
+                # Routine reference in table data: emit a placeholder and record
+                # its position (get_table_routine_fixups no longer scans).
+                ph = self._get_routine_placeholder(name)
+                return ph
             elif name in self.globals:
                 return self.globals[name]
             elif name in self.constants:
@@ -3947,7 +4252,12 @@ class ImprovedCodeGenerator:
             else:
                 return 0
         elif isinstance(val, StringNode):
-            return 0  # Placeholder for string
+            # A string element holds the PACKED ADDRESS of the string. Register it
+            # and emit a 0xFC00|idx marker for the assembler's table-region string
+            # resolution (returning 0 made <GLOBAL INDENTS <TABLE "" "  " ...>>
+            # all zeros, so every indented object listing print_paddr'd address 0
+            # and sprayed garbage z-text).
+            return self.register_data_string(val.value)
         else:
             return 0
 
@@ -4719,6 +5029,16 @@ class ImprovedCodeGenerator:
                     op_name = op.operator.value.upper()
                     if op_name in ('LVAL', 'GVAL'):
                         is_var_form = True
+                # Classic MDL TELL prints a bare form's value as a STRING
+                # (packed address): FIRSTER does <TELL <GET ,INDENTS .LEVEL>> for
+                # indentation and DESCRIBE-ROOM <TELL <GETP ... P?LDESC>>-style
+                # code abounds. Printing it as a number sprayed raw addresses into
+                # listings ("32030A nasty knife"). ZILF-dialect TELL keeps the
+                # print-as-number default (its games use <TELL N .X> forms and the
+                # toy suite relies on numeric output).
+                if (hasattr(self, '_routine_names')
+                        and 'SYNTAX-CHECK' in self._routine_names):
+                    is_var_form = True
                 if is_var_form:
                     # Variable value - print as string using PRINT_PADDR
                     # 1OP variable form: 0xA0 | 0x0D = 0xAD
@@ -5228,6 +5548,18 @@ class ImprovedCodeGenerator:
         var_node = operands[0]
         value_node = operands[1]
 
+        # <> as a VALUE is the constant FALSE (0), not a statement/expression.
+        # generate_form(<>) returns empty bytes (it's a no-op statement), so the
+        # expression path below would emit no value and then PULL stack garbage into
+        # the target -- e.g. <SETG X <>> would fail to clear X (a very common idiom,
+        # and the cause of minizork's parser infinite loop where RESERVE-PTR never
+        # reset). Treat it as the constant 0 so the normal store path runs.
+        if (isinstance(value_node, FormNode)
+                and isinstance(value_node.operator, AtomNode)
+                and value_node.operator.value == '<>'
+                and not value_node.operands):
+            value_node = NumberNode(0)
+
         # Check for indirect variable assignment (computed variable index)
         indirect_var_num = None  # Variable containing the target variable index
         computed_var_expr = None  # Expression that computes the target variable index
@@ -5481,8 +5813,13 @@ class ImprovedCodeGenerator:
             # Simple value assignment
             val_type, val_val = self._get_operand_type_and_value(value_node)
 
-            # Check if value is a large constant (> 255)
-            is_large_const = val_type == 0 and val_val > 255
+            # Check if value needs the 2-byte large-constant form. Negative values
+            # (e.g. <SETG P-SLOCBITS -1>) MUST use it: as a 1-byte small constant
+            # -1 truncates to 0xFF=255, so <EQUAL? ,P-SLOCBITS -1> later compared
+            # 255 vs 0xFFFF and failed -- the parser then skipped its GLOBAL-CHECK
+            # scope-widening retry and could never resolve local-globals (windows,
+            # scenery). -1 >> 8 & 0xFF and -1 & 0xFF both give 0xFF, yielding 0xFFFF.
+            is_large_const = val_type == 0 and (val_val < 0 or val_val > 255)
 
             if is_large_const:
                 # Use VAR form for large constants
@@ -5861,6 +6198,17 @@ class ImprovedCodeGenerator:
 
     def _gen_push_operand(self, node: ASTNode) -> bytes:
         """Generate code to push an operand value to the stack."""
+        # An expression operand (a form / COND / REPEAT) must be EVALUATED -- its
+        # generated code leaves the result on the stack. Otherwise
+        # _get_operand_type_and_value_ext treats it as the constant 0 (emitting
+        # `ADD 0 0 -> stack`), which is why e.g. a single-operand <OR <SET WRD .W>>
+        # used as a COND condition pushed 0 and never entered its body.
+        if isinstance(node, FormNode):
+            return self.generate_form(node)
+        if isinstance(node, CondNode):
+            return self.generate_cond(node)
+        if isinstance(node, RepeatNode):
+            return self.generate_repeat(node)
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value_ext(node)
 
@@ -6530,8 +6878,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Both constants - compute at compile time
         if op1_type == 0 and op2_type == 0:
@@ -6616,8 +6969,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Both constants - compute at compile time
         if op1_type == 0 and op2_type == 0:
@@ -7094,8 +7452,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         # MOVE_WINDOW is EXT opcode 0x10
@@ -7122,8 +7485,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         code.append(0xBE)  # EXT opcode marker
@@ -7174,8 +7542,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         code.append(0xBE)  # EXT opcode marker
         code.append(0x13)  # GET_WIND_PROP
@@ -7195,8 +7568,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         code.append(0xBE)  # EXT opcode marker
@@ -7218,8 +7596,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         code.append(0xBE)  # EXT opcode marker
@@ -7424,6 +7807,40 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def gen_input_readchar(self, operands: List[ASTNode]) -> bytes:
+        """Generate ZIL <INPUT ...> as READ_CHAR (single-character input).
+
+        In Infocom ZIL, <INPUT 1> reads ONE keystroke -- it is the Z-machine
+        read_char opcode (VAR:0x16, byte 0xF6), a *store* instruction -- not the
+        line-input sread that <READ ,BUF ,PARSE> compiles to. read_char is V4+ and
+        takes 1-3 operands: input-device (always 1), optional time, optional routine.
+        (This is why <INPUT 1> is valid but <INPUT> and <INPUT 0 0 0 0> are not.)
+        """
+        if self.version < 4:
+            raise ValueError("INPUT (read_char) requires V4 or later")
+        if len(operands) < 1 or len(operands) > 3:
+            raise ValueError("INPUT requires 1-3 operands in V4+")
+
+        code = bytearray()
+        code.append(0xF6)  # VAR form, opcode 0x16 = read_char
+
+        # Operand types (0=large 2B, 1=small 1B, 2=variable 1B); pad with 3=omitted.
+        op_encs = [self._get_operand_type_and_value_ext(op) for op in operands]
+        type_byte = 0x00
+        for i in range(4):
+            t = op_encs[i][0] if i < len(operands) else 0x03
+            type_byte |= (t << (6 - i * 2))
+        code.append(type_byte)
+        for t, v in op_encs:
+            if t == 0x00:  # large constant: 2 bytes
+                code.append((v >> 8) & 0xFF)
+                code.append(v & 0xFF)
+            else:          # small constant or variable: 1 byte
+                code.append(v & 0xFF)
+
+        code.append(0x00)  # store the character result to the stack
+        return bytes(code)
+
     def gen_sread(self, operands: List[ASTNode]) -> bytes:
         """Generate SREAD (V3/V4 read text input).
 
@@ -7514,8 +7931,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Compile-time evaluation for constants
         if op1_type == 0 and op2_type == 0:
@@ -8473,12 +8895,21 @@ class ImprovedCodeGenerator:
             if isinstance(var, AtomNode) and var.value not in self.locals and var.value not in self.globals:
                 raise ValueError(f"DLESS? unknown variable '{var.value}'")
 
-        # Determine if second operand is a variable
+        # Determine if second operand is a variable. A GlobalVarNode (,NAME) is a
+        # variable ONLY when NAME is a real global; a comma-prefixed CONSTANT or
+        # object -- e.g. ,P-ITBLLEN, a <CONSTANT> -- must be resolved as a value,
+        # not read as global slot 16. (ORPHAN's <IGRTR? CNT ,P-ITBLLEN> was comparing
+        # against HERE instead of 9, so the P-ITBL copy loop never terminated and ran
+        # off into static memory.)
         cmp_is_var = False
         cmp_var_num = 0
-        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
+        if isinstance(cmp_op, LocalVarNode):
             cmp_is_var = True
             cmp_var_num = self.get_variable_number(cmp_op)
+        elif isinstance(cmp_op, GlobalVarNode):
+            if cmp_op.name in self.globals:
+                cmp_is_var = True
+                cmp_var_num = self.get_variable_number(cmp_op)
         elif isinstance(cmp_op, AtomNode):
             if cmp_op.value in self.locals or cmp_op.value in self.globals:
                 cmp_is_var = True
@@ -8559,8 +8990,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # For compile-time constants, calculate byte index and bit mask
         if op1_type == 0 and op2_type == 0:
@@ -8679,8 +9115,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Calculate offset: (word_num - 1) * 4 + 1
         # Each word entry is 4 bytes, +1 to skip count byte
@@ -8818,8 +9259,9 @@ class ImprovedCodeGenerator:
             raise ValueError("G=? requires exactly 2 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested expressions (see gen_greater).
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Check if we need large constants (for negative or large values)
         needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
@@ -8862,8 +9304,8 @@ class ImprovedCodeGenerator:
             code.append(op1_val & 0xFF)
             code.append(op2_val & 0xFF)
 
-        code.append(0xC0)  # Branch on true (a < b), return false
-        code.append(0xB0)  # RTRUE - fall through (a >= b)
+        # G=? is NOT(a < b): JL true (a < b) -> push 0, fall through (a >= b) -> push 1
+        code.extend(self._compare_materialize_tail(0, 1))
 
         return bytes(code)
 
@@ -8884,8 +9326,9 @@ class ImprovedCodeGenerator:
             raise ValueError("L=? requires exactly 2 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested expressions (see gen_greater).
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Check if we need large constants (for negative or large values)
         needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
@@ -8928,8 +9371,8 @@ class ImprovedCodeGenerator:
             code.append(op1_val & 0xFF)
             code.append(op2_val & 0xFF)
 
-        code.append(0xC0)  # Branch on true (a > b), return false
-        code.append(0xB0)  # RTRUE - fall through (a <= b)
+        # L=? is NOT(a > b): JG true (a > b) -> push 0, fall through (a <= b) -> push 1
+        code.extend(self._compare_materialize_tail(0, 1))
 
         return bytes(code)
 
@@ -9100,8 +9543,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         # STOREW is VAR opcode 0x01
@@ -9169,8 +9617,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # For constant bit number, create mask at compile time
         if op2_type == 0 and 0 <= op2_val < 16:
@@ -9343,8 +9796,13 @@ class ImprovedCodeGenerator:
         code.append(0xBE)  # EXT opcode marker
         code.append(0x0D)  # SET_TRUE_COLOUR
 
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         if len(operands) >= 3 and self.version >= 6:
             # V6: includes window parameter
@@ -9508,8 +9966,13 @@ class ImprovedCodeGenerator:
             raise ValueError("WINGET accepts at most 4 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # GET_WIND_PROP is EXT opcode 0x13
         code.append(0xBE)  # EXT opcode marker
@@ -9548,8 +10011,13 @@ class ImprovedCodeGenerator:
             raise ValueError("WINPUT accepts at most 4 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         # PUT_WIND_PROP is EXT opcode 0x19
@@ -9589,8 +10057,13 @@ class ImprovedCodeGenerator:
             raise ValueError("WINATTR accepts at most 4 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = (0, 0)  # Default: set (operation = 0)
         if len(operands) >= 3:
             op3_type, op3_val = self._get_operand_type_and_value(operands[2])
@@ -9885,8 +10358,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Use LOADB with base and offset
         opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
@@ -9915,8 +10393,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         # STOREB is VAR opcode 0x02
@@ -9951,8 +10434,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Use LOADW with base and offset
         opcode = 0x0F | (op1_type << 6) | (op2_type << 5)
@@ -9980,8 +10468,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         # STOREW is VAR opcode 0x01
@@ -10409,8 +10902,13 @@ class ImprovedCodeGenerator:
         code = bytearray()
 
         # THROW is 2OP opcode 0x1C (28 decimal)
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Check if we need large constants (values > 255)
         needs_large1 = op1_type == 0 and op1_val > 255
@@ -11407,8 +11905,13 @@ class ImprovedCodeGenerator:
         code.append(0xBE)  # EXT opcode marker
         code.append(0x02)  # LOG_SHIFT
 
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Check if operands need large constant encoding
         # Negative numbers and values > 255 need large constants (2 bytes)
@@ -11475,8 +11978,13 @@ class ImprovedCodeGenerator:
         code.append(0xBE)  # EXT opcode marker
         code.append(0x03)  # ART_SHIFT
 
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Check if operands need large constant encoding
         # Negative numbers and values > 255 need large constants (2 bytes)
@@ -11538,8 +12046,13 @@ class ImprovedCodeGenerator:
         # XOR must be emulated in all Z-machine versions
         # XOR(A, B) = (A OR B) AND NOT(A AND B)
         # Get operand info for emulation
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # V3/V4: Emulate XOR using (A OR B) AND NOT(A AND B)
         # Uses stack for intermediate values
@@ -13783,25 +14296,18 @@ class ImprovedCodeGenerator:
 
                     code.extend(stmt_code)
 
-            # At end of loop, add unconditional jump back to start
-            # This creates the infinite loop (exit via RETURN)
+            # At end of loop, add an unconditional jump back to start (the infinite
+            # loop; exit via RETURN). The RETURN/AGAIN placeholders in the body are
+            # patched by POSITION-BLIND pattern scans (0x8C 0xFF 0xBB / 0xAA); the
+            # loop-back jump's own backward offset can BE 0xFFBB (-69) or 0xFFAA
+            # (-86), which the scan would then misread as a placeholder and re-point
+            # forward -- that silently broke GLOBAL-CHECK's <REPEAT> over a room's
+            # P?GLOBAL list (it ran one iteration, so local-globals like the window
+            # were never found). Fix: patch the body FIRST, then append the
+            # loop-back jump so the scans never see it. exit_point is where that
+            # 3-byte jump will end.
             current_pos = len(code)
-            # Z-machine JUMP: Target = PC + Offset - 2, where PC is after instruction
-            # So: Offset = Target - PC + 2 = Target - (current_pos + 3) + 2
-            jump_offset = loop_start - (current_pos + 1)
-
-            # JUMP uses signed 16-bit offset
-            if jump_offset < 0:
-                jump_offset_unsigned = (1 << 16) + jump_offset  # Two's complement
-            else:
-                jump_offset_unsigned = jump_offset
-
-            code.append(0x8C)  # JUMP opcode
-            code.append((jump_offset_unsigned >> 8) & 0xFF)
-            code.append(jump_offset_unsigned & 0xFF)
-
-            # Exit point is right after the backward jump (this is where RETURN jumps to)
-            exit_point = len(code)
+            exit_point = current_pos + 3
 
             # Patch all RETURN placeholders (0x8C 0xFF 0xBB -> jump to exit_point)
             # Use pattern scanning instead of position tracking, since RETURN may be
@@ -13836,6 +14342,17 @@ class ImprovedCodeGenerator:
                     code[i+1] = (again_offset_unsigned >> 8) & 0xFF
                     code[i+2] = again_offset_unsigned & 0xFF
                 i += 1
+
+            # Now append the loop-back jump (AFTER the scans above, so its offset
+            # bytes can never be misread as a RETURN/AGAIN placeholder).
+            jump_offset = loop_start - (current_pos + 1)
+            if jump_offset < 0:
+                jump_offset_unsigned = (1 << 16) + jump_offset  # Two's complement
+            else:
+                jump_offset_unsigned = jump_offset
+            code.append(0x8C)  # JUMP opcode
+            code.append((jump_offset_unsigned >> 8) & 0xFF)
+            code.append(jump_offset_unsigned & 0xFF)
 
         finally:
             # Pop block context
@@ -14452,16 +14969,43 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def _compare_materialize_tail(self, val_if_true: int, val_if_false: int) -> bytes:
+        """Materialize a comparison's result as a 0/1 value ON THE STACK.
+
+        This replaces the older "branch to RTRUE / fall through to RFALSE" idiom,
+        which only works when the comparison is the routine's tail expression: it
+        returns from the whole routine instead of leaving a value. When a
+        comparison is used as a sub-value (inside <AND>/<OR>, a call argument, a
+        SET, ...), that idiom silently returns from the enclosing routine. Emitting
+        a real stack value fixes those cases; tail-position use still works because
+        generate_routine appends RET_POPPED for a value-producing final form.
+
+        Caller has already emitted the compare instruction WITHOUT its branch byte.
+        We append: branch-on-true (offset 9) to the TRUE block, a FALSE block that
+        pushes val_if_false, a JUMP over the TRUE block, then the TRUE block that
+        pushes val_if_true.
+        """
+        tail = bytearray()
+        tail.append(0xC9)                       # branch on true, short form, offset 9
+        # FALSE block (compare false -> fall through): ADD 0 val_if_false -> stack
+        tail.extend([0x14, 0x00, val_if_false & 0xFF, 0x00])
+        # JUMP +6 over the TRUE block
+        tail.extend([0x8C, 0x00, 0x06])
+        # TRUE block (compare true -> branched here): ADD 0 val_if_true -> stack
+        tail.extend([0x14, 0x00, val_if_true & 0xFF, 0x00])
+        return bytes(tail)
+
     def gen_less(self, operands: List[ASTNode]) -> bytes:
-        """Generate JL (jump if less) - branch instruction."""
+        """Generate JL (jump if less), materialized as a 0/1 stack value."""
         if len(operands) != 2:
             raise ValueError("LESS? requires exactly 2 operands")
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Get operand types and values, evaluating nested expressions
+        # (see gen_greater -- unevaluated forms compare stale stack values).
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Check if we need large constants (for negative or large values)
         needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
@@ -14506,8 +15050,8 @@ class ImprovedCodeGenerator:
             code.append(op1_val & 0xFF)
             code.append(op2_val & 0xFF)
 
-        code.append(0xC1)  # Branch on true, return true
-        code.append(0xB1)  # RFALSE - fall through
+        # a < b true -> push 1, else push 0
+        code.extend(self._compare_materialize_tail(1, 0))
 
         return bytes(code)
 
@@ -14518,9 +15062,13 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Get operand types and values. Nested expressions MUST be evaluated --
+        # _get_operand_type_and_value returns "stack" for a form WITHOUT emitting
+        # its code, so `<G? <SET CNT <CCOUNT ,WINNER>> ,FUMBLE-NUMBER>` compared a
+        # stale stack value and ITAKE's fumble branch fired with an empty
+        # inventory ("You're holding too many things already!").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Check if we need large constants (for negative or large values)
         needs_large1 = (op1_type == 0 and (op1_val < 0 or op1_val > 255))
@@ -14565,8 +15113,8 @@ class ImprovedCodeGenerator:
             code.append(op1_val & 0xFF)
             code.append(op2_val & 0xFF)
 
-        code.append(0xC1)  # Branch on true, return true
-        code.append(0xB1)  # RFALSE - fall through
+        # a > b true -> push 1, else push 0
+        code.extend(self._compare_materialize_tail(1, 0))
 
         return bytes(code)
 
@@ -14601,8 +15149,11 @@ class ImprovedCodeGenerator:
         else:  # Variable
             code.append(0xA0)  # Short 1OP, variable, opcode 0x00
             code.append(op_val & 0xFF)
-        code.append(0xC1)  # Branch on true, return true
-        code.append(0xB1)  # RFALSE - fall through
+        # JZ branches on true when the value IS zero -> ZERO? is true -> push 1;
+        # fall through (non-zero) -> push 0. Materialize on the stack rather than
+        # returning from the routine, so <ZERO? x> works as a sub-value (e.g. inside
+        # <NOT <ZERO? x>> or <AND ...>).
+        code.extend(self._compare_materialize_tail(1, 0))
 
         return bytes(code)
 
@@ -14618,17 +15169,22 @@ class ImprovedCodeGenerator:
         code = bytearray()
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
-        # JE is 2OP opcode 0x01 (branch instruction)
+        # JE is 2OP opcode 0x01 (branch instruction). Long-form type bits:
+        # bit6 = first operand is variable, bit5 = SECOND operand is variable.
+        # The old bytes (0x21/0x61) had bit5 SET, so the "constant 1" was read as
+        # LOCAL VARIABLE 1 -- MAIN-LOOP-1's <1? .ICNT> became je ICNT,ICNT
+        # (always true) and every command gained a ghost indirect object.
         if op_type == 0:  # Constant
-            code.append(0x21)  # 2OP long form, small const, small const
+            code.append(0x01)  # 2OP long form, small const, small const
             code.append(op_val & 0xFF)
             code.append(0x01)  # Compare with 1
         else:  # Variable
-            code.append(0x61)  # 2OP long form, variable, small const
+            code.append(0x41)  # 2OP long form, variable, small const
             code.append(op_val & 0xFF)
             code.append(0x01)  # Compare with 1
-        code.append(0xC1)  # Branch on true, return true
-        code.append(0xB1)  # RFALSE - fall through
+        # JE branches on true when value == 1 -> push 1, else push 0. Materialize
+        # on the stack instead of returning from the routine.
+        code.extend(self._compare_materialize_tail(1, 0))
 
         return bytes(code)
 
@@ -14726,12 +15282,9 @@ class ImprovedCodeGenerator:
             # Result is on stack, use JZ on variable 0
             code.append(0xA0)  # 1OP:JZ with variable
             code.append(0x00)  # Variable 0 = stack
-            # JZ condition = "value == 0"
-            # Branch encoding: 0xC0 = branch on true (if condition met), offset 0 = RFALSE
-            # So: if value IS zero, branch to RFALSE
-            # Fall through means value was non-zero, execute RTRUE
-            code.append(0xC0)  # Branch on true (if zero), return false
-            code.append(0xB0)  # RTRUE - fall through means value was non-zero
+            # JZ branches on true when the value IS zero -> T? is false -> push 0;
+            # fall through (non-zero) -> push 1. Materialize on the stack.
+            code.extend(self._compare_materialize_tail(0, 1))
         else:
             op_type, op_val = self._get_operand_type_and_value(operands[0])
 
@@ -14752,10 +15305,8 @@ class ImprovedCodeGenerator:
             else:  # Variable
                 code.append(0xA0)  # 1OP:JZ with variable
                 code.append(op_val & 0xFF)
-            # Branch encoding: 0xC0 = branch on true, offset 0 = RFALSE
-            # If value is zero, branch to return false; else fall through to return true
-            code.append(0xC0)  # Branch on true (if zero), return false
-            code.append(0xB0)  # RTRUE - fall through
+            # JZ true (value is zero) -> T? false -> push 0; fall through -> push 1.
+            code.extend(self._compare_materialize_tail(0, 1))
 
         return bytes(code)
 
@@ -14783,12 +15334,9 @@ class ImprovedCodeGenerator:
             # Result is on stack, use JZ on variable 0
             code.append(0xA0)  # 1OP:JZ with variable
             code.append(0x00)  # Variable 0 = stack
-            # JZ condition = "value == 0"
-            # For FALSE?, we want: return true if zero, false if non-zero
-            # So: if value IS zero (JZ condition true), fall through to RTRUE
-            #     if value is non-zero (JZ condition false), branch to RFALSE
-            code.append(0x40)  # Branch on false (if non-zero), return false
-            code.append(0xB0)  # RTRUE - fall through means value was zero
+            # JZ branches on true when the value IS zero -> F? is true -> push 1;
+            # fall through (non-zero) -> push 0. Materialize on the stack.
+            code.extend(self._compare_materialize_tail(1, 0))
         else:
             op_type, op_val = self._get_operand_type_and_value(operands[0])
 
@@ -14807,10 +15355,8 @@ class ImprovedCodeGenerator:
             else:  # Variable
                 code.append(0xA0)  # 1OP:JZ with variable
                 code.append(op_val & 0xFF)
-            # Branch encoding: 0x40 = branch on false (if non-zero), offset 0 = RFALSE
-            # If value is non-zero, branch to return false; else fall through to return true
-            code.append(0x40)  # Branch on false (if non-zero), return false
-            code.append(0xB0)  # RTRUE - fall through
+            # JZ true (value is zero) -> F? true -> push 1; fall through -> push 0.
+            code.extend(self._compare_materialize_tail(1, 0))
 
         return bytes(code)
 
@@ -14856,7 +15402,7 @@ class ImprovedCodeGenerator:
                 op_type, op_val = self._get_operand_type_and_value_ext(operand)
                 # Push non-form operands to stack for consistency
                 if op_type == 2:  # Variable
-                    code.append(0xAE)  # LOAD var -> stack
+                    code.append(0x9E)  # LOAD var value -> stack (small-const operand = var number = DIRECT load; 0xAE would be an INDIRECT load of var[value])
                     code.append(op_val & 0xFF)
                     code.append(0x00)  # -> stack
                 elif op_type == 1:  # Small constant
@@ -14895,7 +15441,7 @@ class ImprovedCodeGenerator:
         else:
             op_type, op_val = self._get_operand_type_and_value_ext(last_op)
             if op_type == 2:  # Variable
-                code.append(0xAE)  # LOAD var -> stack
+                code.append(0x9E)  # LOAD var value -> stack (small-const operand = var number = DIRECT load; 0xAE would be an INDIRECT load of var[value])
                 code.append(op_val & 0xFF)
                 code.append(0x00)
             elif op_type == 1:  # Small constant
@@ -14974,6 +15520,16 @@ class ImprovedCodeGenerator:
         code = bytearray()
         success_patches = []  # Positions that need to be patched to jump to success
 
+        # The Z-machine has no stack "dup", and LOAD 0 -> stack does NOT duplicate the
+        # top (real interpreters pop then push). We therefore hold each operand's value
+        # in a scratch global: store it, test it, and re-load it if truthy. (The old
+        # LOAD-0 dup silently consumed the value, so every <OR ...> used as a value or
+        # COND condition short-circuited to false -- e.g. the whole minizork parser.)
+        if '_OR_SCRATCH_' not in self.globals:
+            self.globals['_OR_SCRATCH_'] = self.next_global
+            self.next_global += 1
+        or_scratch = self.globals['_OR_SCRATCH_']
+
         # For each operand except the last, evaluate and jump to success if truthy
         for i, operand in enumerate(operands[:-1]):
             # Generate code to evaluate this operand
@@ -14986,7 +15542,7 @@ class ImprovedCodeGenerator:
             else:
                 op_type, op_val = self._get_operand_type_and_value_ext(operand)
                 if op_type == 2:  # Variable
-                    code.append(0xAE)  # LOAD var -> stack
+                    code.append(0x9E)  # LOAD var value -> stack (small-const operand = var number = DIRECT load; 0xAE would be an INDIRECT load of var[value])
                     code.append(op_val & 0xFF)
                     code.append(0x00)
                 elif op_type == 1:  # Small constant
@@ -15002,23 +15558,21 @@ class ImprovedCodeGenerator:
                     code.append(op_val & 0xFF)
                     code.append(0x00)
 
-            # Duplicate the value on stack so we can test it and still have it
-            # LOAD 0 -> stack (copies top of stack)
-            code.append(0xAE)  # LOAD var -> stack
-            code.append(0x00)  # Stack (variable 0 = top of stack)
-            code.append(0x00)  # -> stack
+            # Store the operand value into scratch (consumes the stack).
+            code.append(0xE9)  # PULL
+            code.append(0x7F)  # small-const operand type (var number follows)
+            code.append(or_scratch & 0xFF)
 
-            # JZ stack -> continue (if zero, try next operand)
-            # If NOT zero, we want to jump to success (keep the duplicated value)
-            # JZ branches if value IS zero, so we branch to "next" on zero
-            code.append(0xA0)  # JZ var
-            code.append(0x00)  # Stack
-            # Branch on true (is zero) - short offset to skip the success jump
-            # We need: if zero, skip to next operand; if non-zero, jump to end
-            # So: JZ +3 (skip JUMP), then JUMP to success
-            code.append(0xC3)  # Branch on true (is zero), short form, offset 3
+            # JZ scratch ?next : if the value is zero, skip the 6-byte LOAD+JUMP below
+            # and fall through to the next operand. Branch offset 8 = 6 (LOAD+JUMP) + 2.
+            code.append(0xA0)  # JZ (1OP, variable operand -> reads var's value)
+            code.append(or_scratch & 0xFF)
+            code.append(0xC8)  # branch on true (is zero), short form, offset 8
 
-            # If we get here, value was non-zero - jump to success
+            # Truthy: re-load scratch as the OR result, then jump to success (end).
+            code.append(0x9E)  # LOAD (1OP small-const operand = var number) -> stack
+            code.append(or_scratch & 0xFF)
+            code.append(0x00)  # store to stack
             success_patches.append(len(code))
             code.append(0x8C)  # JUMP
             code.append(0x00)  # Placeholder high
@@ -15044,7 +15598,7 @@ class ImprovedCodeGenerator:
         else:
             op_type, op_val = self._get_operand_type_and_value_ext(last_op)
             if op_type == 2:  # Variable
-                code.append(0xAE)  # LOAD var -> stack
+                code.append(0x9E)  # LOAD var value -> stack (small-const operand = var number = DIRECT load; 0xAE would be an INDIRECT load of var[value])
                 code.append(op_val & 0xFF)
                 code.append(0x00)
             elif op_type == 1:  # Small constant
@@ -15488,8 +16042,13 @@ class ImprovedCodeGenerator:
         code = bytearray()
 
         # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # INSERT_OBJ is 2OP opcode 0x0E
         opcode = 0x0E | (op1_type << 6) | (op2_type << 5)
@@ -15549,8 +16108,13 @@ class ImprovedCodeGenerator:
         code = bytearray()
 
         # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # GET_PROP is 2OP opcode 0x11
         opcode = 0x11 | (op1_type << 6) | (op2_type << 5)
@@ -15560,6 +16124,47 @@ class ImprovedCodeGenerator:
         code.append(0x00)  # Store to stack
 
         return bytes(code)
+
+    def _resolve_operand_list_ext(self, operands, code):
+        """Evaluate a list of operands for a VAR-form instruction, emitting any
+        nested FormNode/CondNode expressions into `code` first.
+
+        All-but-the-last expression is spilled to a scratch global so operand
+        order survives; the last stays on the stack. Returns a list of
+        (type, value) with type 0=large const, 1=small const, 2=variable.
+        (Without this, PUTP's value operand `<+ .ADV-STR 1>` was never emitted
+        and I-CURE "healed" the adventurer by writing a stale 0 to STRENGTH.)
+        """
+        operands = [NumberNode(0) if self._is_empty_false_form(o) else o
+                    for o in operands]
+        exprs = [i for i, o in enumerate(operands)
+                 if isinstance(o, (FormNode, CondNode))]
+        out = []
+        scratch_n = 0
+        for i, o in enumerate(operands):
+            if isinstance(o, (FormNode, CondNode)):
+                before = len(self._current_stmt_routine_offsets)
+                insert = len(code)
+                expr = (self.generate_form(o) if isinstance(o, FormNode)
+                        else self.generate_cond(o))
+                for k in range(before, len(self._current_stmt_routine_offsets)):
+                    rel, ph = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (insert + rel, ph)
+                code.extend(expr)
+                if i != exprs[-1]:
+                    scratch_n += 1
+                    name = f'_NARG{scratch_n}_'
+                    if name not in self.globals:
+                        self.globals[name] = self.next_global
+                        self.next_global += 1
+                    sv = self.globals[name]
+                    code.extend([0xD4, 0x9F, 0x00, 0x00, sv & 0xFF])  # ADD sp 0 -> sv
+                    out.append((2, sv))
+                else:
+                    out.append((2, 0))  # stack
+            else:
+                out.append(self._get_operand_type_and_value_ext(o))
+        return out
 
     def gen_putp(self, operands: List[ASTNode]) -> bytes:
         """Generate PUT_PROP (set object property)."""
@@ -15571,11 +16176,10 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Get operand types and values using extended version
-        # which returns 0=large, 1=small, 2=variable
-        op1_type, op1_val = self._get_operand_type_and_value_ext(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value_ext(operands[1])
-        op3_type, op3_val = self._get_operand_type_and_value_ext(operands[2])
+        # Get operand types and values (0=large, 1=small, 2=variable), evaluating
+        # any nested expressions first.
+        (op1_type, op1_val), (op2_type, op2_val), (op3_type, op3_val) = \
+            self._resolve_operand_list_ext(operands, code)
 
         # PUT_PROP is VAR opcode 0x03
         code.append(0xE3)  # VAR form, opcode 0x03
@@ -15648,8 +16252,13 @@ class ImprovedCodeGenerator:
             raise ValueError("NEXTP requires exactly 2 operands")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # GET_NEXT_PROP is 2OP opcode 0x13 (long form with store)
         # _get_operand_type_and_value returns: 0=constant, 1=variable
@@ -15663,8 +16272,14 @@ class ImprovedCodeGenerator:
 
     # ===== COND Statement =====
 
-    def generate_cond(self, cond: CondNode) -> bytes:
+    def generate_cond(self, cond: CondNode, value_context: bool = False) -> bytes:
         """Generate COND statement with proper branching.
+
+        value_context: True when the COND's value is actually consumed (an
+        expression, a routine's return value). Only then is a clause's final
+        <SET/SETG var val> made to yield val (by loading var back). In a plain
+        statement context (value_context=False) that would leak a nonzero value
+        onto the stack and corrupt later code, so SET/SETG stays void there.
 
         COND works like this:
         - Test condition 1, if false jump to next clause
@@ -15683,12 +16298,18 @@ class ImprovedCodeGenerator:
         # First pass: generate all clause code WITHOUT branch offsets
         clause_data = []
         for i, (condition, actions) in enumerate(cond.clauses):
+            # Offset this clause's test is ASSUMED to start at (before third-pass
+            # 2-byte-branch / NOP-padding growth). The fourth pass re-adjusts each
+            # clause's placeholders by (actual start - this assumed start) so the
+            # position-blind assembler patches routine/vocab refs at the RIGHT bytes.
+            clause_start_off = accumulated_offset
             # Check if this is the T (else) clause - can be T or ELSE
             is_t_clause = isinstance(condition, AtomNode) and condition.value.upper() in ('T', 'ELSE')
 
             # Generate the condition test (without proper offset yet)
             test_code = bytearray()
             test_size = 0
+            test_ph_start = len(self._current_stmt_routine_offsets)
             if not is_t_clause:
                 # Track placeholder count before generating test code
                 test_placeholder_count_before = len(self._current_stmt_routine_offsets)
@@ -15700,9 +16321,11 @@ class ImprovedCodeGenerator:
                 for k in range(test_placeholder_count_before, len(self._current_stmt_routine_offsets)):
                     rel_offset, placeholder_val = self._current_stmt_routine_offsets[k]
                     self._current_stmt_routine_offsets[k] = (accumulated_offset + rel_offset, placeholder_val)
+            test_ph_end = len(self._current_stmt_routine_offsets)
 
             # Actions will start after test_code
             actions_start_offset = accumulated_offset + test_size
+            action_ph_start = len(self._current_stmt_routine_offsets)
 
             # Generate actions for this clause
             actions_code = bytearray()
@@ -15758,19 +16381,19 @@ class ImprovedCodeGenerator:
                         elif action.value in self.globals:
                             var_num = self.globals[action.value]
                             # ADD 0 var -> stack (0x24 = small, variable)
-                            actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                            actions_code.extend([0x34, 0x00, var_num & 0xFF, 0x00])  # ADD 0 var -> stack (0x34 = 2OP add small,variable; 0x24 was dec_chk!)
                         elif action.value in self.locals:
                             var_num = self.locals[action.value]
-                            actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                            actions_code.extend([0x34, 0x00, var_num & 0xFF, 0x00])  # ADD 0 var -> stack (0x34 = 2OP add small,variable; 0x24 was dec_chk!)
                         else:
                             pass
                     elif isinstance(action, GlobalVarNode):
                         if action.name in self.globals:
                             var_num = self.globals[action.name]
-                            actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                            actions_code.extend([0x34, 0x00, var_num & 0xFF, 0x00])  # ADD 0 var -> stack (0x34 = 2OP add small,variable; 0x24 was dec_chk!)
                     elif isinstance(action, LocalVarNode):
                         var_num = self.locals.get(action.name, 1)
-                        actions_code.extend([0x24, 0x00, var_num & 0xFF, 0x00])
+                        actions_code.extend([0x34, 0x00, var_num & 0xFF, 0x00])  # ADD 0 var -> stack (0x34 add small,variable; 0x24 was dec_chk!)
                 else:
                     actions_code.extend(action_code)
                     # If this is the last action and it's a void operation,
@@ -15786,15 +16409,41 @@ class ImprovedCodeGenerator:
                             'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
                             'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
                         }
-                        if op_name in void_ops:
+                        if value_context and op_name in ('SET', 'SETG') and action.operands:
+                            # <SET/SETG var val> returns val in ZIL. The store leaves it
+                            # in `var`, so when the COND's value is used, LOAD var back
+                            # onto the stack. PARSER's direction branch ends in
+                            # <SETG AGAIN-DIR .DIR> and that value (the direction) is
+                            # what tells MAIN-LOOP the parse succeeded -- pushing 0 made
+                            # every movement command silently do nothing. Gated on
+                            # value_context so plain-statement CONDs don't leak a value.
+                            tvar = self.get_variable_number(action.operands[0])
+                            actions_code.extend([0x9E, tvar & 0xFF, 0x00])  # LOAD var -> stack (direct)
+                        elif op_name in void_ops:
                             # Push 0 to stack: ADD 0 0 -> stack
                             actions_code.extend([0x14, 0x00, 0x00, 0x00])
 
+            # A bodyless T/ELSE clause -- the trailing (T) in
+            # <COND (.LOSS ... <RFALSE>) (T)> -- evaluates to true in ZIL, and when
+            # the COND is the routine's value that must be returned. It otherwise
+            # pushed nothing, so RET_POPPED returned garbage/0, which made MANY-CHECK
+            # report failure and the parser drop every resolved object. Only the T
+            # clause is patched: a bodyless *test* clause used as a plain statement is
+            # common (the parser is full of them) and must NOT leak a value.
+            if is_t_clause and len(actions_code) == 0:
+                actions_code.extend([0x14, 0x00, 0x01, 0x00])  # ADD 0 1 -> stack
+
+            action_ph_end = len(self._current_stmt_routine_offsets)
             clause_data.append({
                 'is_t_clause': is_t_clause,
                 'test_code': test_code,
                 'test_size': test_size,
                 'actions_code': actions_code,
+                # Placeholder bookkeeping for the fourth-pass re-adjustment.
+                'assumed_test_start': clause_start_off,
+                'assumed_actions_start': actions_start_offset,
+                'test_ph_range': (test_ph_start, test_ph_end),
+                'action_ph_range': (action_ph_start, action_ph_end),
             })
 
             # Update accumulated_offset for next clause.
@@ -15834,16 +16483,64 @@ class ImprovedCodeGenerator:
             if not clause['is_t_clause'] and clause['test_size'] > 0:
                 bytes_to_skip = clause['actions_size'] + clause['jump_size']
                 next_clause_offset = bytes_to_skip + 2
-                if next_clause_offset >= 64:
-                    # This branch needs 2-byte form - mark it for expansion
+                needs_2byte = next_clause_offset >= 64
+                if not needs_2byte:
+                    # A 1-byte branch byte that lands in the placeholder high-byte
+                    # range (>= 0xFA) would be misread by the vocab/routine placeholder
+                    # scanners as a placeholder and silently rewritten -- e.g. a 0xFB
+                    # branch-on-true/offset-59 byte in minizork's GET-OBJECT got clobbered
+                    # to a dictionary word address, derailing the parser. A 2-byte branch's
+                    # first byte is always <= 0xBF, so force it in that case.
+                    branch_sense = clause['test_code'][-1] & 0x80
+                    one_byte = branch_sense | 0x40 | (next_clause_offset & 0x3F)
+                    if one_byte >= 0xFA:
+                        needs_2byte = True
+                if needs_2byte:
                     clause['needs_2byte_branch'] = True
                     clause['test_size'] += 1
                     clause['total_size'] += 1
+                    # A 2-byte branch's first byte is safe (<= 0xBF), but its LOW byte
+                    # is the raw offset and can land on a placeholder scanner high byte
+                    # (0xFA vocab-table / 0xFB vocab / 0xFC string-operand). Those
+                    # scanners are position-blind and would rewrite the branch (a 0xFB
+                    # offset byte in V-OPEN got read as vocab placeholder 0xFB4A and
+                    # overwrote the branch + the following test_attr, so "It is already
+                    # open" printed unconditionally). Pad the clause body with NOPs
+                    # until the offset's low byte is out of that range.
+                    while ((clause['actions_size'] + clause['jump_size'] + 2) & 0xFF) in (0xFA, 0xFB, 0xFC):
+                        clause['actions_code'].extend([0xB4])  # NOP (0OP:0x04)
+                        clause['actions_size'] += 1
+                        clause['total_size'] += 1
                 else:
                     clause['needs_2byte_branch'] = False
 
         # Fourth pass: generate with proper offsets (all sizes are now stable)
         for i, clause in enumerate(clause_data):
+            # Re-adjust this clause's routine/vocab placeholder positions to the
+            # bytes we're ACTUALLY about to emit. The first pass recorded them
+            # against an assumed layout (1-byte branches, no NOP padding); the third
+            # pass then grew earlier clauses' tests (2-byte branches) and actions
+            # (NOP padding), shifting every later placeholder. Without this fixup the
+            # position-blind assembler patches routine addresses into the wrong bytes
+            # -- e.g. growing PARSER's direction clause corrupted the following
+            # clause's SYNTAX-CHECK/SNARF-OBJECTS refs and the game went dark.
+            actual_test_start = len(code)
+            test_delta = actual_test_start - clause['assumed_test_start']
+            tps, tpe = clause['test_ph_range']
+            if test_delta:
+                for k in range(tps, tpe):
+                    rel, ph = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (rel + test_delta, ph)
+            # Actions start after the (possibly 2-byte) test code. Compute against the
+            # final test_size so a 2-byte branch's extra byte is accounted for.
+            actual_actions_start = actual_test_start + clause['test_size']
+            actions_delta = actual_actions_start - clause['assumed_actions_start']
+            aps, ape = clause['action_ph_range']
+            if actions_delta:
+                for k in range(aps, ape):
+                    rel, ph = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (rel + actions_delta, ph)
+
             # Fix the condition test branch offset
             if not clause['is_t_clause'] and clause['test_size'] > 0:
                 # Branch should jump to next clause if test fails
@@ -15900,6 +16597,17 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+
+    @staticmethod
+    def _is_empty_false_form(node):
+        """<> used as a VALUE is the constant FALSE (0). generate_form emits no
+        code for it, so any evaluator that treats it as an expression would pop
+        stale stack garbage (PRE-TURN's <PRSI? <> ,ROOMS> matched a real PRSI)."""
+        return (isinstance(node, FormNode)
+                and isinstance(node.operator, AtomNode)
+                and node.operator.value == '<>'
+                and not node.operands)
+
     def _resolve_two_cmp_operands(self, n1, n2, code):
         """Resolve two comparison operands for a branch-context JG/JL/etc.
 
@@ -15914,6 +16622,8 @@ class ImprovedCodeGenerator:
         global so operand order is preserved.
         """
         def is_expr(n):
+            if self._is_empty_false_form(n):
+                return False  # <> is the constant 0, not an expression
             return isinstance(n, (FormNode, CondNode))
 
         def emit(n):
@@ -15925,6 +16635,10 @@ class ImprovedCodeGenerator:
                 self._current_stmt_routine_offsets[k] = (insert_pos + rel, ph)
             code.extend(expr)
 
+        if self._is_empty_false_form(n1):
+            n1 = NumberNode(0)
+        if self._is_empty_false_form(n2):
+            n2 = NumberNode(0)
         if is_expr(n1):
             emit(n1)  # value -> stack
             if is_expr(n2):
@@ -16009,10 +16723,12 @@ class ImprovedCodeGenerator:
                     obj_node = condition.operands[0]
                     attr_node = condition.operands[1]
 
-                    # Get operand types and values using the standard method
-                    # This handles all cases: objects, globals, locals, constants
-                    op1_type, op1_val = self._get_operand_type_and_value(obj_node)
-                    op2_type, op2_val = self._get_operand_type_and_value(attr_node)
+                    # Evaluate nested expressions -- _get_operand_type_and_value
+                    # returns "stack" for a form WITHOUT emitting its code, so
+                    # V-WALK's `<FSET? <SET OBJ <GETB .PT ,DEXITOBJ>> ,OPENBIT>`
+                    # tested a stale stack value (door exits never opened).
+                    op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+                        obj_node, attr_node, code)
 
                     # TEST_ATTR is 2OP opcode 0x0A
                     opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
@@ -16332,16 +17048,28 @@ class ImprovedCodeGenerator:
             # Handle 0? / ZERO? (equals 0)
             elif op_name in ('0?', 'ZERO?'):
                 if len(condition.operands) >= 1:
-                    op_type, op_val = self._get_operand_type_and_value(condition.operands[0])
-                    if op_type == 1:  # Variable
-                        code.append(0xA0)  # JZ 1OP short form, variable operand
-                        code.append(op_val & 0xFF)
-                    else:  # Constant
-                        # JZ with constant - use JE with 0
-                        # JE long form: bit 6=0 (first=small), bit 5=0 (second=small)
-                        code.append(0x01)  # JE long form, small/small
-                        code.append(op_val & 0xFF)
-                        code.append(0x00)  # Compare with 0
+                    operand = condition.operands[0]
+                    if isinstance(operand, (FormNode, CondNode, RepeatNode)):
+                        # An expression operand (e.g. <ZERO? <GET ,TBL 0>>) must be
+                        # EVALUATED and its result on the stack tested. Otherwise
+                        # _get_operand_type_and_value treats the form as the constant 0
+                        # and emits JE 0 0 -> ZERO? was ALWAYS true (this made
+                        # SYNTAX-CHECK's <ZERO? <GET ,P-ITBL ,P-VERB>> always report
+                        # "no verb" even with a verb present).
+                        code.extend(self.generate_statement(operand))
+                        code.append(0xA0)  # JZ 1OP short form, stack operand
+                        code.append(0x00)
+                    else:
+                        op_type, op_val = self._get_operand_type_and_value(operand)
+                        if op_type == 1:  # Variable
+                            code.append(0xA0)  # JZ 1OP short form, variable operand
+                            code.append(op_val & 0xFF)
+                        else:  # Constant
+                            # JZ with constant - use JE with 0
+                            # JE long form: bit 6=0 (first=small), bit 5=0 (second=small)
+                            code.append(0x01)  # JE long form, small/small
+                            code.append(op_val & 0xFF)
+                            code.append(0x00)  # Compare with 0
 
             # Handle NOT
             elif op_name == 'NOT':
@@ -16394,8 +17122,10 @@ class ImprovedCodeGenerator:
             # branch_on_true: branch when NOT(a < b) (so JL with branch on false)
             elif op_name in ('G=?', '>='):
                 if len(condition.operands) >= 2:
-                    op1_type, op1_val = self._get_operand_type_and_value(condition.operands[0])
-                    op2_type, op2_val = self._get_operand_type_and_value(condition.operands[1])
+                    # Evaluate nested-form operands (e.g. <G=? <GET t i> 2>) rather
+                    # than treating them as constant 0.
+                    op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+                        condition.operands[0], condition.operands[1], code)
 
                     # Build JL instruction
                     if op1_type == 1 and op2_type == 0 and 0 <= op2_val <= 255:
@@ -16436,8 +17166,9 @@ class ImprovedCodeGenerator:
             # branch_on_true: branch when NOT(a > b) (so JG with branch on false)
             elif op_name in ('L=?', '<='):
                 if len(condition.operands) >= 2:
-                    op1_type, op1_val = self._get_operand_type_and_value(condition.operands[0])
-                    op2_type, op2_val = self._get_operand_type_and_value(condition.operands[1])
+                    # Evaluate nested-form operands rather than treating them as 0.
+                    op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+                        condition.operands[0], condition.operands[1], code)
 
                     # Build JG instruction
                     if op1_type == 1 and op2_type == 0 and 0 <= op2_val <= 255:
@@ -16479,22 +17210,37 @@ class ImprovedCodeGenerator:
             elif len(code) == 0:
                 # Generate the routine call to get a result on the stack
                 call_code = self.generate_statement(condition)
-                if call_code:
-                    code.extend(call_code)
-                    # Now add JZ to test if result is zero
-                    # JZ is 1OP opcode 0x00 with variable operand (stack)
-                    code.append(0xA0)  # 1OP short form, variable operand
-                    code.append(0x00)  # Stack (result of the call)
-                    # JZ tests "is value zero?" and branches based on result
-                    # For COND branch_on_false: we want to branch when condition is FALSE (zero)
-                    # - JZ with bit7=1: branch when value IS zero (condition is FALSE)
-                    # - JZ with bit7=0: branch when value is NOT zero (condition is TRUE)
-                    # So for branch_on_false, we need bit7=1 (INVERTED from predicates!)
+                if not call_code:
+                    # The form generated NOTHING (unknown operator, unexpanded game
+                    # macro...). Falling through used to emit a BARE branch byte as
+                    # the whole "test" -- the branch consumed the first byte of the
+                    # clause body and the instruction stream desynced (minizork's
+                    # V-PUT crashed on <PRSI? ,PRSO> exactly this way). Emit a
+                    # concrete always-false test instead so code stays decodable.
+                    # (No warning: a macro legitimately expanding to a false
+                    # constant also lands here and must stay silent.)
+                    code.append(0x90)  # JZ small-const
+                    code.append(0x00)  # constant 0 -> JZ true (condition false)
                     if branch_on_false:
-                        code.append(0xC0)  # Placeholder: branch when JZ test is true (value is zero)
+                        code.append(0xC0)  # branch when JZ true = always (cond false)
                     else:
-                        code.append(0x40)  # Placeholder: branch when JZ test is false (value is non-zero)
-                    return bytes(code)  # Return early, don't add another branch byte
+                        code.append(0x40)
+                    return bytes(code)
+                code.extend(call_code)
+                # Now add JZ to test if result is zero
+                # JZ is 1OP opcode 0x00 with variable operand (stack)
+                code.append(0xA0)  # 1OP short form, variable operand
+                code.append(0x00)  # Stack (result of the call)
+                # JZ tests "is value zero?" and branches based on result
+                # For COND branch_on_false: we want to branch when condition is FALSE (zero)
+                # - JZ with bit7=1: branch when value IS zero (condition is FALSE)
+                # - JZ with bit7=0: branch when value is NOT zero (condition is TRUE)
+                # So for branch_on_false, we need bit7=1 (INVERTED from predicates!)
+                if branch_on_false:
+                    code.append(0xC0)  # Placeholder: branch when JZ test is true (value is zero)
+                else:
+                    code.append(0x40)  # Placeholder: branch when JZ test is false (value is non-zero)
+                return bytes(code)  # Return early, don't add another branch byte
 
         # Add branch byte
         # Z-machine branch format:
@@ -16601,22 +17347,16 @@ class ImprovedCodeGenerator:
         # Z-machine JUMP formula: Target = PC_after + Offset - 2
         # So: Offset = Target - PC_after + 2 = loop_start_pos - (current_pos + 3) + 2
         #            = loop_start_pos - current_pos - 1
+        # The RETURN/AGAIN placeholders in the body are patched by POSITION-BLIND
+        # pattern scans (0x8C 0xFF 0xBB / 0xAA). The loop-back jump's own backward
+        # offset can BE 0xFFBB (-69) or 0xFFAA (-86) -- the scan would then misread
+        # the loop-back jump as a placeholder and re-point it forward, so the loop
+        # runs a single iteration. That silently broke GLOBAL-CHECK's <REPEAT> over
+        # a room's P?GLOBAL list (local-globals like the window never got found).
+        # Fix: patch the body FIRST, then append the loop-back jump so the scans
+        # never see it. exit_point is where that 3-byte jump will end.
         current_pos = len(code)
-        jump_offset = loop_start_pos - (current_pos + 1)
-
-        # JUMP uses signed 16-bit offset (not branch format)
-        # Encode as signed 16-bit value
-        if jump_offset < 0:
-            jump_offset_unsigned = (1 << 16) + jump_offset  # Two's complement
-        else:
-            jump_offset_unsigned = jump_offset
-
-        code.append(0x8C)  # JUMP opcode (0OP:0x0C)
-        code.append((jump_offset_unsigned >> 8) & 0xFF)  # High byte
-        code.append(jump_offset_unsigned & 0xFF)  # Low byte
-
-        # Exit point is right after the backward jump (this is where RETURN jumps to)
-        exit_point = len(code)
+        exit_point = current_pos + 3
 
         # Patch all RETURN placeholders (0x8C 0xFF 0xBB -> jump to exit_point)
         # Z-machine JUMP formula: Target = PC + Offset - 2, where PC is after instruction
@@ -16649,6 +17389,17 @@ class ImprovedCodeGenerator:
                 code[i+1] = (again_offset_unsigned >> 8) & 0xFF
                 code[i+2] = again_offset_unsigned & 0xFF
             i += 1
+
+        # Now append the loop-back jump (AFTER the scans above, so its offset bytes
+        # can never be misread as a RETURN/AGAIN placeholder).
+        jump_offset = loop_start_pos - (current_pos + 1)
+        if jump_offset < 0:
+            jump_offset_unsigned = (1 << 16) + jump_offset  # Two's complement
+        else:
+            jump_offset_unsigned = jump_offset
+        code.append(0x8C)  # JUMP opcode (0OP:0x0C)
+        code.append((jump_offset_unsigned >> 8) & 0xFF)  # High byte
+        code.append(jump_offset_unsigned & 0xFF)  # Low byte
 
         # Check for unused REPEAT locals (ZIL0210)
         if hasattr(self, 'used_locals') and self.compiler is not None:
@@ -16835,7 +17586,12 @@ class ImprovedCodeGenerator:
                 flattened.extend(op)
             else:
                 flattened.append(op)
-        operands = flattened
+        # <> as an ARGUMENT is the constant FALSE (0). generate_form emits no
+        # code for it, so leaving it as a FormNode made the argument read stack
+        # garbage -- <ROB ,MACHINE ,MACHINE-SWITCH <>> passed JUST-TREASURES as
+        # junk-true and the coal machine never made its diamond.
+        operands = [NumberNode(0) if self._is_empty_false_form(op) else op
+                    for op in flattened]
 
         # Validate argument count if we have info about this routine
         num_args = len(operands)
@@ -16860,21 +17616,63 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # CALL is VAR opcode 0x00 (V1-4) / CALL_VS (V4+)
-        # Routine address is a large constant (16-bit packed address)
+        # Resolve each argument to (op_type, op_val) with op_type 1=variable,
+        # 0=constant. A nested form/cond/repeat argument must be EVALUATED first (its
+        # result pushed to the stack); _get_operand_type_and_value only *assumes* the
+        # result is already on the stack, so without evaluating it here the call read
+        # an unrelated stack value -- e.g. <GET-OBJECT <OR .BUT .TBL>> passed garbage.
+        # Do the evaluation before the CALL opcode. When more than one argument needs
+        # the stack, spill all but the last-evaluated one into a scratch global so the
+        # CALL (whose stack operands pop left-to-right) sees them in the right order.
+        arg_ops = list(operands[:3])
+        form_positions = [i for i, op in enumerate(arg_ops)
+                          if isinstance(op, (FormNode, CondNode, RepeatNode))]
+        call_scratch = ['_CALLARG1_', '_CALLARG2_']
+        spilled = 0
+        resolved = []  # (op_type, op_val) per argument
+        for i, op in enumerate(arg_ops):
+            if isinstance(op, (FormNode, CondNode, RepeatNode)):
+                before = len(self._current_stmt_routine_offsets)
+                insert_pos = len(code)
+                if isinstance(op, FormNode):
+                    inner = self.generate_form(op)
+                elif isinstance(op, CondNode):
+                    inner = self.generate_cond(op)
+                else:
+                    inner = self.generate_repeat(op)
+                for k in range(before, len(self._current_stmt_routine_offsets)):
+                    rel, ph = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (insert_pos + rel, ph)
+                code.extend(inner)  # result now on the stack
+                if i == form_positions[-1]:
+                    resolved.append((1, 0))  # variable 0 = stack (last stack arg)
+                else:
+                    sname = call_scratch[spilled] if spilled < len(call_scratch) else f'_CALLARG{spilled + 1}_'
+                    spilled += 1
+                    if sname not in self.globals:
+                        self.globals[sname] = self.next_global
+                        self.global_values[sname] = 0
+                        self.next_global += 1
+                    svar = self.globals[sname]
+                    code.extend([0xD4, 0x9F, 0x00, 0x00, svar & 0xFF])  # ADD stack 0 -> svar (pop)
+                    resolved.append((1, svar))
+            else:
+                resolved.append(self._get_operand_type_and_value(op))
 
-        # Encode as variable form
+        # CALL is VAR opcode 0x00 (V1-4) / CALL_VS (V4+); routine address is a large
+        # constant (16-bit packed address, emitted as a placeholder).
         code.append(0xE0)  # VAR form, opcode 0x00
 
         # Build type byte - first operand is large constant (0x00) for routine address
-        types = [0x00]  # Large constant for routine address
-
-        for op in operands[:3]:
-            op_type, op_val = self._get_operand_type_and_value(op)
+        types = [0x00]
+        for op_type, op_val in resolved:
             if op_type == 1:  # Variable
                 types.append(0x02)
             else:  # Constant
-                if isinstance(op_val, int) and op_val <= 255:
+                # Small-constant form is a single UNSIGNED byte (0-255); negative
+                # literals (e.g. the -1 tick in <QUEUE I-THIEF -1>) and values >255
+                # must use the 2-byte large-constant form, else -1 encodes as 0xFF (255).
+                if isinstance(op_val, int) and 0 <= op_val <= 255:
                     types.append(0x01)  # Small constant
                 else:
                     types.append(0x00)  # Large constant
@@ -16888,18 +17686,14 @@ class ImprovedCodeGenerator:
         code.append(type_byte)
 
         # Use placeholder encoding for routine address
-        # Placeholder is a 16-bit value in range 0xFD00-0xFFFE
         placeholder_val = self._get_routine_placeholder(routine_name)
-        # Track placeholder position: it's at current code length (before appending)
         placeholder_offset = len(code)
-        code.append((placeholder_val >> 8) & 0xFF)  # High byte (0xFD, 0xFE, or 0xFF)
-        code.append(placeholder_val & 0xFF)          # Low byte
-        # Record the placeholder position for later use
+        code.append((placeholder_val >> 8) & 0xFF)
+        code.append(placeholder_val & 0xFF)
         self._current_stmt_routine_offsets.append((placeholder_offset, placeholder_val))
 
-        # Add remaining operand values
-        for i, op in enumerate(operands[:3]):
-            op_type, op_val = self._get_operand_type_and_value(op)
+        # Add operand values (from the resolved list)
+        for i, (op_type, op_val) in enumerate(resolved):
             if types[i + 1] == 0x00:  # Large constant
                 code.append((op_val >> 8) & 0xFF)
                 code.append(op_val & 0xFF)
@@ -16919,8 +17713,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # LOADW is 2OP opcode 0x0F
         opcode = 0x0F | (op1_type << 6) | (op2_type << 5)
@@ -16937,8 +17736,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # LOADB is 2OP opcode 0x10 (LOADW is 0x0F)
         opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
@@ -16955,8 +17759,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         # STOREW is VAR opcode 0x01
@@ -16984,8 +17793,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
         op3_type, op3_val = self._get_operand_type_and_value(operands[2])
 
         # STOREB is VAR opcode 0x02
@@ -17039,24 +17853,48 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Process each operand - FormNodes need code generation first
+        # Process each operand - FormNodes need code generation first (result on
+        # stack). STOREW reads its operands left-to-right, each stack reference
+        # popping the current top. If two operands both push to the stack (e.g.
+        # <PUT tbl <+ .N 1> <REST ...>> where index AND value are forms), naively
+        # referencing both as "stack" pops them in REVERSE order and swaps index
+        # with value (a bad store to table[value]). To keep the order correct, spill
+        # every stack operand except the last-evaluated one into a scratch global.
         # Use _get_operand_type_and_value_ext which returns:
         # 0 = large constant, 1 = small constant, 2 = variable
-        op_types = []
-        op_vals = []
+        op_types = [0, 0, 0]
+        op_vals = [0, 0, 0]
+        form_positions = [i for i, op in enumerate(operands[:3]) if isinstance(op, FormNode)]
+        scratch_pool = ['_PUT_SCRATCH1_', '_PUT_SCRATCH2_']
+        spilled = 0
 
         for i, op in enumerate(operands[:3]):
             if isinstance(op, FormNode):
-                # Generate code for nested form - result goes to stack
                 inner_code = self.generate_form(op)
-                code.extend(inner_code)
-                # Use stack (variable 0) as the operand
-                op_types.append(2)  # variable type
-                op_vals.append(0x00)  # stack
+                code.extend(inner_code)  # result on stack (top)
+                if i == form_positions[-1]:
+                    # Last stack operand: STOREW pops it exactly when it reads this
+                    # position, so it can stay on the stack.
+                    op_types[i] = 2
+                    op_vals[i] = 0x00
+                else:
+                    # Spill to a scratch global so a later stack operand doesn't
+                    # steal this value.
+                    sname = scratch_pool[spilled]
+                    spilled += 1
+                    if sname not in self.globals:
+                        self.globals[sname] = self.next_global
+                        self.global_values[sname] = 0
+                        self.next_global += 1
+                    svar = self.globals[sname]
+                    # ADD stack 0 -> svar  (pop the top into the scratch global)
+                    code.extend([0xD4, 0x9F, 0x00, 0x00, svar & 0xFF])
+                    op_types[i] = 2
+                    op_vals[i] = svar
             else:
                 op_type, op_val = self._get_operand_type_and_value_ext(op)
-                op_types.append(op_type)
-                op_vals.append(op_val)
+                op_types[i] = op_type
+                op_vals[i] = op_val
 
         # STOREW is VAR opcode 0x01
         code.append(0xE1)  # VAR form, opcode 0x01
@@ -17274,8 +18112,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # LOADW is 2OP opcode 0x0F
         opcode = 0x0F | (op1_type << 6) | (op2_type << 5)
@@ -17416,8 +18259,13 @@ class ImprovedCodeGenerator:
         code.append(0xBE)  # EXT marker
         code.append(0x18)  # PUSH_STACK
 
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Type byte
         type1 = 0x01 if op1_type == 0 else 0x02
@@ -17640,8 +18488,13 @@ class ImprovedCodeGenerator:
         code = bytearray()
 
         # Get operand types and values
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Get parent of obj1
         # GET_PARENT is 1OP opcode 0x03 (store instruction)
@@ -17690,13 +18543,33 @@ class ImprovedCodeGenerator:
             raise ValueError("RANDOM requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+        operand = operands[0]
+        large = False
+        if isinstance(operand, (FormNode, CondNode)):
+            # A nested expression (e.g. <RANDOM <- .L .CNT>>) MUST be evaluated:
+            # _get_operand_type_and_value returns "stack" for a form without
+            # emitting any code, so RANDOM would consume whatever stale value was
+            # left on the stack. In minizork's PICK-ONE that stale value was a table
+            # address (8524), so RANDOM(8524) returned a huge index and the next
+            # PUT wrote far out of bounds -> "write to static memory" crash.
+            expr = (self.generate_form(operand) if isinstance(operand, FormNode)
+                    else self.generate_cond(operand))
+            code.extend(expr)  # value now on the stack; placeholders are at offset 0
+            op_type, op_val = 1, 0  # variable (stack)
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operand)
+            large = (op_type == 0 and (op_val < 0 or op_val > 255))
 
         # RANDOM is VAR opcode 0x07
         code.append(0xE7)  # VAR form, opcode 0x07
-        type_byte = 0x01 if op_type == 0 else 0x02  # small const or var
-        code.append((type_byte << 6) | 0x3F)
-        code.append(op_val & 0xFF)
+        if large:
+            code.append((0x00 << 6) | 0x3F)  # large constant
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
+        else:
+            type_byte = 0x01 if op_type == 0 else 0x02  # small const or var
+            code.append((type_byte << 6) | 0x3F)
+            code.append(op_val & 0xFF)
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -17822,58 +18695,155 @@ class ImprovedCodeGenerator:
         if not operands:
             return b''
 
+        # This runs in VALUE position (generate_form): it must leave 1/0 on the
+        # stack -- callers (COND tests etc.) follow with `jz stack`.
+        #
+        # HISTORY: this used to emit opcode byte 0x65 per verb, commented "JE
+        # var/small". 0x65 is actually long-form INC_CHK with BOTH operands
+        # variables -- so every <VERB? ...> INCREMENTED PRSA (misdirecting the
+        # verb for the rest of the turn), compared it against a random global,
+        # and its branch byte 0x40 (branch-on-FALSE, offset 0 = RFALSE) returned
+        # from the enclosing routine on a non-match. Correct encoding: VAR-form
+        # JE (0xC1) with PRSA + up to 3 verb constants per chunk, branch-on-true
+        # to a shared TRUE block, then the standard materialize-1/0 pattern.
+        prsa_var = self.globals['PRSA']
+        nums = []
+        for operand in operands:
+            verb_name = operand.value if isinstance(operand, AtomNode) else str(operand)
+            nums.append(self.constants.get(f'V?{verb_name}', 0) & 0xFF)
+
+        # Build chunks of up to 3 constants: 0xC1 typebyte PRSA c... branch
+        chunks = []
+        for i in range(0, len(nums), 3):
+            group = nums[i:i + 3]
+            type_byte = {1: 0x9F, 2: 0x97, 3: 0x95}[len(group)]
+            chunks.append(bytes([0xC1, type_byte, prsa_var]) + bytes(group))
+        # chunk emitted size = len(chunk) + 1 branch byte
+        sizes = [len(ch) + 1 for ch in chunks]
+
+        # Layout after chunks: [pad*] FALSE(4) JUMP(3) TRUE(4)
+        pad = 0
+        while True:
+            total = sum(sizes)
+            true_start = total + pad + 4 + 3  # after pads + FALSE + JUMP
+            ok = True
+            pos = 0
+            for sz in sizes:
+                after_branch = pos + sz
+                off = true_start - after_branch + 2
+                bb = 0xC0 | (off & 0x3F)
+                # offsets must fit 1-byte form and avoid the placeholder-scanner
+                # magic bytes 0xFA-0xFF (position-blind scans would rewrite them)
+                if off < 0 or off > 63 or bb >= 0xFA:
+                    ok = False
+                    break
+                pos = after_branch
+            if ok:
+                break
+            pad += 1
+            if pad > 8:
+                raise ValueError("VERB? with too many verbs to encode")
+
         code = bytearray()
+        pos = 0
+        for ch, sz in zip(chunks, sizes):
+            code.extend(ch)
+            after_branch = pos + sz
+            off = true_start - after_branch + 2
+            code.append(0xC0 | (off & 0x3F))  # branch on true -> TRUE block
+            pos = after_branch
+        code.extend([0xB4] * pad)             # NOP padding (branch-byte safety)
+        code.extend([0x14, 0x00, 0x00, 0x00])  # FALSE: ADD 0 0 -> stack
+        code.extend([0x8C, 0x00, 0x06])        # JUMP over TRUE block
+        code.extend([0x14, 0x00, 0x01, 0x00])  # TRUE: ADD 0 1 -> stack
+        return bytes(code)
 
-        # For single verb, generate simple EQUAL? test
-        if len(operands) == 1:
-            verb_name = operands[0].value if isinstance(operands[0], AtomNode) else str(operands[0])
-            verb_const = f'V?{verb_name}'
+    def gen_parser_eq_test(self, global_name: str, operands: List[ASTNode]) -> bytes:
+        """<PRSO?/PRSI?/ROOM? a b ...> == <EQUAL? ,global a b ...> as a 1/0 stack
+        value. Same chunked VAR-form JE + materialize shape as gen_verb_test."""
+        if not operands or global_name not in self.globals:
+            return b''
+        gvar = self.globals[global_name]
 
-            # Get verb number
-            if verb_const in self.constants:
-                verb_num = self.constants[verb_const]
+        code = bytearray()
+        resolved = []  # (type_bits, value) type_bits: 0=large const, 1=small, 2=var
+        for opnd in operands:
+            if self._is_empty_false_form(opnd):
+                resolved.append((1, 0))   # <> == constant FALSE
+                continue
+            if isinstance(opnd, (FormNode, CondNode)):
+                # Evaluate the expression and spill to a scratch global so several
+                # chunks can reference it without popping the stack repeatedly.
+                expr = (self.generate_form(opnd) if isinstance(opnd, FormNode)
+                        else self.generate_cond(opnd))
+                code.extend(expr)
+                scratch = self.globals.get('_MFROB_SCRATCH_')
+                if scratch is None:
+                    scratch = self.next_global
+                    self.globals['_MFROB_SCRATCH_'] = scratch
+                    self.next_global += 1
+                code.extend([0xD4, 0x9F, 0x00, 0x00, scratch & 0xFF])  # ADD sp 0 -> scratch
+                resolved.append((2, scratch))
             else:
-                # Unknown verb - treat as 0
-                verb_num = 0
-
-            # Generate: EQUAL? ,PRSA verb_num
-            # This is JE instruction (2OP opcode 0x01)
-            prsa_var = self.globals['PRSA']
-
-            code.append(0x65)  # Long form 2OP, opcode 0x01 (JE), var/small
-            code.append(prsa_var)  # PRSA variable
-            code.append(verb_num & 0xFF)  # Verb constant
-            code.append(0x40)  # Branch on true, offset 0 (placeholder)
-
-        else:
-            # Multiple verbs - need to check each one
-            # Strategy: Use multiple JE tests with same branch target
-            # If any matches, branch to true
-
-            # For simplicity, generate series of JE tests
-            # Each test branches forward if true
-            # Last test falls through if all false
-
-            for i, operand in enumerate(operands):
-                verb_name = operand.value if isinstance(operand, AtomNode) else str(operand)
-                verb_const = f'V?{verb_name}'
-
-                if verb_const in self.constants:
-                    verb_num = self.constants[verb_const]
+                t, v = self._get_operand_type_and_value(opnd)
+                if t == 1:
+                    resolved.append((2, v))
+                elif v < 0 or v > 255:
+                    resolved.append((0, v & 0xFFFF))
                 else:
-                    verb_num = 0
+                    resolved.append((1, v))
 
-                prsa_var = self.globals['PRSA']
+        # Chunks of up to 3 comparison operands: 0xC1 typebyte gvar ops... branch
+        chunks = []
+        for i in range(0, len(resolved), 3):
+            group = resolved[i:i + 3]
+            tb = 0x2 << 6  # first operand: variable (the parser global)
+            shift = 4
+            body = bytearray([gvar & 0xFF])
+            for bits, val in group:
+                tb |= (bits & 0x3) << shift
+                shift -= 2
+                if bits == 0:
+                    body.extend([(val >> 8) & 0xFF, val & 0xFF])
+                else:
+                    body.append(val & 0xFF)
+            while shift >= 0:
+                tb |= 0x3 << shift  # omitted
+                shift -= 2
+            chunks.append(bytes([0xC1, tb]) + bytes(body))
+        sizes = [len(ch) + 1 for ch in chunks]
 
-                # JE instruction
-                code.append(0x65)  # Long form 2OP, var/small
-                code.append(prsa_var)
-                code.append(verb_num & 0xFF)
+        pad = 0
+        while True:
+            total = sum(sizes)
+            true_start = len(code) + total + pad + 4 + 3
+            ok = True
+            pos = len(code)
+            for sz in sizes:
+                after_branch = pos + sz
+                off = true_start - after_branch + 2
+                bb = 0xC0 | (off & 0x3F)
+                if off < 0 or off > 63 or bb >= 0xFA:
+                    ok = False
+                    break
+                pos = after_branch
+            if ok:
+                break
+            pad += 1
+            if pad > 8:
+                raise ValueError(f"{global_name}? comparison too large to encode")
 
-                # Branch byte - for now, simple offset
-                # In real implementation, would need to calculate proper offsets
-                code.append(0x40)  # Branch on true
-
+        pos = len(code)
+        for ch, sz in zip(chunks, sizes):
+            code.extend(ch)
+            after_branch = pos + sz
+            off = true_start - after_branch + 2
+            code.append(0xC0 | (off & 0x3F))
+            pos = after_branch
+        code.extend([0xB4] * pad)
+        code.extend([0x14, 0x00, 0x00, 0x00])  # FALSE: push 0
+        code.extend([0x8C, 0x00, 0x06])        # JUMP over TRUE
+        code.extend([0x14, 0x00, 0x01, 0x00])  # TRUE: push 1
         return bytes(code)
 
     def gen_perform(self, operands: List[ASTNode]) -> bytes:
@@ -18675,8 +19645,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # CALL_2S is 2OP opcode 0x19
         # Long form: opcode | (op1_type << 6) | (op2_type << 5)
@@ -18705,8 +19680,13 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # CALL_2N is 2OP opcode 0x1A
         # Long form: opcode | (op1_type << 6) | (op2_type << 5)
@@ -19231,12 +20211,21 @@ class ImprovedCodeGenerator:
             if isinstance(var, AtomNode) and var.value not in self.locals and var.value not in self.globals:
                 raise ValueError(f"IGRTR? unknown variable '{var.value}'")
 
-        # Determine if second operand is a variable
+        # Determine if second operand is a variable. A GlobalVarNode (,NAME) is a
+        # variable ONLY when NAME is a real global; a comma-prefixed CONSTANT or
+        # object -- e.g. ,P-ITBLLEN, a <CONSTANT> -- must be resolved as a value,
+        # not read as global slot 16. (ORPHAN's <IGRTR? CNT ,P-ITBLLEN> was comparing
+        # against HERE instead of 9, so the P-ITBL copy loop never terminated and ran
+        # off into static memory.)
         cmp_is_var = False
         cmp_var_num = 0
-        if isinstance(cmp_op, LocalVarNode) or isinstance(cmp_op, GlobalVarNode):
+        if isinstance(cmp_op, LocalVarNode):
             cmp_is_var = True
             cmp_var_num = self.get_variable_number(cmp_op)
+        elif isinstance(cmp_op, GlobalVarNode):
+            if cmp_op.name in self.globals:
+                cmp_is_var = True
+                cmp_var_num = self.get_variable_number(cmp_op)
         elif isinstance(cmp_op, AtomNode):
             if cmp_op.value in self.locals or cmp_op.value in self.globals:
                 cmp_is_var = True
@@ -19314,22 +20303,31 @@ class ImprovedCodeGenerator:
         if not operands:
             return b''
 
+        # PROB p is true when <RANDOM 100> <= p; materialize 1/0 on the stack.
+        # The old encoding was broken three ways: 0x87 is the 1OP LARGE-constant
+        # form (so `100` + the store byte were read as constant 25600 -> RANDOM
+        # returned huge values), an expression percentage emitted NO comparison
+        # at all (the bare RANDOM value was left as "the result", almost always
+        # true), and even the constant path never emitted a branch byte.
         code = bytearray()
-        percentage = self.get_operand_value(operands[0])
-
-        # RANDOM 100 to get number 1-100
-        # RANDOM is 1OP opcode 0x07
-        code.append(0x87)  # Short form, small constant
-        code.append(100)   # Range: 1-100
-        code.append(0x00)  # Store to stack
-
-        # JL (test if <= percentage) is 2OP opcode 0x02
-        if isinstance(percentage, int):
-            code.append(0x42)  # Long form, opcode 0x02
-            code.append(0x00)  # Stack (result from RANDOM)
-            code.append(percentage & 0xFF)
-            # Branch offset would be added during COND processing
-
+        operand = operands[0]
+        if isinstance(operand, (FormNode, CondNode)):
+            # Evaluate percentage -> stack, then RANDOM -> stack (top).
+            expr = (self.generate_form(operand) if isinstance(operand, FormNode)
+                    else self.generate_cond(operand))
+            code.extend(expr)
+            code.extend([0x97, 100, 0x00])       # RANDOM 100 -> stack (1OP small)
+            # JG rand(top), percentage: long form var,var = 0x63
+            code.extend([0x63, 0x00, 0x00])
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operand)
+            code.extend([0x97, 100, 0x00])       # RANDOM 100 -> stack
+            if op_type == 0:
+                code.extend([0x43, 0x00, op_val & 0xFF])   # JG stack, small const
+            else:
+                code.extend([0x63, 0x00, op_val & 0xFF])   # JG stack, variable
+        # rand > p means PROB FAILS: branch-true -> 0, fall-through -> 1
+        code.extend(self._compare_materialize_tail(0, 1))
         return bytes(code)
 
     def gen_pick_one(self, operands: List[ASTNode]) -> bytes:
@@ -19496,8 +20494,13 @@ class ImprovedCodeGenerator:
         self._track_property_usage(operands[1])
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # GET_PROP_ADDR is 2OP opcode 0x12
         opcode = 0x12 | (op1_type << 6) | (op2_type << 5)
@@ -19527,8 +20530,13 @@ class ImprovedCodeGenerator:
             self._error(f"BTST requires exactly 2 operands, got {len(operands)}")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])
+        # Evaluate nested FormNode/CondNode operands -- _get_operand_type_and_value
+        # returns "stack" for a form WITHOUT emitting its code, so e.g.
+        # <GETP <LOC ,WINNER> ,P?ACTION> read a stale stack value (the M-END
+        # hook APPLY'd object 1's action, so the CHALICE answered "Huh?" to
+        # every "open").
+        op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
+            operands[0], operands[1], code)
 
         # Use TEST opcode (2OP:7) which branches if (value AND mask) == mask
         # TEST is opcode 7 in 2OP range
@@ -19538,10 +20546,9 @@ class ImprovedCodeGenerator:
         code.append(opcode)
         code.append(op1_val & 0xFF)
         code.append(op2_val & 0xFF)
-        # Branch byte: 0xC1 = branch on true, short offset, return true (offset 1)
-        code.append(0xC1)
-        # If we fall through (test failed), return false
-        code.append(0xB1)  # RFALSE (return 0)
+        # TEST branches on true when (value & mask) == mask -> push 1, else push 0.
+        # Materialize on the stack so <BTST ...> works as a sub-value.
+        code.extend(self._compare_materialize_tail(1, 0))
 
         return bytes(code)
 

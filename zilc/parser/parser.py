@@ -1197,10 +1197,15 @@ class Parser:
                         else:
                             # Skip non-atom tokens (like FIND with bit names)
                             self.advance()
-                    # Update the last object's flags
-                    object_flags[-1] = flags
+                    # Merge into the last object's flags. An OBJECT may carry
+                    # SEVERAL parenthesized groups -- <SYNTAX TAKE OBJECT
+                    # (FIND TAKEBIT) (ON-GROUND IN-ROOM MANY) = ...> -- and the
+                    # old code replaced the list and cleared last_was_object, so
+                    # the second group was silently skipped: TAKE lost its scope
+                    # bits and "take all" died with [You can't use multiple
+                    # direct objects].
+                    object_flags[-1] = object_flags[-1] + flags
                     self.advance()  # Skip RPAREN
-                    last_was_object = False
                 else:
                     # Other parenthetical forms - skip
                     paren_depth = 0
@@ -2124,9 +2129,16 @@ class Parser:
         # Check for size or bare flags (ITABLE only - LTABLE doesn't use size)
         # BYTE/WORD can appear as bare atoms before size: <ITABLE BYTE 2500>
         if table_type == "ITABLE":
-            # Handle bare BYTE/WORD flags before size
+            # Handle bare BYTE/WORD/NONE flags before size. NONE means "no length
+            # prefix" (zorkie's ITABLE default already) -- without it in this
+            # whitelist, <ITABLE NONE 50> parsed NONE as a VALUE and 50 as another,
+            # producing a 2-word table instead of 50 zero words. minizork declares
+            # all its parser match tables that way (<GLOBAL P-PRSO <ITABLE NONE
+            # 50>> etc.), so they overlapped in memory and every noun table
+            # write clobbered its neighbors ("sand" ghost objects, spurious
+            # SAND-F/CHALICE-F action calls, PRSI pollution).
             while self.current_token.type == TokenType.ATOM and \
-                  self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH'):
+                  self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH', 'NONE'):
                 flags.append(self.current_token.value)
                 self.advance()
             if self.current_token.type == TokenType.NUMBER:
@@ -2135,7 +2147,7 @@ class Parser:
         elif table_type == "LTABLE":
             # LTABLE can have bare flags but NOT a size parameter
             while self.current_token.type == TokenType.ATOM and \
-                  self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH'):
+                  self.current_token.value in ('BYTE', 'WORD', 'PURE', 'LENGTH', 'NONE'):
                 flags.append(self.current_token.value)
                 self.advance()
 

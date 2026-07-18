@@ -299,6 +299,58 @@ class ZILCompiler:
                 traceback.print_exc()
             return False
 
+    # ZIL source for the fallback PERFORM routine. This is the standard Infocom
+    # library dispatch: try, in order, the WINNER's ACTION, the room's ACTION
+    # (with the M-BEG phase), the verb's PREACTION, the indirect object's ACTION,
+    # the direct object's ACTION, and finally the verb's ACTIONS routine. Each is
+    # only APPLYed when its address is non-zero (APPLY 0 would be a call to 0), and
+    # the first one that returns true stops the chain. PRSA/PRSO/PRSI are saved and
+    # restored so nested <PERFORM ...> calls compose.
+    _PERFORM_FALLBACK_ZIL = """
+<ROUTINE PERFORM (A "OPTIONAL" (O <>) (I <>) "AUX" V OA OO OI RTN)
+    <SET OA ,PRSA>
+    <SET OO ,PRSO>
+    <SET OI ,PRSI>
+    <SETG PRSA .A>
+    <SETG PRSO .O>
+    <SETG PRSI .I>
+    <COND (<AND <SET RTN <GETP ,WINNER ,P?ACTION>> <SET V <APPLY .RTN>>> T)
+          (<AND <SET RTN <GETP <LOC ,WINNER> ,P?ACTION>>
+                <SET V <APPLY .RTN ,M-BEG>>> T)
+          (<AND <SET RTN <GET ,PREACTIONS .A>> <SET V <APPLY .RTN>>> T)
+          (<AND .I <SET RTN <GETP .I ,P?ACTION>> <SET V <APPLY .RTN>>> T)
+          (<AND .O <N==? .A ,V?WALK> <SET RTN <GETP .O ,P?ACTION>> <SET V <APPLY .RTN>>> T)
+          (<AND <SET RTN <GET ,ACTIONS .A>> <SET V <APPLY .RTN>>> T)>
+    <SETG PRSA .OA>
+    <SETG PRSO .OO>
+    <SETG PRSI .OI>
+    .V>
+"""
+
+    def _maybe_inject_perform(self, program, source: str) -> None:
+        """Append a fallback PERFORM routine if the game calls PERFORM but none
+        was compiled (see the call site in compile_file_multi for why)."""
+        import re
+        defined = {getattr(r, 'name', '').upper() for r in program.routines}
+        if 'PERFORM' in defined:
+            return
+        # Only inject when PERFORM is actually used as a verb dispatcher (a call
+        # like <PERFORM ,V?TAKE ...> or <PERFORM .A>), never for the <ROUTINE
+        # PERFORM ...> definition text. Toy games that never call PERFORM keep the
+        # lightweight builtin behavior untouched.
+        if not re.search(r'<PERFORM\s+[.,]', source):
+            return
+        try:
+            lexer = Lexer(self._PERFORM_FALLBACK_ZIL, "<perform-fallback>")
+            toks = lexer.tokenize()
+            sub = Parser(toks, "<perform-fallback>").parse()
+        except Exception as e:  # noqa: BLE001
+            self.log(f"  PERFORM fallback injection failed to parse: {e}")
+            return
+        if sub.routines:
+            program.routines.extend(sub.routines)
+            self.log("  Injected standard-library PERFORM fallback routine")
+
     def compile_file_multi(self, main_file: str, included_files: list = None) -> bytes:
         """
         Compile multiple ZIL files together.
@@ -2227,12 +2279,17 @@ class ZILCompiler:
             'PS?DIRECTION': 0x10,   # Bit 4: direction
             'PS?PREPOSITION': 0x08, # Bit 3: preposition
             'PS?BUZZ-WORD': 0x04,   # Bit 2: buzz word
-            # P1? constants for first/second part of speech slot
+            # P1? constants: the "part-1 code" a word's flag byte carries in its low 2
+            # bits (flags & P-P1BITS) when that part of speech is its primary slot.
+            # These MUST match Dictionary._compute_type_byte, which sets verb=1, adj=2,
+            # dir=3 (object/noun and preposition carry no low bits, i.e. 0). WT? reads
+            # the data byte at offset 5 when (flags & 3) == P1?<part>, else offset 6, so
+            # a mismatch makes it read the wrong byte (e.g. verb number vs 0).
             'P1?OBJECT': 0,
-            'P1?VERB': 0,
-            'P1?ADJECTIVE': 1,
-            'P1?DIRECTION': 2,
-            'P1?PREPOSITION': 3,
+            'P1?VERB': 1,
+            'P1?ADJECTIVE': 2,
+            'P1?DIRECTION': 3,
+            'P1?PREPOSITION': 0,
             # W?* word constants - placeholders, should be dictionary addresses
             # TODO: These need to be resolved to actual dictionary word addresses
             # during assembly when the dictionary is built
@@ -2401,13 +2458,36 @@ class ZILCompiler:
                 if action_routine in actions:
                     preactions[preaction_routine] = actions[action_routine]
 
+        # V?<name> names an ACTION, and an action is named after its routine
+        # (V-<name>). The verb-word pass above assigns V?<verb> from the verb's
+        # FIRST syntax line, which is wrong when a same-named routine exists on a
+        # LATER line: <SYNTAX WALK = V-WALK-AROUND> (line 1) sets V?WALK to
+        # V-WALK-AROUND, but <SYNTAX WALK OBJECT = V-WALK> (line 2) defines the real
+        # V-WALK. PARSER's bare-direction path does <SETG PRSA ,V?WALK> and MUST
+        # reach V-WALK (reads P-WALK-DIR and moves), not V-WALK-AROUND ("use compass
+        # directions"). Let each routine V-<name> own V?<name>; verbs with no
+        # same-named routine keep their verb-word assignment.
+        for _routine_name, _act_num in actions.items():
+            if _routine_name.startswith('V-'):
+                verb_constants[f'V?{_routine_name[2:].upper()}'] = _act_num
+
         # Collect prepositions from SYNTAX patterns
         # Prepositions are non-verb words that appear in syntax patterns
         # They can be BEFORE the first OBJECT (e.g., LOOK THROUGH OBJECT)
         # or BETWEEN OBJECT slots (e.g., PUT OBJECT IN OBJECT)
         prepositions = {}  # word -> PR? number
         canonical_prepositions = set()  # only canonical prepositions (not synonyms)
-        prep_num = 1  # Start from 1
+        # Number prepositions DESCENDING, Infocom-style. The classic parser's
+        # GET-PREP reconstructs a preposition as (syntax-entry byte & 0x3F) + 192
+        # and compares it against the dictionary value, so dict prep numbers MUST
+        # live in 192..255 -- with ascending 1..N numbering no preposition syntax
+        # line could ever match and every "turn on lamp" / "put X in Y" died with
+        # [not one I recognize]. Start at 249 (not Infocom's 255): values 250-255
+        # are 0xFA-0xFF, the position-blind placeholder scanners' magic high bytes,
+        # and a raw prep2 byte of 0xFB in a syntax entry table got rewritten as a
+        # vocab placeholder (PUT..IN..'s 251 became 48). 192..249 is scanner-safe
+        # and GET-PREP's (x & 0x3F) + 192 round-trips the whole range.
+        prep_num = 249
 
         # Build synonym -> canonical mapping for preposition synonym handling
         # When SYNONYM declares words, they should share the same preposition number
@@ -2454,7 +2534,7 @@ class ZILCompiler:
                             # Assign a new prep number (canonical)
                             prepositions[word_upper] = prep_num
                             canonical_prepositions.add(word_upper)
-                            prep_num += 1
+                            prep_num -= 1
 
         # Add PREP-SYNONYM synonyms that weren't encountered in SYNTAX patterns
         # <PREP-SYNONYM TO TOWARD TOWARDS> means TOWARD and TOWARDS get same prep number as TO
@@ -2536,8 +2616,10 @@ class ZILCompiler:
                         # Non-removed synonym shares main verb's number
                         verb_numbers[syn_upper] = main_verb_num
 
-        # Build syntax_entries with scope flags for VERBS table generation
-        # Each entry: (verb_word, action_num, object_flags)
+        # Build syntax_entries for VERBS table generation. Each entry describes ONE
+        # SYNTAX line in the compact-table form the Infocom parser reads: how many
+        # objects, the preposition before each object, the action number (what PRSA
+        # becomes), and per-object FIND/scope flags.
         syntax_entries = []
         for syntax_def in program.syntax:
             if not syntax_def.pattern or not syntax_def.routine:
@@ -2546,16 +2628,42 @@ class ZILCompiler:
             if not verb_word or not isinstance(verb_word, str):
                 continue
             verb_upper = verb_word.upper()
-            # Get action number for this verb
-            action_num = verb_constants.get(f'V?{verb_upper}', 0)
-            if action_num == 0:
-                action_num = verb_constants.get(f'ACT?{verb_upper}', 0)
-            # Get object flags from syntax definition
+
+            # Two different "action numbers" matter, for the two parser dialects:
+            #   action_num      - the ACTION routine's number. Classic MDL games store
+            #                     this in P-SACTION so <VERB? EXAMINE> works even for a
+            #                     line like "LOOK AT OBJECT = V-EXAMINE".
+            #   verb_action_num - the per-verb V?/ACT? constant. The ZILF VERBS table is
+            #                     indexed by it (each verb gets its own slot, even when
+            #                     several verbs share one routine).
+            # The routine field may be "V-PUT PRE-PUT"; take the first (action) routine.
+            routine_name = str(syntax_def.routine).split()[0] if syntax_def.routine else ''
+            verb_action_num = verb_constants.get(f'V?{verb_upper}', 0) or verb_constants.get(f'ACT?{verb_upper}', 0)
+            action_num = actions.get(routine_name, 0) or verb_action_num
+
             object_flags = syntax_def.object_flags if hasattr(syntax_def, 'object_flags') else []
+
+            # Walk the pattern after the verb: OBJECT markers count objects; any word
+            # that is a known preposition and precedes an OBJECT is that object's prep.
+            obj_preps = []
+            cur_prep = 0
+            for tok in syntax_def.pattern[1:]:
+                tu = str(tok).upper()
+                if tu == 'OBJECT':
+                    obj_preps.append(cur_prep)
+                    cur_prep = 0
+                elif tu in prepositions:
+                    cur_prep = prepositions[tu]
+            num_objects = len(obj_preps)
+
             syntax_entries.append({
                 'verb': verb_upper,
                 'action_num': action_num,
+                'verb_action_num': verb_action_num,
                 'object_flags': object_flags,
+                'num_objects': num_objects,
+                'prep1': obj_preps[0] if num_objects >= 1 else 0,
+                'prep2': obj_preps[1] if num_objects >= 2 else 0,
             })
 
         # Store for later use during code generation
@@ -2688,6 +2796,26 @@ class ZILCompiler:
         # Store program for access by codegen (e.g., for TELL-TOKENS)
         self.program = program
 
+        # Detect the parser dialect. Classic MDL Infocom games (minizork, zork1, ...)
+        # ship their own parser.zil that reads the compact syntax table (P-SACTION /
+        # P-SPREP1 / P-SLOC1 records, VERBS indexed by verb-number). ZILF-library and
+        # toy games use the byte-6 "options" VERBS layout indexed by action-number.
+        # This flag selects the VERBS table format and the dictionary verb-byte below.
+        self._is_classic_parser = any(
+            getattr(r, 'name', '') == 'SYNTAX-CHECK' for r in program.routines
+        )
+
+        # Inject a standard-library PERFORM routine when the game calls PERFORM as
+        # its verb dispatcher but no PERFORM routine survived compilation. Real
+        # Infocom games define PERFORM inside an MDL `%<COND ...>` compile-time
+        # form (misc.zil) that our front end does not evaluate, so PERFORM is lost
+        # and every command silently does nothing. The zorkie <PERFORM> builtin is
+        # only a stub (it dispatches the direct object's ACTION and nothing else),
+        # so we supply the real action chain: WINNER action, room M-BEG action,
+        # verb PREACTION, indirect/direct object ACTION, then the verb's ACTIONS
+        # routine. See _maybe_inject_perform.
+        self._maybe_inject_perform(program, source)
+
         # Determine target version:
         # - If override_version is set, use max of constructor and source (upgrade only, never downgrade)
         # - Otherwise, use source version if explicit, else constructor version
@@ -2804,6 +2932,7 @@ class ZILCompiler:
                                        action_table=action_table_info,
                                        symbol_tables=symbol_tables,
                                        compiler=self)
+        self._last_codegen = codegen  # debug introspection hook
 
         # Process DEFINE-GLOBALS declarations
         # Each DEFINE-GLOBALS creates a table global and registers entry accessors
@@ -3011,6 +3140,20 @@ class ZILCompiler:
 
             if 'ADJECTIVE' in obj.properties:
                 adjectives = obj.properties['ADJECTIVE']
+
+                def _adj_value(word, _obj_num=obj_num):
+                    # Classic parser: the dictionary's adjective value must be the
+                    # A?<word> adjective NUMBER -- THIS-IT? compares it (via P-ADJ)
+                    # against the object's P?ADJECTIVE byte array with ZMEMQB.
+                    # Storing the object number here made the two sides disagree
+                    # and no adjective+noun phrase ("trap door") ever matched.
+                    if getattr(self, '_is_classic_parser', False):
+                        an = (self._action_table or {}).get('verb_constants', {}).get(
+                            f'A?{str(word).upper()}')
+                        if isinstance(an, int) and an > 0:
+                            return an
+                    return _obj_num
+
                 if hasattr(adjectives, '__iter__') and not isinstance(adjectives, str):
                     for adj in adjectives:
                         if hasattr(adj, 'value'):
@@ -3018,18 +3161,27 @@ class ZILCompiler:
                             if isinstance(val, (int, float)):
                                 val = str(val)
                             self._check_vocab_word_apostrophe(val, 'ADJECTIVE', obj_name)
-                            dictionary.add_adjective(val, obj_num)
+                            dictionary.add_adjective(val, _adj_value(val))
                         elif isinstance(adj, str):
                             self._check_vocab_word_apostrophe(adj, 'ADJECTIVE', obj_name)
-                            dictionary.add_adjective(adj, obj_num)
+                            dictionary.add_adjective(adj, _adj_value(adj))
                         elif isinstance(adj, (int, float)):
-                            dictionary.add_adjective(str(adj), obj_num)
+                            dictionary.add_adjective(str(adj), _adj_value(str(adj)))
                 elif hasattr(adjectives, 'value'):
                     val = adjectives.value
                     if isinstance(val, (int, float)):
                         val = str(val)
                     self._check_vocab_word_apostrophe(val, 'ADJECTIVE', obj_name)
-                    dictionary.add_adjective(val, obj_num)
+                    dictionary.add_adjective(val, _adj_value(val))
+            if 'PSEUDO' in obj.properties:
+                # (PSEUDO "WORD" RTN ...): each quoted word must be a dictionary
+                # noun or the parser answers [I don't know the word "chain"].
+                _ps = obj.properties['PSEUDO']
+                if hasattr(_ps, '__iter__') and not isinstance(_ps, str):
+                    from .parser.ast_nodes import StringNode as _SN2
+                    for _p in _ps:
+                        if isinstance(_p, _SN2):
+                            dictionary.add_word(_p.value.lower(), 'noun', 1)  # classic noun dummy value
             obj_num += 1
 
         for room in program.rooms:
@@ -3047,12 +3199,45 @@ class ZILCompiler:
                 elif hasattr(synonyms, 'value'):
                     self._check_vocab_word_apostrophe(synonyms.value, 'SYNONYM', room_name)
                     dictionary.add_synonym(synonyms.value, obj_num)
+            if 'PSEUDO' in room.properties:
+                # (PSEUDO "WORD" RTN ...): quoted words must be dictionary nouns.
+                _ps = room.properties['PSEUDO']
+                if hasattr(_ps, '__iter__') and not isinstance(_ps, str):
+                    from .parser.ast_nodes import StringNode as _SN2
+                    for _p in _ps:
+                        if isinstance(_p, _SN2):
+                            dictionary.add_word(_p.value.lower(), 'noun', 1)  # classic noun dummy value
             obj_num += 1
 
         # Get verb numbers from action table (if available)
         verb_numbers = {}
         if action_table_info and 'verb_numbers' in action_table_info:
             verb_numbers = action_table_info['verb_numbers']
+
+        # The dictionary verb number (byte 5) MUST be the number the parser uses to
+        # index the VERBS table: the runtime does <GET ,VERBS <- 255 <dict byte5>>> and
+        # _generate_verbs_table files each verb's syntax at (255 - action_num). So the
+        # dictionary must store the verb's action_num, NOT the separate verb_numbers
+        # value (for "look" those were 100 vs 196, so the syntax lookup missed and every
+        # command failed). Build word -> action_num from the syntax entries.
+        verb_to_action = {}
+        if action_table_info and 'syntax_entries' in action_table_info:
+            for _e in action_table_info['syntax_entries']:
+                _vw = _e.get('verb')
+                # ZILF indexes VERBS by the verb's own V?/ACT? constant, so the
+                # dictionary verb-byte must match that (not the routine's action).
+                _an = _e.get('verb_action_num') or _e.get('action_num')
+                if _vw is not None and _an is not None:
+                    verb_to_action.setdefault(str(_vw).upper(), _an)
+
+        def _dict_verb_num(word_upper):
+            # The dictionary byte 5 must match how _generate_verbs_table files each
+            # verb's syntax so that <GET ,VERBS <- 255 <dict byte5>>> lands on it.
+            if getattr(self, '_is_classic_parser', False):
+                # Classic MDL parser: filed at (255 - verb_number).
+                return verb_numbers.get(word_upper, 0)
+            # ZILF parser: filed at (255 - action_num).
+            return verb_to_action.get(word_upper, verb_numbers.get(word_upper, 0))
 
         # Get preposition numbers from action table (if available)
         # Maps word -> PR? number (e.g., 'ON' -> 1, 'IN' -> 2)
@@ -3076,8 +3261,9 @@ class ZILCompiler:
                     word_upper = word.upper()
 
                     if i == 0:
-                        # First word is ALWAYS the verb - add with verb number
-                        verb_num = verb_numbers.get(word_upper, 0)
+                        # First word is ALWAYS the verb - add with the action_num that
+                        # indexes VERBS (see _dict_verb_num above).
+                        verb_num = _dict_verb_num(word_upper)
                         dictionary.add_verb(word_lower, verb_num)
                     elif word_upper not in syntax_keywords:
                         # Non-verb words that aren't syntax keywords are prepositions
@@ -3089,7 +3275,7 @@ class ZILCompiler:
             # Verb synonyms are words that share the same dictionary data as the main verb
             if syntax_def.pattern and syntax_def.verb_synonyms:
                 main_verb = syntax_def.pattern[0]
-                main_verb_num = verb_numbers.get(main_verb.upper(), 0)
+                main_verb_num = _dict_verb_num(main_verb.upper())
                 for synonym in syntax_def.verb_synonyms:
                     # Synonym shares main verb's verb number
                     dictionary.add_verb(synonym.lower(), main_verb_num)
@@ -3915,6 +4101,66 @@ class ZILCompiler:
             # Not found
             return None
 
+        def _register_prop_string(text):
+            """Register a string used inside property data (exit messages,
+            LDESC/FDESC/TEXT). Returns a 0xFC00|idx marker the assembler resolves
+            to the string's packed address (data namespace: see
+            register_data_string)."""
+            return codegen.register_data_string(text)
+
+        def encode_exit_classic(value):
+            """Encode a classic (PTSIZE-dispatched) direction exit property."""
+            from .parser.ast_nodes import AtomNode as _A, StringNode as _S
+
+            def room_num(node):
+                nm = node.value if isinstance(node, _A) else str(node)
+                return obj_name_to_num.get(nm, 0)
+
+            if isinstance(value, _A):
+                return bytes([room_num(value) & 0xFF])                    # UEXIT
+            if isinstance(value, _S):
+                w = _register_prop_string(value.value)
+                return bytes([(w >> 8) & 0xFF, w & 0xFF])                  # NEXIT
+            if not isinstance(value, (list, tuple)) or not value:
+                return None
+            toks = list(value)
+            if isinstance(toks[0], _S):                                    # (DIR "msg")
+                w = _register_prop_string(toks[0].value)
+                return bytes([(w >> 8) & 0xFF, w & 0xFF])
+            k0 = toks[0].value.upper() if isinstance(toks[0], _A) else ''
+            if k0 == 'SORRY' and len(toks) >= 2 and isinstance(toks[1], _S):
+                w = _register_prop_string(toks[1].value)
+                return bytes([(w >> 8) & 0xFF, w & 0xFF])                  # NEXIT
+            if k0 == 'PER' and len(toks) >= 2:
+                rtn = toks[1].value if isinstance(toks[1], _A) else str(toks[1])
+                ph = resolve_atom_value(rtn)  # 0xFA00|idx routine placeholder
+                if not isinstance(ph, int):
+                    ph = 0
+                return bytes([(ph >> 8) & 0xFF, ph & 0xFF, 0])             # FEXIT
+            if k0 == 'TO':
+                dest = room_num(toks[1]) if len(toks) >= 2 else 0
+                if_i = next((i for i, t in enumerate(toks)
+                             if isinstance(t, _A) and t.value.upper() == 'IF'), None)
+                if if_i is None:
+                    return bytes([dest & 0xFF])                            # UEXIT
+                cond = toks[if_i + 1] if len(toks) > if_i + 1 else None
+                cond_name = cond.value if isinstance(cond, _A) else str(cond)
+                is_door = any(isinstance(t, _A) and t.value.upper() == 'IS'
+                              for t in toks[if_i + 1:])
+                els = 0
+                for i, t in enumerate(toks):
+                    if (isinstance(t, _A) and t.value.upper() == 'ELSE'
+                            and i + 1 < len(toks) and isinstance(toks[i + 1], _S)):
+                        els = _register_prop_string(toks[i + 1].value)
+                if is_door:
+                    dobj = obj_name_to_num.get(cond_name, 0)
+                    return bytes([dest & 0xFF, dobj & 0xFF,
+                                  (els >> 8) & 0xFF, els & 0xFF, 0])       # DEXIT
+                gnum = codegen.globals.get(cond_name, 0)
+                return bytes([dest & 0xFF, gnum & 0xFF,
+                              (els >> 8) & 0xFF, els & 0xFF])              # CEXIT
+            return None
+
         # Helper to extract property number and value
         def extract_properties(obj_node, obj_idx):
             """Extract properties from object node."""
@@ -3930,57 +4176,142 @@ class ZILCompiler:
                     # Store dictionary word offset placeholder for first synonym
                     prop_num = prop_map['SYNONYM']
                     synonyms = value
-                    first_word = None
+                    words = []
                     if hasattr(synonyms, '__iter__') and not isinstance(synonyms, str):
                         for syn in synonyms:
                             if hasattr(syn, 'value'):
-                                first_word = syn.value
+                                words.append(syn.value)
                             elif isinstance(syn, str):
-                                first_word = syn
-                            break
+                                words.append(syn)
                     elif hasattr(synonyms, 'value'):
-                        first_word = synonyms.value
+                        words.append(synonyms.value)
 
-                    if first_word:
-                        # Unescape the word (e.g., \, -> ,) before lookup
-                        unescaped_word = self._unescape_vocab_word(str(first_word))
-                        word_lower = unescaped_word.lower()
+                    if not getattr(self, '_is_classic_parser', False):
+                        words = words[:1]
+                    # The classic THIS-IT? matches the typed noun against the WHOLE
+                    # P?SYNONYM word array (ZMEMQ over PTSIZE/2 entries); storing
+                    # only the first synonym made "open trapdoor" etc. unfindable.
+                    # V3 property data caps at 8 bytes = 4 words.
+                    marker_words = []
+                    for w in words[:4]:
+                        word_lower = self._unescape_vocab_word(str(w)).lower()
                         if word_lower in dict_word_offsets:
-                            # Store placeholder: word_offset | 0x8000 (high bit marks as fixup needed)
-                            # The assembler will add dictionary base address
-                            word_offset = dict_word_offsets[word_lower]
-                            props[prop_num] = word_offset | 0x8000  # Mark for fixup
+                            # 0x8000 | word_offset: the assembler's property-data
+                            # scan rewrites each such word to dict_addr + offset.
+                            marker_words.append(0x8000 | (dict_word_offsets[word_lower] & 0x0FFF))
                             dict_word_fixups.append((word_lower, obj_idx, prop_num))
-                        else:
-                            props[prop_num] = 0  # Word not found
+                    if marker_words:
+                        data = bytearray()
+                        for mw in marker_words:
+                            data.extend([(mw >> 8) & 0xFF, mw & 0xFF])
+                        props[prop_num] = bytes(data)
+                    else:
+                        props[prop_num] = 0  # Word not found
                 elif key == 'ADJECTIVE' and 'ADJECTIVE' in prop_map:
-                    # Store dictionary word offset placeholder for first adjective
                     prop_num = prop_map['ADJECTIVE']
                     adjectives = value
-                    first_word = None
+                    words = []
                     if hasattr(adjectives, '__iter__') and not isinstance(adjectives, str):
                         for adj in adjectives:
                             if hasattr(adj, 'value'):
-                                first_word = adj.value
+                                words.append(adj.value)
                             elif isinstance(adj, str):
-                                first_word = adj
-                            break
+                                words.append(adj)
                     elif hasattr(adjectives, 'value'):
-                        first_word = adjectives.value
+                        words.append(adjectives.value)
 
-                    if first_word:
-                        # Unescape the word (e.g., \, -> ,) before lookup
-                        unescaped_word = self._unescape_vocab_word(str(first_word))
-                        word_lower = unescaped_word.lower()
+                    # Classic parser: THIS-IT? matches the typed adjective with
+                    # ZMEMQB -- a BYTE compare of the A?<word> adjective NUMBER
+                    # against the P?ADJECTIVE byte array. The old encoding stored a
+                    # 0xFE00|word-offset marker that resolved to a dictionary word
+                    # ADDRESS, so no adjective ever matched and two-word nouns
+                    # ("open trap door") reported "You can't see any ...".
+                    adj_nums = []
+                    if getattr(self, '_is_classic_parser', False):
+                        for w in words[:8]:
+                            an = codegen.constants.get(f'A?{str(w).upper()}')
+                            if isinstance(an, int) and 0 < an <= 255:
+                                adj_nums.append(an)
+                            else:
+                                adj_nums = []
+                                break
+                    if adj_nums:
+                        props[prop_num] = bytes(adj_nums)
+                    elif words:
+                        # ZILF-style fallback: first adjective as dict-word marker
+                        word_lower = self._unescape_vocab_word(str(words[0])).lower()
                         if word_lower in dict_word_offsets:
                             word_offset = dict_word_offsets[word_lower]
                             props[prop_num] = 0xFE00 | (word_offset & 0xFF)
                             dict_word_fixups.append((word_lower, obj_idx, prop_num))
                         else:
                             props[prop_num] = 0
+                elif key == 'PSEUDO' and getattr(self, '_is_classic_parser', False):
+                    # (PSEUDO "W1" RTN1 "W2" RTN2): the classic GLOBAL-CHECK walks
+                    # P?PSEUDO as [word-address, routine] pairs -- compare P-NAM
+                    # against the word, PUTP the routine into PSEUDO-OBJECT.
+                    # V3 property cap (8 bytes) allows two pairs.
+                    if key not in prop_map:
+                        prop_map[key] = next_prop_num
+                        next_prop_num += 1
+                    prop_num = prop_map[key]
+                    from .parser.ast_nodes import StringNode as _SN3, AtomNode as _AN3
+                    items = list(value) if isinstance(value, (list, tuple)) else [value]
+                    data = bytearray()
+                    k = 0
+                    while k + 1 < len(items) and len(data) <= 4:
+                        wnode, rnode = items[k], items[k + 1]
+                        k += 2
+                        if not isinstance(wnode, _SN3):
+                            continue
+                        wl = self._unescape_vocab_word(wnode.value).lower()
+                        if wl not in dict_word_offsets:
+                            continue
+                        wmark = 0x8000 | (dict_word_offsets[wl] & 0x0FFF)
+                        rname = rnode.value if isinstance(rnode, _AN3) else str(rnode)
+                        rmark = resolve_atom_value(rname)
+                        if not isinstance(rmark, int):
+                            rmark = 0
+                        data.extend([(wmark >> 8) & 0xFF, wmark & 0xFF,
+                                     (rmark >> 8) & 0xFF, rmark & 0xFF])
+                        dict_word_fixups.append((wl, obj_idx, prop_num))
+                    if data:
+                        props[prop_num] = bytes(data)
+                elif key == 'GLOBAL':
+                    # Room local-globals: (GLOBAL obj1 obj2 ...) lists objects that
+                    # are referable from that room (windows, scenery, the house...).
+                    # The classic parser's GLOBAL-CHECK walks them with GETB, so the
+                    # property must be a BYTE array of object numbers. Handled here --
+                    # ahead of the generic `key in prop_map` branch, which fired for
+                    # every room after the first (once GLOBAL was auto-assigned) and
+                    # stored the raw atom list; encode_property_value only encodes
+                    # ints, so it dropped the property, no room got P?GLOBAL, and every
+                    # local-global was out of scope -> "open window" gave a bogus
+                    # "[Which window do you mean, the sand?]".
+                    if 'GLOBAL' not in prop_map:
+                        prop_map['GLOBAL'] = next_prop_num
+                        next_prop_num += 1
+                    prop_num = prop_map['GLOBAL']
+                    nums = bytearray()
+                    for item in (value if isinstance(value, list) else [value]):
+                        nm = item.value if hasattr(item, 'value') else item
+                        onum = obj_name_to_num.get(nm) if isinstance(nm, str) else None
+                        if onum is not None:
+                            nums.append(onum & 0xFF)
+                    props[prop_num] = bytes(nums)
                 elif key in prop_map:
                     prop_num = prop_map[key]
                     # Check if this is a direction property (e.g., NORTH, SOUTH, etc.)
+                    # (IN ROOMS) / (IN LOCAL-GLOBALS) is CONTAINMENT (the parent
+                    # link), not the IN direction -- a bare atom value never means
+                    # an exit. Emitting it as one gave every room a bogus P?IN
+                    # byte and, fatally, gave PSEUDO-OBJECT a property BEFORE
+                    # P?ACTION: GLOBAL-CHECK's BACK-5 name-patch hack assumes
+                    # ACTION is the first property and clobbered the property
+                    # header instead, zeroing the pseudo action ("raise chain"
+                    # stopped working at the Shaft Room).
+                    if key == 'IN' and not isinstance(value, (list, tuple)):
+                        continue
                     if key in program.directions:
                         # Check if PROPSPEC was cleared for DIRECTIONS
                         propspec_cleared = 'DIRECTIONS' in program.cleared_propspecs
@@ -4009,11 +4340,25 @@ class ZILCompiler:
                             else:
                                 props[prop_num] = value
                         else:
-                            # Default: extract destination from (DIR TO DEST) or (DIR PER ROUTINE)
-                            exit_value = self._extract_direction_exit(value, obj_name_to_num)
-                            if exit_value is not None:
-                                # Wrap in ByteValue so it's stored as single byte (for GETB access)
-                                props[prop_num] = ByteValue(exit_value)
+                            # Classic-parser games read exits by PTSIZE: UEXIT(1)=
+                            # [room], NEXIT(2)=[str-paddr], FEXIT(3)=[routine-paddr,
+                            # pad], CEXIT(4)=[room, global-var#, str-paddr],
+                            # DEXIT(5)=[room, door-obj#, str-paddr, pad]. The old
+                            # path flattened PER/IF/string exits to one garbage
+                            # byte, so V-WALK classified them as UEXIT and GOTO'd
+                            # to room 0/4 ("down" through minizork's trap door put
+                            # HERE=0 and the game went dark forever).
+                            encoded = None
+                            if getattr(self, '_is_classic_parser', False):
+                                encoded = encode_exit_classic(value)
+                            if encoded is not None:
+                                props[prop_num] = encoded
+                            else:
+                                # Default: destination from (DIR TO DEST)
+                                exit_value = self._extract_direction_exit(value, obj_name_to_num)
+                                if exit_value is not None:
+                                    # ByteValue -> single byte (for GETB access)
+                                    props[prop_num] = ByteValue(exit_value)
                     # Check if this property has a PROPDEF pattern
                     elif key in propdef_patterns:
                         # Try to apply PROPDEF pattern matching
@@ -4040,10 +4385,20 @@ class ZILCompiler:
                         props[prop_num] = 0xFD00 | table_idx
                     # Extract value from AST node
                     elif hasattr(value, 'value'):
-                        # Try to resolve atom values (flags, objects, constants)
-                        str_val = value.value
-                        resolved = resolve_atom_value(str_val) if isinstance(str_val, str) else None
-                        props[prop_num] = resolved if resolved is not None else str_val
+                        from .parser.ast_nodes import StringNode as _SN
+                        if isinstance(value, _SN) and prop_num != 1:
+                            # A string-valued property (LDESC/FDESC/TEXT...) holds
+                            # the PACKED ADDRESS of the string -- game code does
+                            # <TELL <GETP obj P?LDESC>> (print_paddr). Storing the
+                            # text inline truncated it to V3's 8-byte property cap
+                            # and printed z-garbage (the corrupted death/room text).
+                            w = _register_prop_string(value.value)
+                            props[prop_num] = bytes([(w >> 8) & 0xFF, w & 0xFF])
+                        else:
+                            # Try to resolve atom values (flags, objects, constants)
+                            str_val = value.value
+                            resolved = resolve_atom_value(str_val) if isinstance(str_val, str) else None
+                            props[prop_num] = resolved if resolved is not None else str_val
                     else:
                         props[prop_num] = value
                 elif key not in ['FLAGS', 'IN', 'LOC']:
@@ -4064,10 +4419,16 @@ class ZILCompiler:
                         # Store 0xFD00 | idx as placeholder for table address
                         props[prop_num] = 0xFD00 | table_idx
                     elif hasattr(value, 'value'):
-                        # Try to resolve atom values (flags, objects, constants)
-                        str_val = value.value
-                        resolved = resolve_atom_value(str_val) if isinstance(str_val, str) else None
-                        props[prop_num] = resolved if resolved is not None else str_val
+                        from .parser.ast_nodes import StringNode as _SN
+                        if isinstance(value, _SN) and prop_num != 1:
+                            # String property -> packed-address marker (see above).
+                            w = _register_prop_string(value.value)
+                            props[prop_num] = bytes([(w >> 8) & 0xFF, w & 0xFF])
+                        else:
+                            # Try to resolve atom values (flags, objects, constants)
+                            str_val = value.value
+                            resolved = resolve_atom_value(str_val) if isinstance(str_val, str) else None
+                            props[prop_num] = resolved if resolved is not None else str_val
                     else:
                         props[prop_num] = value
 
@@ -4426,7 +4787,18 @@ class ZILCompiler:
             tell_placeholder_positions=tell_placeholder_positions,
             vocab_fixups=vocab_fixups,
             vword_fixups=vword_fixups if new_parser else None,
-            tchars_table_idx=tchars_table_idx
+            tchars_table_idx=tchars_table_idx,
+            # Classic games: direction (exit) properties hold raw room/flag bytes
+            # the dict-placeholder scanner must not touch (see
+            # _resolve_dict_placeholders). Lowest direction property number.
+            dir_prop_min=((31 if self.version <= 3 else 63) - len(program.directions) + 1
+                          if getattr(self, '_is_classic_parser', False) and program.directions
+                          else None),
+            # Routine-code string-marker namespace boundary (see
+            # register_data_string): the routines scanner only accepts these.
+            string_code_index_max=codegen._next_string_operand_index,
+            string_data_placeholders=codegen.get_string_data_placeholders(),
+            table_string_fixups=codegen._table_string_fixups
         )
 
         return story
