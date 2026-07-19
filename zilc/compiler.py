@@ -3875,6 +3875,25 @@ class ZILCompiler:
                             dictionary.add_word(_p.value.lower(), 'noun', 1)  # classic noun dummy value
             obj_num += 1
 
+        # Adjective synonyms: <SYNONYM WEST W> where the head (WEST) is also an
+        # object ADJECTIVE (the compass-rose runes) must give each alias (W) the
+        # head's A?-number too. Build()-time alias inheritance can't, because a
+        # direction-group alias is filtered out of the alias word list and the
+        # head's primary dict role is direction -- exactly the preposition-
+        # synonym case handled above. Without this "touch w rune" failed with
+        # "You used the word 'w' in a way that I don't understand" while "touch
+        # west rune" worked; the official binary gives n/s/e/w the same
+        # A?-number (and adjective flag) as north/south/east/west.
+        _adj_vals = getattr(dictionary, 'adjective_values', {}) or {}
+        for _words in getattr(program, 'verb_synonym_groups', []) or []:
+            if len(_words) >= 2:
+                _head = str(_words[0]).lower()
+                if _head in _adj_vals:
+                    for _al in _words[1:]:
+                        _all = str(_al).lower()
+                        if _all not in _adj_vals:
+                            dictionary.add_adjective(_all, _adj_vals[_head])
+
         # Get verb numbers from action table (if available)
         verb_numbers = {}
         if action_table_info and 'verb_numbers' in action_table_info:
@@ -3976,6 +3995,19 @@ class ZILCompiler:
                 dictionary.add_verb(synonym.lower(), main_verb_num)
                 dictionary.add_verb_synonym(synonym, main_verb)
 
+        # Emit any preposition that never appeared LITERALLY in a SYNTAX
+        # pattern. PREP-SYNONYM aliases (e.g. <PREP-SYNONYM IN INSIDE INTO>:
+        # INSIDE/INTO share IN's prep number but only IN is written in the
+        # syntax lines) are collected into the preposition map yet the loop
+        # above only adds words it actually sees in a pattern -- so the aliases
+        # were absent from the dictionary and the parser answered "I don't know
+        # the word 'into.'" (spellbreaker's zipper: "look into zipper"). Add
+        # every prep from the map that isn't a preposition yet, matching the
+        # official binary where inside/into/onto carry IN/ON's number.
+        for _prep_word, _prep_number in prepositions.items():
+            if _prep_word.lower() not in dictionary.preposition_numbers:
+                dictionary.add_preposition(_prep_word.lower(), _prep_number)
+
         # Get initial vocab placeholders from codegen (will be updated during object table build)
         vocab_placeholders = codegen.get_vocab_placeholders()
         # Also get VOC words - these have proper part-of-speech and should NOT be pre-added as buzz
@@ -4035,9 +4067,10 @@ class ZILCompiler:
                         pos = None
                         if len(v.operands) >= 2 and isinstance(v.operands[1], _A):
                             pos = v.operands[1].value.upper()
-                        if not hasattr(codegen, '_voc_words'):
-                            codegen._voc_words = {}
-                        codegen._voc_words.setdefault(w, pos)
+                        # Accumulate every part-of-speech (a word may be both a
+                        # noun and an adjective); never let a no-pos VOC clobber
+                        # a real flag. See codegen.record_voc_word.
+                        codegen.record_voc_word(w, pos)
                 for o in v.operands:
                     _prescan_voc_forms(o)
             elif isinstance(v, (list, tuple)):
@@ -4047,31 +4080,41 @@ class ZILCompiler:
             for _pv in _pv_obj.properties.values():
                 _prescan_voc_forms(_pv)
 
-        # Add VOC words with their part-of-speech to dictionary
+        # Add VOC words with their part-of-speech to dictionary. A word may
+        # carry SEVERAL parts of speech (record_voc_word accumulates a set):
+        # spellbreaker's DIMITHIO is both a NOUN and an ADJECTIVE, and the
+        # dictionary ORs the flags. An empty set means the word was only ever
+        # seen as a bare <VOC "word"> with no part-of-speech.
         voc_words = codegen.get_voc_words()
-        for word, pos_type in voc_words.items():
-            # Map VOC part-of-speech to dictionary word type
-            if pos_type in ('ADJ', 'ADJECTIVE'):
-                # Adjective - set adjective flags
-                dictionary.add_word(word, 'adjective')
-            elif pos_type == 'VERB':
-                dictionary.add_word(word, 'verb')
-            elif pos_type == 'NOUN':
-                dictionary.add_word(word, 'noun')
-            elif pos_type == 'PREP':
-                # Get preposition number if available
-                prep_num = prepositions.get(word.upper(), 0)
-                dictionary.add_preposition(word, prep_num)
-            elif pos_type == 'DIR':
-                dictionary.add_word(word, 'direction')
-            elif pos_type == 'BUZZ':
-                dictionary.add_word(word, 'buzz')
-            elif pos_type is None:
+        for word, pos_set in voc_words.items():
+            if isinstance(pos_set, set):
+                pos_types = pos_set
+            else:  # legacy single-value form
+                pos_types = {pos_set} if pos_set else set()
+            if not pos_types:
                 # No part-of-speech specified - add with no flags
                 dictionary.add_word(word, 'unknown')
-            else:
-                # Unknown part-of-speech - add with no flags
-                dictionary.add_word(word, 'unknown')
+                continue
+            for pos_type in pos_types:
+                # Map VOC part-of-speech to dictionary word type
+                if pos_type in ('ADJ', 'ADJECTIVE'):
+                    # Adjective - set adjective flags
+                    dictionary.add_word(word, 'adjective')
+                elif pos_type == 'VERB':
+                    dictionary.add_word(word, 'verb')
+                elif pos_type == 'NOUN':
+                    dictionary.add_word(word, 'noun')
+                elif pos_type == 'PREP':
+                    # Get preposition number if available
+                    prep_num = prepositions.get(word.upper(), 0)
+                    dictionary.add_preposition(word, prep_num)
+                elif pos_type == 'DIR':
+                    dictionary.add_word(word, 'direction')
+                elif pos_type == 'BUZZ':
+                    dictionary.add_word(word, 'buzz')
+                else:
+                    # Unknown part-of-speech - add with no flags
+                    dictionary.add_word(word, 'unknown')
 
         # Rebuild word offsets after adding VOC words
         dict_word_offsets = dictionary.get_word_offsets()
@@ -4726,9 +4769,9 @@ class ZILCompiler:
                         if isinstance(word, str) and word:
                             word_lower = word.lower()
                             # Add to codegen's VOC tracking for dictionary building
-                            if not hasattr(codegen, '_voc_words'):
-                                codegen._voc_words = {}
-                            codegen._voc_words[word_lower] = pos_type
+                            # (accumulate all parts of speech; no-pos never
+                            # clobbers a real flag -- see record_voc_word).
+                            codegen.record_voc_word(word_lower, pos_type)
                             # Use codegen's vocab placeholder system (deduped by word)
                             placeholder_idx = codegen._intern_vocab_placeholder(word_lower)
                             # Store placeholder value (will be resolved to dict address)
@@ -4956,6 +4999,22 @@ class ZILCompiler:
             nonlocal next_prop_num  # Allow modification of outer scope variable
             props = {}
             for key, value in obj_node.properties.items():
+                # `%,CONST` / `%.CONST` in an object PROPERTY VALUE is ZIL
+                # read-time evaluation: it denotes the compile-time value of
+                # that constant, not a runtime print-char variable. The lexer
+                # tokenizes %,X as CharGlobalVarNode (only meaningful inside
+                # TELL); in a property that node has no `.value`, so it fell
+                # through to the generic `else` and the property was dropped.
+                # spellbreaker's runes declare <(EXITS %,C-NORTH)> for their
+                # direction bit -- without this the rune got no P?EXITS and the
+                # compass-rose maze ("touch nw rune with rose") did nothing.
+                from .parser.ast_nodes import (CharGlobalVarNode as _CGV,
+                                               CharLocalVarNode as _CLV,
+                                               NumberNode as _NN)
+                if isinstance(value, (_CGV, _CLV)):
+                    _cv = resolve_atom_value(value.name)
+                    if isinstance(_cv, int):
+                        value = _NN(_cv)
                 # Skip validation for known special properties
                 if key not in ['FLAGS', 'IN', 'LOC', 'SYNONYM', 'ADJECTIVE'] + list(program.directions):
                     # Allow globals if PROPDEF for this property uses :GLOBAL type capture
@@ -5401,6 +5460,34 @@ class ZILCompiler:
                 attributes=attributes,
                 properties=properties
             )
+
+        # Populate the property-defaults table from PROPDEF declarations.
+        # In ZIL, <PROPDEF NAME default> sets the value GETP returns for every
+        # object that LACKS property NAME (Z-Machine Standard Sec 12.2). Without
+        # this, an undefined SIZE/CAPACITY/etc. reads as 0 instead of its
+        # declared default (e.g. Stationfall's <PROPDEF CAPACITY 5> / <PROPDEF
+        # SIZE 5>), breaking every container-fit and WEIGHT computation that
+        # relies on the default. The defaults table is a fixed-size region
+        # (31 words V1-3, 63 words V4+), so filling it never changes the
+        # story-file size. Complex PROPDEFs (<PROPDEF NAME <> (patterns...)>)
+        # carry no default_value and are skipped, as are direction properties.
+        from .parser.ast_nodes import NumberNode as _PDNumber, AtomNode as _PDAtom
+        for _propdef in program.propdefs:
+            _dv = _propdef.default_value
+            if _dv is None:
+                continue
+            _pnum = prop_map.get(_propdef.name)
+            if not _pnum or _pnum < 1 or _pnum > len(obj_table.property_defaults):
+                continue
+            if isinstance(_dv, _PDNumber):
+                _pval = _dv.value
+            elif isinstance(_dv, _PDAtom):
+                _pval = codegen.constants.get(_dv.value)
+                if _pval is None:
+                    continue
+            else:
+                continue
+            obj_table.property_defaults[_pnum - 1] = _pval & 0xFFFF
 
         objects_data = obj_table.build()
 

@@ -970,7 +970,12 @@ class ImprovedCodeGenerator:
         # idx>; table/string inits would need extra placeholder machinery
         # inside the soft table).
         if getattr(self, '_big_globals', False):
+            # Globals whose variable number is embedded in a CEXIT exit MUST get
+            # a real hard slot (see _cexit_gating_globals); allocate them first.
+            _cexit_gates = self._cexit_gating_globals(program)
             def _spill_key(_g):
+                if _g.name in _cexit_gates:
+                    return -1
                 _iv = getattr(_g, 'initial_value', None)
                 if isinstance(_iv, (TableNode, StringNode)):
                     return 0
@@ -2527,7 +2532,9 @@ class ImprovedCodeGenerator:
             # reversal makes that the FIRST-DEFINED line. Emitting in source
             # order made bare 'dive' (JUMP with 7 lines) pick 'JUMP OFF
             # OBJECT' instead of 'JUMP OBJECT (FIND RLANDBIT)' and orphan
-            # with "[Whom do you want to dive off?]".
+            # with "[Whom do you want to dive off?]". Same effect drives
+            # spellbreaker's <SYNTAX BUY OBJECT FROM OBJECT (FIND PERSON)>
+            # (declared first) to sit LAST so "buy carpet" GWIMs the merchant.
             for line in reversed(lines):
                 nobj = int(line.get('num_objects', 0) or 0)
                 prep1 = int(line.get('prep1', 0) or 0)
@@ -6156,6 +6163,31 @@ class ImprovedCodeGenerator:
             return word_node.value.lower()
         return None
 
+    def record_voc_word(self, word: str, pos_type):
+        """Accumulate EVERY part-of-speech seen for a VOC word across all of
+        its <VOC ...> occurrences.
+
+        A single word legitimately carries more than one part of speech: in
+        spellbreaker's RETREAT THINGS pseudo-table DIMITHIO is
+        `<VOC "DIMITHIO" NOUN>` in `(<> DIMITHIO ANSWER-PSEUDO)` and
+        `<VOC "DIMITHIO" ADJECTIVE>` in `(DIMITHIO BORPHEE ANSWER-PSEUDO)` --
+        the official binary flags it 0xA0 (NOUN+ADJECTIVE). The old
+        `self._voc_words[word] = pos_type` kept only the LAST pos, and worse, a
+        bare `<VOC "DIMITHIO">` (no part-of-speech) in the ANSWERS table wrote
+        None LAST and erased the NOUN flag entirely -- so "answer dimithio"
+        failed with 'You used the word "dimithio" in a way that I don't
+        understand.' Store a SET and never let a None (no-pos) VOC drop a real
+        part of speech; the dictionary ORs all flags together."""
+        if not hasattr(self, '_voc_words'):
+            self._voc_words = {}
+        cur = self._voc_words.get(word)
+        if not isinstance(cur, set):
+            # Migrate any legacy single-value entry into a set.
+            cur = set() if cur is None else {cur}
+            self._voc_words[word] = cur
+        if pos_type is not None:
+            cur.add(pos_type)
+
     def _handle_voc_form(self, form: FormNode) -> int:
         """Handle <VOC "word" pos> form - returns vocabulary word placeholder.
 
@@ -6201,9 +6233,7 @@ class ImprovedCodeGenerator:
                     pos_type = None
 
         # Track the word and part-of-speech for dictionary building
-        if not hasattr(self, '_voc_words'):
-            self._voc_words = {}  # word -> part-of-speech type
-        self._voc_words[word] = pos_type
+        self.record_voc_word(word, pos_type)
 
         # Create vocabulary placeholder (deduped by word)
         placeholder_idx = self._intern_vocab_placeholder(word)
@@ -6994,7 +7024,8 @@ class ImprovedCodeGenerator:
                 # hollywood's <TELL "A " 'BUCKET " is hanging..."> otherwise
                 # fell into the generic form path, which print_paddr'd the
                 # object NUMBER and sprayed z-garbage into the closet
-                # description.
+                # description. (Fast-path for object-named quotes; the general
+                # quoted-atom resolver below handles 'HERE/'PRSO/funny globals.)
                 onum = self.objects[op.operands[0].value]
                 if 0 <= onum <= 255:
                     code.append(0x9A)          # PRINT_OBJ, small constant
@@ -7003,6 +7034,33 @@ class ImprovedCodeGenerator:
                     code.append(0x8A)          # PRINT_OBJ, large constant
                     code.append((onum >> 8) & 0xFF)
                     code.append(onum & 0xFF)
+                i += 1
+
+            elif self._is_quote_form(op):
+                # A quoted atom in TELL prints that object's SHORT NAME, exactly
+                # as <TELL D ,atom> would: ZILCH's TELL treats 'X as PRINTD of
+                # X's value.
+                #   <TELL 'HERE>          -> room title (print_obj of HERE)
+                #   <TELL 'PRSO>          -> spell name (print_obj of PRSO)
+                #   <TELL 'RANDOM-CARPET> -> print_obj of that object constant
+                # generate_form(<QUOTE ...>) emits nothing, so the generic
+                # FormNode path below used to PRINT_PADDR whatever stale value
+                # sat on the stack -- every room title and spell name in
+                # spellbreaker came out as runaway garbage.
+                inner = self._unwrap_quote(op)
+                if isinstance(inner, AtomNode) and self.is_funny_global(inner.value):
+                    # Overflow (SOFT-GLOBALS) global holding an object number:
+                    # read it onto the stack, then print_obj the stack top.
+                    code.extend(self.gen_read_funny_global(inner.value))
+                    code.append(0xA0 | 0x0A)  # PRINT_OBJ, variable operand
+                    code.append(0x00)         # stack
+                else:
+                    if isinstance(inner, AtomNode):
+                        # Route the bare atom through the same operand resolver
+                        # the D token uses: object constants become their number,
+                        # globals become a variable read.
+                        inner = GlobalVarNode(inner.value)
+                    code.extend(self._gen_tell_operand_code(inner, 0x0A))  # PRINT_OBJ
                 i += 1
 
             elif isinstance(op, FormNode):
@@ -7557,6 +7615,7 @@ class ImprovedCodeGenerator:
         # Check for indirect variable assignment (computed variable index)
         indirect_var_num = None  # Variable containing the target variable index
         computed_var_expr = None  # Expression that computes the target variable index
+        var_name = None           # Name of a direct SET/SETG target (if any)
 
         # Handle LocalVarNode (.FOO)
         if isinstance(var_node, LocalVarNode):
@@ -7734,8 +7793,21 @@ class ImprovedCodeGenerator:
 
             return bytes(code)
 
-        # Handle FUNNY-GLOBALS: if the target is a funny global, use gen_write_funny_global
-        if is_global and hasattr(self, 'funny_globals_table') and var_name in self.funny_globals_table:
+        # Handle FUNNY-GLOBALS: if the target is a funny global, use
+        # gen_write_funny_global. This applies to a DIRECT write to the global,
+        # whether spelled <SETG NAME ...> or -- via the ZIL SET/SETG scope quirk
+        # -- <SET NAME ...> where NAME has no local and resolves to the global
+        # (island.zil clears LAFOND-LOOKING with <SET LAFOND-LOOKING <>>; gating
+        # this on is_global stored to bogus variable 10, so Lafond kept blocking
+        # the bedroom exit and the butler never entered to take the goblet).
+        # Indirect (<SET ,GVAL>/<SETG .LVAL>) and local targets are excluded.
+        _funny_direct = (hasattr(self, 'funny_globals_table')
+                         and var_name is not None
+                         and var_name in self.funny_globals_table
+                         and indirect_var_num is None
+                         and computed_var_expr is None
+                         and (is_global or var_name not in self.locals))
+        if _funny_direct:
             if isinstance(value_node, (FormNode, RepeatNode, CondNode)):
                 # Evaluate expression first
                 if isinstance(value_node, FormNode):
@@ -15013,6 +15085,44 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def _emit_do_limit_branch(self, code, jump_opcode, var_num, end_node):
+        """Emit `<JG|JL> var_num, <limit>` (WITHOUT the branch byte) for a
+        counted DO whose end limit is a variable / constant reference /
+        expression rather than a literal number. The caller then falls through
+        to the shared branch-placeholder + body machinery, which appends the
+        branch. jump_opcode is 0x03 (JG, ascending) or 0x02 (JL, descending).
+
+        A bare LocalVarNode generates NO code from generate_statement (it is a
+        no-op there), so evaluating `.L` to the stack yielded stale garbage --
+        the limit MUST be encoded as a direct instruction operand instead."""
+        from ..parser.ast_nodes import (FormNode as _FN, AtomNode as _AN,
+                                         GlobalVarNode as _GVN)
+        if isinstance(end_node, _FN):
+            # Re-evaluate the expression each pass onto the stack; compare var>stack.
+            end_code = self._generate_nested_and_adjust(end_node, code)
+            code.extend(end_code)
+            code.append(0x40 | 0x20 | jump_opcode)  # long 2OP: var, variable(stack)
+            code.append(var_num & 0xFF)
+            code.append(0x00)                        # stack
+            return
+        if isinstance(end_node, _AN):
+            end_node = _GVN(end_node.value)          # resolve a bare constant/object atom
+        et, ev = self._get_operand_type_and_value_ext(end_node)
+        if et == 2:                                  # variable limit (.L / ,G)
+            code.append(0x40 | 0x20 | jump_opcode)
+            code.append(var_num & 0xFF)
+            code.append(ev & 0xFF)
+        elif et == 1:                                # small-constant limit
+            code.append(0x40 | jump_opcode)
+            code.append(var_num & 0xFF)
+            code.append(ev & 0xFF)
+        else:                                        # large-constant limit: VAR form
+            code.append(0xC0 | jump_opcode)
+            code.append(0x8F)                        # types: variable, large const, omit, omit
+            code.append(var_num & 0xFF)
+            code.append((ev >> 8) & 0xFF)
+            code.append(ev & 0xFF)
+
     def gen_do(self, operands: List[ASTNode]) -> bytes:
         """Generate DO loop.
 
@@ -15157,6 +15267,16 @@ class ImprovedCodeGenerator:
                     code.append(var_num & 0xFF)
                     code.append((end_val >> 8) & 0xFF)
                     code.append(end_val & 0xFF)
+            elif isinstance(end_node, (LocalVarNode, GlobalVarNode, AtomNode)):
+                # `end` is a LIMIT value (a variable / constant reference), NOT a
+                # boolean predicate: a counted DO runs while var has not passed
+                # the limit. Emit the same JG comparison the constant path uses,
+                # then FALL THROUGH to the shared body/branch machinery below.
+                # Treating `.L` (spellbreaker's <DO (CNT 1 .L 3)>) as a predicate
+                # exited on the very first pass, so DIR-BASE / ARM-DIRECTION /
+                # TELL-WALLS ran zero times and the compass-rose maze was
+                # unwalkable. A FORM end is still a genuine predicate (below).
+                self._emit_do_limit_branch(code, 0x03, var_num, end_node)  # JG: exit if var > limit
             else:
                 # End is a form expression - treat as predicate
                 # Evaluate and exit if result is truthy (non-zero)
@@ -15296,6 +15416,12 @@ class ImprovedCodeGenerator:
                     code.append(var_num & 0xFF)
                     code.append((end_val >> 8) & 0xFF)
                     code.append(end_val & 0xFF)
+            elif isinstance(end_node, (LocalVarNode, GlobalVarNode, AtomNode)):
+                # LIMIT value (variable / constant), not a predicate -- see the
+                # counting-up branch. Emit JL var, <limit> so a descending
+                # counted DO exits when var < limit, then fall through. A FORM
+                # end is still a genuine predicate (handled below).
+                self._emit_do_limit_branch(code, 0x02, var_num, end_node)  # JL: exit if var < limit
             else:
                 # End is a form expression - treat as predicate
                 # Evaluate and exit if result is truthy (non-zero)
@@ -15578,8 +15704,16 @@ class ImprovedCodeGenerator:
                 code[jump_offset_pos + 1] = new_offset_unsigned & 0xFF
             else:
                 # Long branch: bit 7=polarity, bit 6=0 (long), bits 13-8 in bits 5-0, bits 7-0 in byte 2
-                # Recalculate offset for 2-byte branch
-                branch_offset = exit_point - (exit_branch_pos + 2)
+                # Z-machine branch target = (byte after the 2 branch bytes) + offset - 2
+                #                         = (exit_branch_pos + 2) + offset - 2.
+                # We want that to equal exit_point, so offset = exit_point - exit_branch_pos
+                # (identical to the short-branch and FORM-predicate paths). The old
+                # `exit_point - (exit_branch_pos + 2)` dropped the +2, so a DO loop
+                # whose body is large enough to force a LONG exit branch (>63 bytes,
+                # e.g. spellbreaker's JUGGLE-CUBES `<DO (CNT 2 13) ...>`) branched 2
+                # bytes short -- into the middle of the JUMP-back instruction -- and
+                # the VM ran data as code, writing into static memory and crashing.
+                branch_offset = exit_point - exit_branch_pos
                 if branch_offset < 0:
                     branch_offset_unsigned = (1 << 14) + branch_offset  # 14-bit signed
                 else:
@@ -16893,6 +17027,37 @@ class ImprovedCodeGenerator:
             # Now use temp_global instead of stack for all JEs
             op1_val = temp_global
 
+        # Nested-expression comparands (e.g. <EQUAL? ,X <LOC ,A> <LOC ,B>>) must
+        # be EVALUATED before the JE reads them: the loop below typed
+        # FormNode/CondNode comparands as var-0/stack via
+        # _get_operand_type_and_value WITHOUT emitting their code, so the JE
+        # compared op1 against stale stack garbage. When this is a single JE
+        # (<=3 comparands) and op1 is read directly (not itself on the stack),
+        # push each such comparand to the stack up front and let the JE read it
+        # via an sp operand. JE tests op1 against EVERY comparand and op1 is not
+        # on the stack, so the pop order among comparands is irrelevant. This
+        # needs NO scratch global -- important for FUNNY-GLOBALS games, where a
+        # late-allocated global is a soft (table) slot a raw store can't reach.
+        comparand_tv = None
+        _op1_on_stack = (op1_type == 1 and op1_val == 0)
+        if (len(all_comparands) <= 3 and not _op1_on_stack
+                and any(isinstance(c, (FormNode, CondNode))
+                        for c in all_comparands)):
+            comparand_tv = []
+            for c in all_comparands:
+                if isinstance(c, (FormNode, CondNode)):
+                    _pb = len(self._current_stmt_routine_offsets)
+                    _ins = len(code)
+                    _sub = (self.generate_cond(c) if isinstance(c, CondNode)
+                            else self.generate_form(c))
+                    for _k in range(_pb, len(self._current_stmt_routine_offsets)):
+                        _ro, _pv = self._current_stmt_routine_offsets[_k]
+                        self._current_stmt_routine_offsets[_k] = (_ins + _ro, _pv)
+                    code.extend(_sub)
+                    comparand_tv.append((1, 0))  # value now on the stack
+                else:
+                    comparand_tv.append(self._get_operand_type_and_value(c))
+
         # Build list of JE instructions, each comparing op1 against up to 3 values
         je_instructions = []
         for i in range(0, len(all_comparands), 3):
@@ -16904,9 +17069,12 @@ class ImprovedCodeGenerator:
 
             # Build type byte for all operands (op1 + chunk)
             types_and_vals = [(op1_type, op1_val)]
-            for op in chunk:
-                t, v = self._get_operand_type_and_value(op)
-                types_and_vals.append((t, v))
+            if comparand_tv is not None:
+                types_and_vals.extend(comparand_tv[i:i + 3])
+            else:
+                for op in chunk:
+                    t, v = self._get_operand_type_and_value(op)
+                    types_and_vals.append((t, v))
 
             # Map types: constant -> large(00, 2 bytes) if >255/<0 else small(01,
             # 1 byte); variable -> 10 (1 byte). Previously every constant was typed
@@ -18602,15 +18770,28 @@ class ImprovedCodeGenerator:
                             'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE'
                         }
                         if value_context and op_name in ('SET', 'SETG') and action.operands:
-                            # <SET/SETG var val> returns val in ZIL. The store leaves it
-                            # in `var`, so when the COND's value is used, LOAD var back
-                            # onto the stack. PARSER's direction branch ends in
-                            # <SETG AGAIN-DIR .DIR> and that value (the direction) is
-                            # what tells MAIN-LOOP the parse succeeded -- pushing 0 made
-                            # every movement command silently do nothing. Gated on
-                            # value_context so plain-statement CONDs don't leak a value.
-                            tvar = self.get_variable_number(action.operands[0])
-                            actions_code.extend([0x9E, tvar & 0xFF, 0x00])  # LOAD var -> stack (direct)
+                            _tgt = action.operands[0]
+                            _tn = (_tgt.name if isinstance(_tgt, GlobalVarNode)
+                                   else _tgt.value if isinstance(_tgt, AtomNode) else None)
+                            if _tn is not None and self.is_funny_global(_tn):
+                                # A funny-global <SET/SETG> already re-reads the
+                                # SOFT-GLOBALS slot (gen_set appends
+                                # gen_read_funny_global), so the assigned value is
+                                # ALREADY on the stack. Emitting `load <index>` here
+                                # would read a bogus low variable (the table index
+                                # mistaken for a var number): I-LDANCE's
+                                # <SETG LAFOND-CTR ...> tail returned 0, so CLOCKER
+                                # never told V-WAIT an interrupt fired and the dance
+                                # advanced 3 counters in one turn.
+                                pass
+                            else:
+                                # <SET/SETG var val> returns val in ZIL. The store
+                                # leaves it in `var`, so when the COND's value is
+                                # used, LOAD var back onto the stack (PARSER's
+                                # direction branch ends in <SETG AGAIN-DIR .DIR> and
+                                # that value tells MAIN-LOOP the parse succeeded).
+                                tvar = self.get_variable_number(_tgt)
+                                actions_code.extend([0x9E, tvar & 0xFF, 0x00])  # LOAD var -> stack
                         elif op_name in void_ops:
                             # In ZILCH/MDL every one of these "void" ops has a
                             # truthy value (PUT returns the table, FSET/MOVE T,
@@ -18680,8 +18861,21 @@ class ImprovedCodeGenerator:
                     _opn = _last_a.operator.value.upper()
                     if _opn == 'RTRUE' or (len(action_code) > 0 and _p3 == b'\xb0'):
                         pass
+                    _setg_tn = None
+                    if _opn in ('SET', 'SETG') and _last_a.operands:
+                        _st = _last_a.operands[0]
+                        _setg_tn = (_st.name if isinstance(_st, GlobalVarNode)
+                                    else _st.value if isinstance(_st, AtomNode)
+                                    else None)
                     if _opn in ('RTRUE', 'RFALSE', 'RETURN', 'AGAIN', 'QUIT', 'RESTART'):
                         _converted = True  # already terminal
+                    elif (_opn in ('SET', 'SETG') and _setg_tn is not None
+                          and self.is_funny_global(_setg_tn)):
+                        # funny-global SET/SETG: gen_set already left the re-read
+                        # value on the stack (no `load var` load-back was emitted),
+                        # so return it directly.
+                        actions_code.append(0xB8)  # RET_POPPED
+                        _converted = True
                     elif (_opn in ('SET', 'SETG') and len(actions_code) >= 3
                           and actions_code[-3] == 0x9E and actions_code[-1] == 0x00):
                         _vn = actions_code[-2]
@@ -18939,6 +19133,36 @@ class ImprovedCodeGenerator:
                 and isinstance(node.operator, AtomNode)
                 and node.operator.value == '<>'
                 and not node.operands)
+
+    def _is_cmp_expr(self, node):
+        """True if `node` is a nested expression that must be EVALUATED to
+        supply a comparison operand (its value ends up on the stack). <> and
+        QUOTE forms are compile-time values, not expressions."""
+        if self._is_empty_false_form(node):
+            return False
+        if isinstance(node, FormNode):
+            op = node.operator
+            if isinstance(op, AtomNode) and op.value.upper() == 'QUOTE':
+                return False
+            return True
+        return isinstance(node, (CondNode, RepeatNode))
+
+    def _emit_cmp_operand_to_stack(self, node, code):
+        """Evaluate a nested comparand, pushing its value to the stack, with any
+        routine-address placeholder offsets rebased to the insertion point in
+        `code` (mirrors the FormNode arms elsewhere in the comparison emitters)."""
+        before = len(self._current_stmt_routine_offsets)
+        insert_pos = len(code)
+        if isinstance(node, FormNode):
+            expr = self.generate_form(node)
+        elif isinstance(node, CondNode):
+            expr = self.generate_cond(node)
+        else:
+            expr = self.generate_statement(node)
+        for k in range(before, len(self._current_stmt_routine_offsets)):
+            rel, ph = self._current_stmt_routine_offsets[k]
+            self._current_stmt_routine_offsets[k] = (insert_pos + rel, ph)
+        code.extend(expr)
 
     def _resolve_two_cmp_operands(self, n1, n2, code):
         """Resolve two comparison operands for a branch-context JG/JL/etc.
@@ -19403,6 +19627,11 @@ class ImprovedCodeGenerator:
                     # Get first operand (the one we compare against all others)
                     first_op = _eq_operands[0]
                     remaining = _eq_operands[1:]
+                    # True when the whole EQUAL? fits in ONE JE (<=3 comparands),
+                    # so no branch chain has to be kept sized -- the only shape in
+                    # which we can safely push nested-expression comparands to the
+                    # stack (see the multi-comparand arm below).
+                    _single_group = len(remaining) <= 3
 
                     # If first operand is a nested expression, evaluate it first
                     if isinstance(first_op, FormNode):
@@ -19519,14 +19748,40 @@ class ImprovedCodeGenerator:
                                 code.append(op1_val & 0xFF)
                                 code.append(op2_val & 0xFF)
                         else:
-                            # VAR form for 3+ operands
-                            code.append(0xC1)  # VAR form JE
+                            # VAR form for 3+ operands (op1 vs 2-3 comparands).
+                            # A comparand that is a nested expression must be
+                            # EVALUATED and its value pushed to the stack BEFORE
+                            # the JE; _get_operand_type_and_value maps a FormNode
+                            # to a bare stack ref (1,0) WITHOUT emitting the code,
+                            # so the JE popped uninitialised stack. GEN-CLOTHES's
+                            # <EQUAL? ,W?CLOTHES <GET ,P-NAMW 0> <GET ,P-NAMW 1>>
+                            # thus compared W?CLOTHES against garbage and never
+                            # disambiguated "clothes".
+                            expr_flags = [self._is_cmp_expr(op) for op in group]
+                            if any(expr_flags) and op1_type == 1 and op1_val == 0:
+                                # op1 is read first by JE; a stacked op1 would be
+                                # consumed by the comparand pops below. Spill it to
+                                # the scratch global so it stays a stable operand.
+                                if '_CMP_SCRATCH_' not in self.globals:
+                                    self.globals['_CMP_SCRATCH_'] = self.next_global
+                                    self.next_global += 1
+                                _scratch = self.globals['_CMP_SCRATCH_']
+                                code.extend([0xD4, 0x9F, 0x00, 0x00, _scratch])
+                                op1_type, op1_val = 1, _scratch
 
-                            # Build type byte
+                            # Build type byte (evaluating expression comparands to
+                            # the stack; JE tests op1 against ANY comparand, so the
+                            # order the stack pops them in is irrelevant).
                             types_and_vals = [(op1_type, op1_val)]
-                            for op in group:
-                                t, v = self._get_operand_type_and_value(op)
-                                types_and_vals.append((t, v))
+                            for op, is_e in zip(group, expr_flags):
+                                if is_e:
+                                    self._emit_cmp_operand_to_stack(op, code)
+                                    types_and_vals.append((1, 0))
+                                else:
+                                    types_and_vals.append(
+                                        self._get_operand_type_and_value(op))
+
+                            code.append(0xC1)  # VAR form JE
 
                             # Constant -> large(00, 2 bytes) if >255/<0 else
                             # small(01, 1 byte); variable -> 10 (1 byte). Emitting
@@ -20277,6 +20532,46 @@ class ImprovedCodeGenerator:
         self.funny_globals_table[name] = table_idx
         self.globals[name] = 0x100 + table_idx
         return self.globals[name]
+
+    def _cexit_gating_globals(self, program) -> set:
+        """Names of globals whose Z-machine VARIABLE NUMBER is baked into a
+        conditional-exit (CEXIT) property -- (<dir> TO <room> IF <global>).
+        The classic V-WALK reads the gate with <VALUE <GETB .PT ,CEXITFLAG>>,
+        so the exit structure stores the gate's variable number as a byte. A
+        funny (SOFT-GLOBALS) overflow global has no real slot: its stored
+        number would be (0x100+idx)&0xFF, testing an unrelated variable, and
+        the exit silently stays shut (spellbreaker's compass-rose maze: after
+        'put rose in carving' the north 'octagonal hole' never opened). Force
+        these into hard slots by giving them top allocation priority."""
+        gates = set()
+        dirs = {d.upper() for d in (getattr(program, 'directions', None) or [])}
+        if not dirs:
+            return gates
+        for obj in list(getattr(program, 'objects', []) or []) + \
+                list(getattr(program, 'rooms', []) or []):
+            for key, value in getattr(obj, 'properties', {}).items():
+                if str(key).upper() not in dirs:
+                    continue
+                if not isinstance(value, (list, tuple)) or not value:
+                    continue
+                toks = list(value)
+                k0 = toks[0].value.upper() if isinstance(toks[0], AtomNode) else ''
+                if k0 != 'TO':
+                    continue
+                if_i = next((i for i, t in enumerate(toks)
+                             if isinstance(t, AtomNode) and t.value.upper() == 'IF'),
+                            None)
+                if if_i is None:
+                    continue
+                # (... IF <door> IS OPEN) gates on an OBJECT flag (DEXIT), which
+                # stores an object number, not a variable number -- not a gate.
+                if any(isinstance(t, AtomNode) and t.value.upper() == 'IS'
+                       for t in toks[if_i + 1:]):
+                    continue
+                cond = toks[if_i + 1] if len(toks) > if_i + 1 else None
+                if isinstance(cond, AtomNode):
+                    gates.add(cond.value)
+        return gates
 
     def _alloc_hard_or_raise(self, name):
         """Codegen-time global creation (SETG-new, _INT_ADDR_): these emit the

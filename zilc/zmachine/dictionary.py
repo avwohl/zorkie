@@ -452,7 +452,19 @@ class Dictionary:
                 if has_adj:
                     slots.append(('adj', adj_val))
                 if has_obj:
-                    slots.append(('obj', obj_num))
+                    # The classic parser's object P1 value must be NONZERO.
+                    # GET-OBJECT promotes an adjective to a noun only when
+                    # <WT? word PS?OBJECT P1?OBJECT> -- the object VALUE byte --
+                    # is nonzero (parser.zil), and other paths test it inside
+                    # <NOT <ZERO? ...>>. A PSEUDO noun carries no object number
+                    # (word_objects == 0), so its object slot came out 0 and
+                    # "answer dimithio" (a THINGS pseudo word that is BOTH a noun
+                    # and an adjective, entered alone) could not be promoted --
+                    # "There seems to be a noun missing in that sentence."
+                    # Every official Infocom dict stores the constant 1 for an
+                    # object word's value byte; mirror that when there is no
+                    # object number to place.
+                    slots.append(('obj', obj_num or 1))
                 if not slots:
                     slots.append(('obj', obj_num))
                 first = slots[0]
