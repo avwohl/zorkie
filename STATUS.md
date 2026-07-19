@@ -1,14 +1,68 @@
 # Zorkie STATUS
 
-Last measured: 2026-07-18 (session 7: **FOUR REAL INFOCOM GAMES COMPILE AND WIN**
--- zork1 350/350, zork3 7/7 (lockstep-identical to the official binary over its
-whole 216-command route), starcross 400/400 (lockstep-identical over 240
-commands), plus minizork 350/350. The zwalker L2 suite is 7/7. ~30 additional
-general compiler fixes this session -- catalog below). This file is
-the single source of truth for project
-status and overrides any status claim in older docs. Reference/spec docs (Z-machine
-and ZIL specs, dialect notes, header/opcode references) live under docs/ and
+Last measured: 2026-07-19 (session 8: **20-GAME zwalker L2 SUITE, ALL WIN FROM
+SOURCE**). This file is the single source of truth for project status and
+overrides any status claim in older docs. Reference/spec docs (Z-machine and ZIL
+specs, dialect notes, header/opcode references) live under docs/ and
 tests/test-games/ and are not status reports.
+
+## Session 8 (2026-07-19): 16 -> 20 games, machine migrated to macOS
+
+The zwalker L2 suite (compile ZIL source -> replay a source-matched walkthrough
+-> verified win) is **20/20**: microquest, mazekey, reactor, minizork 350/350,
+zork1 350/350, zork3 7/7, starcross 400/400, zork2 400/400, deadline, suspended,
+infidel, witness, cutthroats 250/250, sorcerer 400/400, enchanter 400/400,
+hitchhikersguide 400/400, **suspect** (conviction ending), **ballyhoo 200/200**,
+**hollywoodhijinx 150/150**, **wishbringer 100/100** (last four new this session).
+pytest 696 pass / 3 pre-existing fails (test_color, test_read_v5, TELL two-space).
+
+Round-5 fixes (commit "Round-5 ..."): suspect miscompiles -- MDL NTH/REST treated
+a FORM as opaque not primtype LIST; %<NAME ...> user compile-time selector DEFINEs
+(DEBUG-CODE) stripped to 0 placeholders, deleting the release-arm APPLY dispatch;
+gen_call crashed on CondNode operands + popped stack operands reversed. Plus two
+size levers that unblocked the story-file-too-large bucket: a codegen peephole
+gains Z (fold constant-condition JZ) and K (drop jump-to-next), and abbreviation
+selection stops polluting its corpus with atom/routine names and consumes the
+original Infocom *freq.xzap listings. Combined: spellbreaker/wishbringer/ballyhoo
+fit the V3 cap and trinity fits the V4 cap; ballyhoo then WINS on its official
+route with no adaptation.
+
+Round-6 fixes (commit "Round-6 ..."): hollywoodhijinx -- restore room THINGS
+pseudo-object tables + DESC pseudo-prop-0, FSET/FCLEAR void ops, reversed SYNTAX
+lines, TELL quoted-object -> PRINT_OBJ, then fix an 8-bit vocab-placeholder
+overflow (per-occurrence VOC placeholders hit index 256 -> low byte 0 -> aliased
+'hole' to 'all'); deduped by word (294 -> 187). Lockstep-clean over all 394 cmds.
+
+Frontier (diagnosed, not yet winning -- all blocked on zorkie output being ~4KB
+bloated vs the official ZILCH builds, so the fixing feature overflows the cap):
+- **spellbreaker** 440/600, lockstep-clean through cmd 330; 8 general V3 fixes on
+  branch `wip/spellbreaker-v3-8fixes`. Stalls at 'answer dimithio' (needs the
+  THINGS/PSEUDO table, +1.8KB over cap). NOTE: since round-6 restored THINGS for
+  hollywood, spellbreaker (same PSEUDO macro) now needs it too and no longer fits.
+- **trinity** (V4) plays through cmd 7 matching official lockstep; 8 general V4
+  fixes on branch `wip/trinity-v4-8fixes`. Stalls at 'buy bag' (needs the HERE?
+  MULTIFROB DEFMAC unexpanded, +7KB over cap).
+- Both WIP branches are gate-green (pytest 696/3, minizork/zork1 350/350); they
+  merge once a **general size-reduction pass** lands (the single highest-leverage
+  next step -- it also re-fits spellbreaker and unblocks the size bucket below).
+- Size bucket still over the V3 cap: stationfall (~+420), leathergoddesses
+  (x1.zil, ~+1446), plunderedhearts, moonmist, lurkinghorror.
+- amfv (V4): behavioral death mid-route; a prior fix was incomplete and grew the
+  build over the V4 cap -- deferred.
+- planetfall: comptwo.zil is a TRUNCATED historical checkout (ends mid-object at
+  the TRIFFID definition); a provenance problem, not a zorkie bug -- do not "fix"
+  by accepting unbalanced input.
+
+Machine migration (Linux /home/wohl -> macOS /Users/wohl): the tests/test-games
+sources were bare gitlinks with no .gitmodules; added .gitmodules (commit "Add
+.gitmodules ...") mapping all 51 to github.com/historicalsource/* (taradinoc/zilf
+for the zilf pair), so `git submodule update --init` restores them. zorkie's zilf
+pytest harness needs dfrotz at ~/esrc/frotz-src/dfrotz (symlinked to Homebrew's on
+this Mac).
+
+---
+
+## (Historical) Session 7 headline -- superseded by Session 8 above
 
 zorkie = from-scratch ZIL -> Z-machine compiler in Python.
 zwalker = independent Z-machine interpreter (../zwalker) used as the end-to-end
