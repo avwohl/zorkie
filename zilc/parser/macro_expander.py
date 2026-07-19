@@ -218,8 +218,8 @@ class MDLEvaluator:
         if isinstance(form.operator, NumberNode):
             index = form.operator.value
             if form.operands:
-                list_val = self.evaluate(form.operands[0], env)
-                if isinstance(list_val, list) and 1 <= index <= len(list_val):
+                list_val = self._as_mdl_list(self.evaluate(form.operands[0], env))
+                if list_val is not None and 1 <= index <= len(list_val):
                     return list_val[index - 1]  # 1-indexed
             return None
 
@@ -686,15 +686,35 @@ class MDLEvaluator:
         env[name] = value
         return value
 
+    @staticmethod
+    def _as_mdl_list(val) -> Optional[list]:
+        """View an MDL primtype-LIST value as a Python list of elements.
+
+        In MDL a FORM is primtype LIST: <NTH form 1> is its operator atom and
+        <REST form> its operand list.  The mystery-trilogy TELL DEFMAC relies
+        on this (`<==? <NTH .E 1> QUOTE>` to detect 'OBJ tokens); returning
+        None for FormNodes sent every quoted atom down the wrong clause and
+        printed stack garbage instead of the object's short name.
+        """
+        if isinstance(val, list):
+            return val
+        if isinstance(val, FormNode):
+            # The empty-list literal () is represented as FormNode(Atom('()'), [])
+            # -- its operator is a placeholder, not an element.
+            if isinstance(val.operator, AtomNode) and val.operator.value == '()':
+                return list(val.operands)
+            return [val.operator] + list(val.operands)
+        return None
+
     def _eval_nth(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate NTH (get nth element, 1-indexed)."""
         if len(operands) < 2:
             return None
 
-        lst = self.evaluate(operands[0], env)
+        lst = self._as_mdl_list(self.evaluate(operands[0], env))
         n = self.evaluate(operands[1], env)
 
-        if isinstance(lst, list) and isinstance(n, int):
+        if lst is not None and isinstance(n, int):
             idx = n - 1  # MDL is 1-indexed
             if 0 <= idx < len(lst):
                 return lst[idx]
@@ -706,14 +726,14 @@ class MDLEvaluator:
         if not operands:
             return []
 
-        lst = self.evaluate(operands[0], env)
+        lst = self._as_mdl_list(self.evaluate(operands[0], env))
         n = 1
         if len(operands) > 1:
             n = self.evaluate(operands[1], env)
             if not isinstance(n, int):
                 n = 1
 
-        if isinstance(lst, list):
+        if lst is not None:
             return lst[n:]
 
         return []

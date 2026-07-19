@@ -18,7 +18,7 @@ _SZ3_INLINE = 'inline' in _SZ3_LEVERS
 _SZ3_TAIL = 'tail' in _SZ3_LEVERS
 _SZ3_PEEP = (_sz3_os.environ.get('MP_SZ3_PEEP')
              if _sz3_os.environ.get('MP_SZ3_PEEP') is not None
-             else ('DPQSTJLRNB' if 'peep' in _SZ3_LEVERS else ''))
+             else ('DPQSTJLRNBZK' if 'peep' in _SZ3_LEVERS else ''))
 _SZ3_RULES = set((_sz3_os.environ.get('MP_SZ3_RULES') or 'R0,R1,R2,R3').split(','))
 _SZ3_R0 = 'R0' in _SZ3_RULES
 _SZ3_R1 = 'R1' in _SZ3_RULES
@@ -3778,6 +3778,10 @@ class ImprovedCodeGenerator:
           Q  `push #c` + `ret_popped`   ->  `ret #c` / rtrue / rfalse
           S  `<op> ... -> sp` + `pull v` ->  `<op> ... -> v`
           T  `add v,#1 -> v` / `sub v,#1 -> v` -> `inc v` / `dec v`
+          Z  constant-condition `jz #c [branch]` folds: never-taken -> drop,
+             always-taken -> `jump` (or rtrue/rfalse via offsets 1/0); the
+             AND/OR short-circuit trampoline emits `jz #0 [always]`
+          K  `jump` to the immediately following instruction -> drop
         After deleting, every branch/jump offset is recomputed in its ORIGINAL
         encoding width (deletions only shrink offsets, so a width never has to
         grow); anything that no longer fits aborts the pass.  Recorded
@@ -3802,6 +3806,9 @@ class ImprovedCodeGenerator:
             # store byte changes) -- their recorded placeholder positions are
             # still valid and MUST be remapped, not dropped.
             repl_same = set()
+            # Z: constant-JZ folded into an unconditional JUMP; k -> target
+            # address (old coordinates).  Rebuilt as a fresh 9C/8C jump below.
+            jz2 = {}
 
             # --- D: unreachable tail of a straight-line run -----------------
             if 'D' in _SZ3_PEEP:
@@ -3818,6 +3825,36 @@ class ImprovedCodeGenerator:
                 if drop[k] or k in repl:
                     continue
                 nx = instrs[k + 1] if k + 1 < nins else None
+                # --- Z: constant-condition JZ (always small-const: a large
+                # constant could be an unresolved in-band placeholder, and a
+                # placeholder can never sit in a 1-byte operand).  The AND/OR
+                # short-circuit trampoline emits `jz #0 [always taken]`; the
+                # SET-literal tail emits `jz #1 [never taken]`.
+                if ('Z' in _SZ3_PEEP and r['op'] == 0x90
+                        and r['branch_pos'] is not None):
+                    val = code[r['a'] + 1]
+                    if (val == 0) != r['branch_on']:
+                        drop[k] = True          # never taken: pure no-op
+                        continue
+                    if r['branch_off'] == 0:
+                        repl[k] = bytes([0xB1])  # always -> return false
+                        continue
+                    if r['branch_off'] == 1:
+                        repl[k] = bytes([0xB0])  # always -> return true
+                        continue
+                    ta = r['n'] + r['branch_off'] - 2
+                    if ta == r['n']:
+                        drop[k] = True          # branch to next: no-op
+                        continue
+                    if ta in byidx or ta == len(code):
+                        jz2[k] = ta
+                    continue
+                # --- K: jump straight to the next instruction is a no-op ----
+                if ('K' in _SZ3_PEEP and r['jump_pos'] is not None
+                        and r['jump_pos'] + r['jump_len'] + r['jump_off'] - 2
+                            == r['n']):
+                    drop[k] = True
+                    continue
                 # --- J: a JUMP whose target is a return instruction becomes
                 # that return (ZILCH never jumps to a return).  This also feeds
                 # rule Q on the next round: `push #c ; jump ->ret_popped`
@@ -3951,7 +3988,7 @@ class ImprovedCodeGenerator:
                         depth += 1
                     return addr
                 for k, r in enumerate(instrs):
-                    if drop[k] or k in repl:
+                    if drop[k] or k in repl or k in jz2:
                         continue
                     if r['branch_pos'] is not None and r['branch_off'] not in (0, 1):
                         t0 = r['n'] + r['branch_off'] - 2
@@ -3971,7 +4008,8 @@ class ImprovedCodeGenerator:
             force_br = {}
             if 'B' in _SZ3_PEEP:
                 for k, r in enumerate(instrs):
-                    if (drop[k] or k in repl or r['branch_pos'] is None
+                    if (drop[k] or k in repl or k in jz2
+                            or r['branch_pos'] is None
                             or r['branch_off'] in (0, 1)
                             or r['branch_pos'] + r['branch_len'] != r['n']):
                         continue
@@ -3988,7 +4026,7 @@ class ImprovedCodeGenerator:
             narrow_j = set()
             if 'N' in _SZ3_PEEP and _round > 0:
                 for k, r in enumerate(instrs):
-                    if drop[k] or k in repl or k in force_br:
+                    if drop[k] or k in repl or k in force_br or k in jz2:
                         continue
                     if (r['branch_pos'] is not None and r['branch_len'] == 2
                             and 2 <= r['branch_off'] <= 63
@@ -4003,7 +4041,7 @@ class ImprovedCodeGenerator:
                         narrow_j.add(k)
 
             if (not any(drop) and not repl and not narrow_b and not narrow_j
-                    and not force_br and not retarget):
+                    and not force_br and not retarget and not jz2):
                 return routine_code
 
             # --- rebuild -------------------------------------------------------
@@ -4013,6 +4051,10 @@ class ImprovedCodeGenerator:
                     new_len[k] = 0
                 elif k in repl:
                     new_len[k] = len(repl[k])
+                elif k in jz2:
+                    # 3-byte jz+1B branch -> 2-byte small jump;
+                    # 4-byte jz+2B branch -> 3-byte large jump
+                    new_len[k] = (r['n'] - r['a']) - 1
                 elif k in narrow_b or k in narrow_j:
                     new_len[k] = (r['n'] - r['a']) - 1
                 elif k in force_br:
@@ -4053,6 +4095,23 @@ class ImprovedCodeGenerator:
                 # offsets repaired below, so they take the normal path
                 nb = bytearray(repl[k] if k in repl_same else code[r['a']:r['n']])
                 base = newaddr[k]
+                if k in jz2:
+                    t = new_target(jz2[k])
+                    if t is None:
+                        ok = False
+                        break
+                    nlen = new_len[k]
+                    off = t - (base + nlen) + 2
+                    if nlen == 2:
+                        if not (2 <= off <= 0xEF):
+                            ok = False
+                            break
+                        pieces.append(bytearray([0x9C, off]))
+                    else:
+                        u = off & 0xFFFF
+                        pieces.append(bytearray([0x8C, (u >> 8) & 0xFF,
+                                                 u & 0xFF]))
+                    continue
                 if k in force_br:
                     bp = r['branch_pos'] - r['a']
                     bb = (0x80 if r['branch_on'] else 0) | 0x40 | force_br[k]
@@ -4139,7 +4198,8 @@ class ImprovedCodeGenerator:
             # --- remap recorded placeholder positions --------------------------
             posmap = {}
             for k, r in enumerate(instrs):
-                if drop[k] or (k in repl and k not in repl_same) or k in narrow_j:
+                if (drop[k] or (k in repl and k not in repl_same)
+                        or k in narrow_j or k in jz2):
                     continue
                 lim = ((r['branch_pos'] - r['a'])
                        if (k in narrow_b or k in force_br) else (r['n'] - r['a']))
@@ -21631,52 +21691,89 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        args = operands[1:]
 
-        # First, evaluate any FormNode operands that need to push results to stack
-        # This handles cases like <CALL <GETP obj prop>> where GETP must execute first
-        all_ops = [operands[0]] + list(args)
-        for op in all_ops:
-            if isinstance(op, (FormNode, CondNode, RepeatNode)):
-                # Generate code for the nested form - result goes on stack
-                nested_code = self.generate_form(op) if isinstance(op, FormNode) else self._generate_node(op)
-                code.extend(nested_code)
+        # Routine + up to 3 args (V3 instruction limit; gen_apply validates)
+        all_ops = [NumberNode(0) if self._is_empty_false_form(op) else op
+                   for op in operands[:4]]
 
-        # Get routine type and value
-        routine_type, routine_val = self._get_operand_type_and_value(operands[0])
+        # A nested form/cond/repeat operand must be EVALUATED first (result
+        # pushed to the stack); _get_operand_type_and_value only *assumes* it
+        # is already there. When more than one operand needs the stack, spill
+        # all but the last-evaluated one into a scratch global (shared with
+        # gen_routine_call) because the CALL's stack operands pop
+        # left-to-right: suspect's GOAL-REACHED does
+        #   <APPLY <GET .GT ,GOAL-FUNCTION> <COND (.THERE? ,G-ALREADY) ...>>
+        # and without the spill the COND value became the routine address.
+        # (The old code here also called a nonexistent self._generate_node
+        # for COND/REPEAT operands, aborting the whole compile.)
+        def needs_eval(op):
+            if isinstance(op, (CondNode, RepeatNode)):
+                return True
+            if isinstance(op, FormNode):
+                # QUOTE forms resolve inline to a constant - no code needed
+                if (isinstance(op.operator, AtomNode)
+                        and op.operator.value.upper() == 'QUOTE'):
+                    return False
+                return True
+            return False
+
+        eval_positions = [i for i, op in enumerate(all_ops) if needs_eval(op)]
+        call_scratch = ['_CALLARG1_', '_CALLARG2_', '_CALLARG3_']
+        spilled = 0
+        resolved = []  # (op_type, op_val): op_type 2=variable, else constant
+        for i, op in enumerate(all_ops):
+            if needs_eval(op):
+                before = len(self._current_stmt_routine_offsets)
+                insert_pos = len(code)
+                if isinstance(op, FormNode):
+                    inner = self.generate_form(op)
+                elif isinstance(op, CondNode):
+                    inner = self.generate_cond(op, value_context=True)
+                else:
+                    inner = self.generate_repeat(op)
+                for k in range(before, len(self._current_stmt_routine_offsets)):
+                    rel, ph = self._current_stmt_routine_offsets[k]
+                    self._current_stmt_routine_offsets[k] = (insert_pos + rel, ph)
+                code.extend(inner)  # result now on the stack
+                if i == eval_positions[-1]:
+                    resolved.append((2, 0))  # variable 0 = stack (last one)
+                else:
+                    sname = (call_scratch[spilled]
+                             if spilled < len(call_scratch)
+                             else f'_CALLARG{spilled + 1}_')
+                    spilled += 1
+                    if sname not in self.globals:
+                        self.globals[sname] = self.next_global
+                        self.global_values[sname] = 0
+                        self.next_global += 1
+                    svar = self.globals[sname]
+                    # ADD sp 0 -> svar (pops the stack into the scratch var)
+                    code.extend([0xD4, 0x9F, 0x00, 0x00, svar & 0xFF])
+                    resolved.append((2, svar))
+            else:
+                op_type, op_val = self._get_operand_type_and_value(op)
+                if op_type == 1:  # Variable
+                    resolved.append((2, op_val))
+                else:
+                    resolved.append((op_type, op_val))
 
         # CALL_VS is VAR opcode 0x00
         code.append(0xE0)  # VAR form, opcode 0x00
 
         # Build type byte for all operands (routine + up to 3 args)
-        # Type encoding: 00=large const (2 bytes), 01=small const (1 byte), 10=variable (1 byte), 11=omit
-        num_args = min(len(args), 3)
+        # Type encoding: 00=large const, 01=small const, 10=variable, 11=omit
         types = []
         operand_bytes = []
-
-        # Routine type and bytes
-        if routine_type == 1:  # Variable
-            types.append(0x02)
-            operand_bytes.append([routine_val & 0xFF])
-        elif routine_val > 255 or routine_val < 0:  # Large constant (need 2 bytes)
-            types.append(0x00)
-            operand_bytes.append([(routine_val >> 8) & 0xFF, routine_val & 0xFF])
-        else:  # Small constant (1 byte)
-            types.append(0x01)
-            operand_bytes.append([routine_val & 0xFF])
-
-        # Argument types and bytes
-        for i in range(num_args):
-            arg_type, arg_val = self._get_operand_type_and_value(args[i])
-            if arg_type == 1:  # Variable
+        for op_type, op_val in resolved:
+            if op_type == 2:  # Variable
                 types.append(0x02)
-                operand_bytes.append([arg_val & 0xFF])
-            elif arg_val > 255 or arg_val < 0:  # Large constant
+                operand_bytes.append([op_val & 0xFF])
+            elif op_val > 255 or op_val < 0:  # Large constant (2 bytes)
                 types.append(0x00)
-                operand_bytes.append([(arg_val >> 8) & 0xFF, arg_val & 0xFF])
-            else:  # Small constant
+                operand_bytes.append([(op_val >> 8) & 0xFF, op_val & 0xFF])
+            else:  # Small constant (1 byte)
                 types.append(0x01)
-                operand_bytes.append([arg_val & 0xFF])
+                operand_bytes.append([op_val & 0xFF])
 
         # Pad with "omitted" (11)
         while len(types) < 4:

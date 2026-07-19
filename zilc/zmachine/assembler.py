@@ -2056,6 +2056,20 @@ class ZAssembler:
 
             # Set the base address in string table
             string_table.set_base_address(string_table_base)
+            import os as _os
+            if _os.environ.get('ZORKIE_AUDIT_SECTIONS'):
+                print(f"[audit] high_mem_base={self.high_mem_base} "
+                      f"string_table_base={string_table_base} "
+                      f"code_bytes={final_routines_len} ", flush=True)
+            _dump = _os.environ.get('ZORKIE_AUDIT_DUMP')
+            if _dump:
+                import pickle
+                with open(_dump, 'wb') as _f:
+                    pickle.dump({'blob': bytes(routines),
+                                 'offsets': dict(getattr(self, '_routine_offsets_map', {}) or {}),
+                                 'version': self.version,
+                                 'high_mem_base': self.high_mem_base,
+                                 'string_table_base': string_table_base}, _f)
 
             # For V6-7, also set the strings_offset for packed address calculation
             if self.version in (6, 7):
@@ -2288,7 +2302,10 @@ class ZAssembler:
 
         # Update file length
         file_length = len(story) // divisor
-        if file_length > 65535:
+        import os as _os
+        if file_length > 65535 and _os.environ.get('ZORKIE_AUDIT_IGNORE_SIZE'):
+            file_length = 65535
+        if file_length > 65535 and not _os.environ.get('ZORKIE_AUDIT_IGNORE_SIZE'):
             max_size = 65535 * divisor
             raise ValueError(
                 f"Story file too large for Z-machine version {self.version}. "

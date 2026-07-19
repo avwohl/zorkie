@@ -735,6 +735,11 @@ class ZILCompiler:
         # Fifth pass: Evaluate %<+>, %<->, %<*>, etc. compile-time arithmetic
         source = self._process_compile_arithmetic(source)
 
+        # Fifth-and-a-half: evaluate %<NAME ...> calls of user compile-time
+        # selector DEFINEs (suspect's DEBUG-CODE) before the strip pass would
+        # turn them into 0 placeholders.
+        source = self._process_compile_defines(source)
+
         # Strip any remaining %<...> forms (DEBUG-CODE, etc.) that we can't evaluate
         source = self._strip_compile_forms(source)
 
@@ -1753,6 +1758,264 @@ class ZILCompiler:
 
         return ''.join(result)
 
+    def _split_zil_elements(self, text: str) -> list:
+        """Split ZIL source text into its top-level elements (as raw text).
+
+        Respects <> () [] nesting, string literals with escapes, and prefix
+        characters (' ! % ;) that attach to the following element.
+        """
+        elems = []
+        i, n = 0, len(text)
+        while i < n:
+            if text[i] in ' \t\r\n':
+                i += 1
+                continue
+            start = i
+            # Prefix characters that glue to the next element
+            while i < n and text[i] in "'!%;":
+                i += 1
+            if i < n and text[i] in '<([':
+                openc = text[i]
+                close = {'<': '>', '(': ')', '[': ']'}[openc]
+                depth = 0
+                in_str = False
+                while i < n:
+                    ch = text[i]
+                    if in_str:
+                        if ch == '\\':
+                            i += 2
+                            continue
+                        if ch == '"':
+                            in_str = False
+                    elif ch == '"':
+                        in_str = True
+                    elif ch == openc:
+                        depth += 1
+                    elif ch == close:
+                        depth -= 1
+                        if depth == 0:
+                            i += 1
+                            break
+                    i += 1
+            elif i < n and text[i] == '"':
+                i += 1
+                while i < n:
+                    if text[i] == '\\':
+                        i += 2
+                        continue
+                    if text[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+            else:
+                while i < n and text[i] not in ' \t\r\n<>()[]"':
+                    i += 1
+            if i > start:
+                elems.append(text[start:i])
+            else:  # lone closer or stray char: consume to avoid looping
+                i += 1
+        return elems
+
+    def _collect_selector_defines(self, source: str) -> dict:
+        """Find user DEFINEs usable as compile-time selectors.
+
+        A selector DEFINE takes only QUOTED parameters (so its arguments are
+        source forms, not values) and has a single <COND ...> body whose tests
+        are compile-time evaluable. The canonical example is suspect's
+
+            <DEFINE DEBUG-CODE ('X "OPTIONAL" ('Y T))
+                    <COND (,DEBUGGING? .X)(ELSE .Y)>>
+
+        used as %<DEBUG-CODE <debug-arm> <release-arm>> around its entire
+        action-dispatch (PERFORM/CLOCKER/goal system). Before this pass those
+        %<...> forms were stripped to 0 placeholders, so every APPLY in the
+        release arm vanished and no command had any effect.
+
+        Returns {NAME: (params, clauses)} where params is a list of
+        (param_name, default_text_or_None) and clauses the parsed COND
+        clauses as (test_text, result_text).
+        """
+        import re
+        defs = {}
+        for m in re.finditer(r'<\s*DEFINE\s+([A-Z0-9!?$&*./\-]+)[\s(]',
+                             source, re.IGNORECASE):
+            content, _end = self._extract_balanced_content(source, m.start())
+            if not content:
+                continue
+            name = m.group(1).upper()
+            inner = content.strip()
+            if not (inner.startswith('<') and inner.endswith('>')):
+                continue
+            elems = self._split_zil_elements(inner[1:-1])
+            # elems: DEFINE NAME (params...) body...
+            if len(elems) < 4 or not elems[2].startswith('('):
+                continue
+            # Body: skip #DECL <decl-list> pairs; require exactly one COND
+            body_elems = []
+            k = 3
+            while k < len(elems):
+                if elems[k].upper() == '#DECL':
+                    k += 2  # skip the declaration list too
+                    continue
+                body_elems.append(elems[k])
+                k += 1
+            if len(body_elems) != 1 or not re.match(r'<\s*COND\b',
+                                                    body_elems[0],
+                                                    re.IGNORECASE):
+                continue
+            # Parameters: every one must be quoted ('X or ('Y default))
+            p_elems = self._split_zil_elements(elems[2].strip()[1:-1])
+            params = []
+            supported = True
+            for pe in p_elems:
+                pu = pe.upper()
+                if pu in ('"OPTIONAL"', '"OPT"'):
+                    continue
+                if pu.startswith('"'):  # "AUX", "ARGS", "TUPLE", ...
+                    supported = False
+                    break
+                if pe.startswith("'"):
+                    params.append((pe[1:].upper(), None))
+                elif pe.startswith('('):
+                    sub = self._split_zil_elements(pe.strip()[1:-1])
+                    if sub and sub[0].startswith("'"):
+                        default = sub[1] if len(sub) > 1 else 'T'
+                        params.append((sub[0][1:].upper(), default))
+                    else:
+                        supported = False
+                        break
+                else:
+                    supported = False
+                    break
+            if not supported or not params:
+                continue
+            cm = re.match(r'<\s*COND\s+(.*)>\s*$', body_elems[0],
+                          re.DOTALL | re.IGNORECASE)
+            if not cm:
+                continue
+            clauses = self._parse_cond_clauses(cm.group(1).strip())
+            if clauses:
+                defs[name] = (params, clauses)
+        return defs
+
+    def _substitute_define_params(self, text: str, bindings: dict) -> str:
+        """Replace .PARAM references in text with the bound argument text."""
+        import re
+        for pname, ptext in bindings.items():
+            pattern = r'\.' + re.escape(pname) + r'(?![A-Z0-9!?$&*./\-])'
+            text = re.sub(pattern, lambda _m, t=ptext: t, text,
+                          flags=re.IGNORECASE)
+        return text
+
+    def _evaluate_selector_call(self, defs: dict, content: str):
+        """Evaluate one %<NAME arg...> selector call.
+
+        content is the balanced <NAME arg...> text. Returns the replacement
+        source text, or None if this call cannot be evaluated (wrong arity,
+        unresolvable) and should be left for the generic strip pass.
+        """
+        inner = content.strip()
+        if not (inner.startswith('<') and inner.endswith('>')):
+            return None
+        elems = [e for e in self._split_zil_elements(inner[1:-1])
+                 if not e.startswith(';')]  # drop comment elements
+        if not elems:
+            return None
+        name = elems[0].upper()
+        if name not in defs:
+            return None
+        params, clauses = defs[name]
+        args = elems[1:]
+        if len(args) > len(params):
+            # e.g. %<DEBUG-CODE <IFILE "DEBUG" T>> after the IFILE pass has
+            # inlined a whole file here: not a plain selector call.
+            return None
+        bindings = {}
+        for idx, (pname, default) in enumerate(params):
+            if idx < len(args):
+                bindings[pname] = args[idx]
+            elif default is not None:
+                bindings[pname] = default
+            else:
+                return None  # missing required argument
+        for test, result in clauses:
+            test = self._substitute_define_params(test, bindings)
+            if not self._evaluate_compile_test(test):
+                continue
+            res_elems = [e for e in self._split_zil_elements(result)
+                         if not e.startswith(';')]
+            # MDL COND clause value = its last expression
+            res_text = res_elems[-1] if res_elems else ''
+            res_text = self._substitute_define_params(res_text, bindings)
+            res_text = res_text.strip()
+            if res_text.startswith("'"):
+                res_text = res_text[1:].strip()
+            return res_text
+        return ''  # no clause matched: false
+
+    def _process_compile_defines(self, source: str) -> str:
+        """Evaluate %<NAME ...> calls of compile-time selector DEFINEs."""
+        import re
+        defs = self._collect_selector_defines(source)
+        if not defs:
+            return source
+        name_re = re.compile(
+            r'%<\s*(' + '|'.join(re.escape(n) for n in defs) +
+            r')(?![A-Z0-9!?$&*./\-])',
+            re.IGNORECASE)
+        # Iterate to a fixpoint so selector calls nested inside a selected
+        # arm are expanded too (bounded to guard against self-recursion).
+        for _ in range(20):
+            changed = False
+            result = []
+            pos = 0
+            while pos < len(source):
+                m = name_re.search(source, pos)
+                if not m:
+                    result.append(source[pos:])
+                    break
+                mp = m.start()
+                if mp > 0 and source[mp - 1] == ';':
+                    # ;%<NAME ...> is a comment form -- leave it alone
+                    result.append(source[pos:m.end()])
+                    pos = m.end()
+                    continue
+                content, end = self._extract_balanced_content(source, mp + 1)
+                if not content:
+                    result.append(source[pos:m.end()])
+                    pos = m.end()
+                    continue
+                repl = self._evaluate_selector_call(defs, content)
+                if repl is None:
+                    # Not evaluable: keep intact for the strip pass
+                    result.append(source[pos:end])
+                    pos = end
+                    continue
+                # A bare-atom/false result (e.g. the default T) is a no-op
+                # at top level: emitting it there would leave a stray atom.
+                if repl in ('T', '<>', ''):
+                    text_before = ''.join(result) + source[pos:mp]
+                    depth = 0
+                    in_str = False
+                    for ch in text_before:
+                        if ch == '"':
+                            in_str = not in_str
+                        elif not in_str:
+                            if ch == '<':
+                                depth += 1
+                            elif ch == '>':
+                                depth -= 1
+                    if depth <= 0:
+                        repl = ''
+                result.append(source[pos:mp])
+                result.append(repl)
+                pos = end
+                changed = True
+            source = ''.join(result)
+            if not changed:
+                break
+        return source
+
     def _evaluate_compile_expr(self, content: str) -> object:
         """
         Evaluate a compile-time expression.
@@ -1934,6 +2197,12 @@ class ZILCompiler:
 
         if test.upper() == '<>':
             return False
+
+        # Bare global reference: ,VAR is true iff its tracked compile-time
+        # value is truthy (suspect: <COND (,DEBUGGING? .X)(ELSE .Y)>).
+        bare_gval = re.match(r',([A-Z0-9\-?!.]+)$', test.strip(), re.IGNORECASE)
+        if bare_gval:
+            return bool(self.compile_globals.get(bare_gval.group(1).upper()))
 
         # Match <NOT expr>
         not_match = re.match(r'<\s*NOT\s+(.+)\s*>', test, re.DOTALL | re.IGNORECASE)
@@ -3096,12 +3365,17 @@ class ZILCompiler:
             # Collect all strings from the program
             all_strings = []
 
-            # Strings from object/room descriptions
+            # Strings from object/room descriptions.
+            # NOTE: only true string values.  AtomNode also has a str .value
+            # (identifier name, e.g. an ACTION routine), but atom names are
+            # never encoded as Z-text; feeding them to abbreviation selection
+            # pollutes the frequency counts with phantom text.
+            from .parser.ast_nodes import StringNode as _AbbrSN
             for obj in program.objects + program.rooms:
                 for key, value in obj.properties.items():
                     if isinstance(value, str):
                         all_strings.append(value)
-                    elif hasattr(value, 'value') and isinstance(value.value, str):
+                    elif isinstance(value, _AbbrSN):
                         all_strings.append(value.value)
 
             # Strings from routines (TELL statements, inline strings)
@@ -3198,14 +3472,16 @@ class ZILCompiler:
 
             # Build abbreviations table (now directly generates non-overlapping abbreviations)
             abbreviations_table = AbbreviationsTable()
-            try:
-                from pathlib import Path as _P
-                _cand = sorted(_P(self._main_source_path).resolve().parent.glob('*freq.xzap')) \
-                    if getattr(self, '_main_source_path', None) else []
-                if _cand:
-                    abbreviations_table.freq_xzap = str(_cand[0])
-            except Exception:
-                pass
+            import os as _abbr_os
+            if not _abbr_os.environ.get('ZORKIE_NO_FREQ'):
+                try:
+                    from pathlib import Path as _P
+                    _cand = sorted(_P(self._main_source_path).resolve().parent.glob('*freq.xzap')) \
+                        if getattr(self, '_main_source_path', None) else []
+                    if _cand:
+                        abbreviations_table.freq_xzap = str(_cand[0])
+                except Exception:
+                    pass
             abbreviations_table.analyze_strings(all_strings, max_abbrevs=96)
             self.log(f"  Generated {len(abbreviations_table)} non-overlapping abbreviations")
 
