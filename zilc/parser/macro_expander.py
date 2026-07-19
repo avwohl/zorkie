@@ -22,6 +22,17 @@ class MapRet(Exception):
         self.values = values
 
 
+class MdlReturn(Exception):
+    """Compile-time <RETURN ...> escaping to the nearest evaluated REPEAT."""
+    def __init__(self, value: Any):
+        self.value = value
+
+
+class MdlAgain(Exception):
+    """Compile-time <AGAIN> restarting the nearest evaluated REPEAT."""
+    pass
+
+
 # Predicates that are meaningful at COMPILE time inside a macro expansion.
 # A COND built entirely from these may be folded by _evaluate_mdl; anything
 # else (FSET?, GETP, ...) is runtime and must reach codegen intact.
@@ -138,6 +149,10 @@ class MDLEvaluator:
         if isinstance(node, CondNode):
             return self._eval_cond_node(node, env)
 
+        # Handle REPEAT nodes: real compile-time MDL loops (moonmist DOBJ?)
+        if isinstance(node, RepeatNode):
+            return self._eval_repeat_node(node, env)
+
         # Handle splice-unquote (!.VAR) - evaluate inner expr and return as SpliceResultNode
         # This is used in FORM constructors like <FORM EQUAL? ,X !.L>
         if isinstance(node, SpliceUnquoteNode):
@@ -198,6 +213,22 @@ class MDLEvaluator:
 
         op_name = form.operator.value.upper()
         operands = form.operands
+
+        # Root-oblist qualification: FOO!- is the atom FOO on the root oblist
+        # (moonmist's <RETURN!- ...>).  Normalize for dispatch.
+        if op_name.endswith('!-'):
+            op_name = op_name[:-2]
+
+        # Compile-time loop control -- honored only while a REPEAT evaluation
+        # is active; elsewhere a (runtime) RETURN/AGAIN form is left as-is,
+        # matching the old unknown-form behavior.
+        if op_name in ('RETURN', 'AGAIN') and getattr(self, '_repeat_depth', 0) > 0:
+            if op_name == 'AGAIN':
+                raise MdlAgain()
+            raise MdlReturn(self.evaluate(operands[0], env) if operands else True)
+
+        if op_name == 'LENGTH?':
+            return self._eval_length_p(operands, env)
 
         # MDL primitives
         if op_name == 'QUOTE':
@@ -330,6 +361,59 @@ class MDLEvaluator:
 
         # Unknown form - return as-is (will be processed at runtime)
         return form
+
+    def _eval_length_p(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """<LENGTH? obj max>: the length if length <= max, else false."""
+        if len(operands) < 2:
+            return False
+        val = self.evaluate(operands[0], env)
+        mx = self.evaluate(operands[1], env)
+        if isinstance(val, (list, str)):
+            ln = len(val)
+        elif val is None or val is False:
+            ln = 0
+        else:
+            return False
+        if isinstance(mx, int) and ln <= mx:
+            return ln
+        return False
+
+    def _eval_repeat_node(self, node: 'RepeatNode', env: Dict[str, Any]) -> Any:
+        """Evaluate a compile-time <REPEAT (bindings) body...> loop.
+
+        Loops the body until a <RETURN ...> (MdlReturn) fires.  SETs on
+        outer variables deliberately share `env` (MDL scoping: only the
+        REPEAT's own binding list introduces new variables).  If the loop
+        does not terminate within the iteration cap it is not compile-time
+        MDL: the node is returned unchanged (legacy behavior).
+        """
+        if getattr(node, 'condition', None) is not None:
+            return node
+        loop_env = env
+        if node.bindings:
+            loop_env = dict(env)
+            for _b in node.bindings:
+                if isinstance(_b, tuple) and len(_b) == 2:
+                    _vn, _init = _b
+                else:
+                    _vn, _init = _b, None
+                if not isinstance(_vn, str):
+                    return node  # expression binding: not compile-time
+                loop_env[_vn.upper()] = (self.evaluate(_init, loop_env)
+                                         if _init is not None else None)
+        self._repeat_depth = getattr(self, '_repeat_depth', 0) + 1
+        try:
+            for _ in range(2000):
+                try:
+                    for stmt in node.body:
+                        self.evaluate(stmt, loop_env)
+                except MdlAgain:
+                    continue
+                except MdlReturn as _r:
+                    return _r.value
+        finally:
+            self._repeat_depth -= 1
+        return node
 
     def _eval_mapf(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """
@@ -1803,6 +1887,31 @@ class MacroExpander:
         # Build parameter bindings
         bindings = self._bind_parameters(macro, form.operands)
 
+        # A DEFMAC whose body is a top-level MDL loop (moonmist's DOBJ?/IOBJ?
+        # <REPEAT () ...>) is real compile-time MDL: evaluate it directly with
+        # the MDL evaluator (env = bindings).  The legacy path below would
+        # pre-substitute .VARs with their initial values, so the loop body
+        # could never observe its own SETs and the RepeatNode leaked into
+        # codegen (FORM/LENGTH?/RETURN!- emitted as routine calls).
+        if isinstance(macro.body, RepeatNode):
+            _env = {}
+            for _k, _v in bindings.items():
+                # "AUX" defaults arrive as the empty-list form (); the MDL
+                # evaluator needs real lists to build on.
+                if isinstance(_v, FormNode) and isinstance(_v.operator, AtomNode) \
+                        and _v.operator.value == '()' and not _v.operands:
+                    _env[_k] = []
+                else:
+                    _env[_k] = _v
+            try:
+                _res = self.mdl_evaluator.evaluate(copy.deepcopy(macro.body), _env)
+            except Exception:
+                _res = None
+            if _res is not None and not isinstance(_res, RepeatNode):
+                _res = self._convert_result_to_ast(_res)
+                return self._unwrap_quote(_res)
+            # else: fall through to the legacy path
+
         # Expand the macro body with parameter substitution
         # IMPORTANT: Use a deep copy to avoid mutating the original macro body
         # (the macro may be expanded multiple times with different in_zilch values)
@@ -1996,11 +2105,47 @@ class MacroExpander:
 
         # Check for COND that might need compile-time evaluation
         if op_name == 'COND':
-            # Evaluate COND at compile time using MDL evaluator
-            result = self.mdl_evaluator.evaluate(node, bindings)
-            if isinstance(result, ASTNode):
-                return self._evaluate_mdl(result, bindings)
-            return self._convert_to_ast(result)
+            # Only fold when every clause condition is a compile-time
+            # predicate -- the same _cond_is_compile_time_mdl guard the
+            # CondNode branch above uses. FORM-constructed CONDs (e.g.
+            # suspended's ABS DEFMAC body <FORM COND (<FORM L? .NUM 0> ...)>)
+            # previously folded UNCONDITIONALLY, evaluating runtime tests
+            # like <L? <- ,P2 ,P1> 0> at compile time and collapsing the
+            # whole macro to a constant (ABS -> 0, so I-WEATHER's WINDS
+            # stayed 0 and ADJUST-PRESSURE barely moved: 396,000 casualties
+            # instead of 8,000 on the verified route).
+            _shim_clauses = []
+            for _op in node.operands:
+                _items = None
+                if (isinstance(_op, FormNode)
+                        and isinstance(_op.operator, AtomNode)
+                        and _op.operator.value == '()'):
+                    _items = _op.operands
+                elif isinstance(_op, list):
+                    _items = _op
+                if _items:
+                    _shim_clauses.append((_items[0], list(_items[1:])))
+            _shim = type('_CondShim', (), {'clauses': _shim_clauses})
+            if _cond_is_compile_time_mdl(_shim):
+                # Evaluate COND at compile time using MDL evaluator
+                result = self.mdl_evaluator.evaluate(node, bindings)
+                if isinstance(result, ASTNode):
+                    return self._evaluate_mdl(result, bindings)
+                return self._convert_to_ast(result)
+            # Runtime COND: hand codegen a real CondNode (its normal COND
+            # path; FormNode-with-'()'-clauses trips ZIL0100), still
+            # expanding MDL constructs inside conditions and actions.
+            if _shim_clauses:
+                _rt_clauses = []
+                for _c, _a in _shim_clauses:
+                    _rt_clauses.append(
+                        (self._evaluate_mdl(_c, bindings),
+                         [self._evaluate_mdl(_s, bindings) for _s in _a]))
+                return CondNode(_rt_clauses, node.line, node.column)
+            new_operands = [self._evaluate_mdl(_op, bindings)
+                            for _op in node.operands]
+            return FormNode(node.operator, new_operands, node.line,
+                            node.column)
 
         # Check for EVAL that needs compile-time evaluation
         if op_name == 'EVAL':

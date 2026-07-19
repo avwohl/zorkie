@@ -1373,7 +1373,8 @@ class ZAssembler:
                         string_data_placeholders: dict = None,
                         table_string_fixups: list = None,
                         table_addr_fixups: list = None,
-                        prop_dict_fixups: list = None) -> bytes:
+                        prop_dict_fixups: list = None,
+                        property_routine_positional_fixups: list = None) -> bytes:
         """
         Build complete story file.
 
@@ -1861,6 +1862,55 @@ class ZAssembler:
                     # as string placeholder 0 and PREACTIONS[30] broke).
                     table_routine_patched.add(story_offset)
                     table_routine_patched.add(story_offset + 1)
+
+        # POSITIONAL property-routine fixups (>256 distinct routines):
+        # (obj_idx, prop_num, byte_off, routine_byte_offset) recorded at
+        # emission, patched point-wise -- mirrors prop_dict_fixups.  When
+        # supplied, the legacy 0xFA scan below never runs (the compiler
+        # passes an empty property_routine_fixups list).
+        if property_routine_positional_fixups and objects:
+            obj_entry_sz = 9 if self.version <= 3 else 14
+            entries_base = objects_addr + prop_defaults_size
+            for _oi, _pn2, _boff, _roff in property_routine_positional_fixups:
+                actual_addr = self.high_mem_base + _roff
+                if self.version <= 3:
+                    packed_addr = actual_addr // 2
+                elif self.version <= 5:
+                    packed_addr = actual_addr // 4
+                elif self.version <= 7:
+                    packed_addr = (4 + _roff) // 4
+                else:
+                    packed_addr = actual_addr // 8
+                ptr_at = entries_base + _oi * obj_entry_sz + obj_entry_sz - 2
+                if ptr_at + 1 >= len(story):
+                    continue
+                pt = (story[ptr_at] << 8) | story[ptr_at + 1]
+                if not (0 < pt < len(story)):
+                    continue
+                p = pt + 1 + 2 * story[pt]  # skip short-name
+                while p < len(story) and story[p] != 0:
+                    sz = story[p]
+                    if self.version <= 3:
+                        dlen = (sz >> 5) + 1
+                        pn = sz & 0x1F
+                        p += 1
+                    else:
+                        if sz & 0x80:
+                            dlen = story[p + 1] & 0x3F or 64
+                            pn = sz & 0x3F
+                            p += 2
+                        else:
+                            dlen = 2 if (sz & 0x40) else 1
+                            pn = sz & 0x3F
+                            p += 1
+                    if pn == _pn2:
+                        j = p + _boff
+                        # Guard: the builder may have truncated the property.
+                        if j + 1 < len(story) and _boff + 1 < dlen:
+                            story[j] = (packed_addr >> 8) & 0xFF
+                            story[j + 1] = packed_addr & 0xFF
+                        break
+                    p += dlen
 
         # Resolve property routine placeholders in object data
         # Now that we know high_mem_base, we can patch 0xFA00 | idx values

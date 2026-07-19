@@ -4054,6 +4054,15 @@ class ZILCompiler:
         # Placeholders are 0xFA00 | idx values stored in property data
         property_routine_map = {}  # placeholder_idx -> routine_name
         next_routine_placeholder_idx = 0
+        # Positional property-routine fixup state (>256 distinct routines,
+        # e.g. wishbringer/trinity).  'pending' and 'overrides'/'used_global'
+        # are per-object (reset each object); 'positional' accumulates
+        # (obj_idx, prop_num, byte_off, routine_name) across all objects and
+        # is only USED when 'overflow' flips True (mode decided at the end of
+        # the object loop; <=256-routine games keep the legacy scheme and
+        # stay byte-identical).
+        _prp_state = {'overflow': False, 'pending': [], 'overrides': {},
+                      'used_global': set(), 'positional': []}
 
         # Build sets for property value validation
         global_names = {g.name for g in program.globals}
@@ -4404,16 +4413,46 @@ class ZILCompiler:
                 # One placeholder index PER ROUTINE NAME (dedup): a fresh idx
                 # per REFERENCE overflowed the 8-bit band in zork3 (>256 refs:
                 # 0xFA00|265 = 0xFB09 aliased the vocab band and LAMP's ACTION
-                # prop became a dictionary address).
+                # prop became a dictionary address).  Past 256 DISTINCT
+                # routines the scheme switches to positional fixups: marker
+                # indices are recycled per object (an override map shadows the
+                # global meaning inside the current object) and the marker
+                # scan after extract_properties records exact
+                # (obj_idx, prop_num, byte_off, routine_name) patches.
+                _ov = _prp_state['overrides']
+                for _pidx, _rn in _ov.items():
+                    if _rn == atom_name:
+                        _prp_state['pending'].append((_pidx, atom_name))
+                        return 0xFA00 | _pidx
+                _gidx = None
                 for _pidx, _rn in property_routine_map.items():
                     if _rn == atom_name:
-                        return 0xFA00 | _pidx
-                if next_routine_placeholder_idx > 0xFF:
-                    raise ValueError('property routine placeholder overflow (>256 distinct routines)')
-                placeholder_idx = next_routine_placeholder_idx
-                next_routine_placeholder_idx += 1
-                property_routine_map[placeholder_idx] = atom_name
-                return 0xFA00 | placeholder_idx
+                        _gidx = _pidx
+                        break
+                if _gidx is not None and _gidx not in _ov:
+                    _prp_state['used_global'].add(_gidx)
+                    _prp_state['pending'].append((_gidx, atom_name))
+                    return 0xFA00 | _gidx
+                if _gidx is None and next_routine_placeholder_idx <= 0xFF:
+                    placeholder_idx = next_routine_placeholder_idx
+                    next_routine_placeholder_idx += 1
+                    property_routine_map[placeholder_idx] = atom_name
+                    _prp_state['used_global'].add(placeholder_idx)
+                    _prp_state['pending'].append((placeholder_idx, atom_name))
+                    return 0xFA00 | placeholder_idx
+                # Overflow (or global idx shadowed in this object): allocate a
+                # per-object recycled marker index.
+                _prp_state['overflow'] = True
+                _busy = set(_ov) | _prp_state['used_global']
+                _free = [i for i in range(256) if i not in _busy]
+                if not _free:
+                    raise ValueError(
+                        'property routine placeholder overflow '
+                        '(>256 routine references in one object)')
+                _idx = _free[0]
+                _ov[_idx] = atom_name
+                _prp_state['pending'].append((_idx, atom_name))
+                return 0xFA00 | _idx
             # Not found
             return None
 
@@ -4885,10 +4924,37 @@ class ZILCompiler:
         # Add objects with properties and tree structure
         # Sort by object number so objects are added in the correct order for the table
         sorted_objects = sorted(all_objects, key=lambda x: obj_name_to_num[x[0]])
+        def _prp_scan_object(props, obj_idx):
+            """Record positional (obj_idx, prop_num, byte_off, routine_name)
+            fixups for every routine marker embedded in this object's finished
+            property values, then reset the per-object marker state."""
+            pend = {}
+            for _i, _n in _prp_state['pending']:
+                pend.setdefault(_i, _n)
+            if pend:
+                for _pn, _val in props.items():
+                    if isinstance(_val, int):
+                        if (_val & 0xFF00) == 0xFA00 and (_val & 0xFF) in pend:
+                            _prp_state['positional'].append(
+                                (obj_idx, _pn, 0, pend[_val & 0xFF]))
+                    elif isinstance(_val, (bytes, bytearray)):
+                        _j = 0
+                        while _j + 1 < len(_val):
+                            if _val[_j] == 0xFA and _val[_j + 1] in pend:
+                                _prp_state['positional'].append(
+                                    (obj_idx, _pn, _j, pend[_val[_j + 1]]))
+                                _j += 2
+                                continue
+                            _j += 1
+            _prp_state['pending'] = []
+            _prp_state['overrides'] = {}
+            _prp_state['used_global'] = set()
+
         for obj_idx, (name, node, is_room) in enumerate(sorted_objects):
             obj_num = obj_name_to_num[name]
             attributes = flags_to_attributes(node.properties.get('FLAGS', []))
             properties = extract_properties(node, obj_idx)
+            _prp_scan_object(properties, obj_idx)
             obj_table.add_object(
                 name=name,
                 parent=parent_of.get(obj_num, 0),
@@ -4926,6 +4992,22 @@ class ZILCompiler:
                 self.log(f"  WARNING: Property references missing routine '{routine_name}'")
                 property_routine_fixups.append((placeholder_idx, 0))
 
+        property_routine_positional = None
+        if _prp_state['overflow']:
+            # Positional mode: point-wise patches by (obj, prop, byte_off).
+            # The legacy list must be EMPTY so the assembler's position-blind
+            # 0xFA scan never runs (recycled indices are ambiguous globally).
+            property_routine_positional = []
+            for _oi, _pn, _off, _rname in _prp_state['positional']:
+                if _rname in codegen.routines:
+                    _roff = codegen.routines[_rname]
+                else:
+                    self.log(f"  WARNING: Property references missing routine '{_rname}'")
+                    _roff = 0
+                property_routine_positional.append((_oi, _pn, _off, _roff))
+            property_routine_fixups = []
+            self.log(f"  {len(property_routine_positional)} POSITIONAL property"
+                     f" routine fixups (>256 distinct routines)")
         if property_routine_fixups:
             self.log(f"  {len(property_routine_fixups)} property routine fixups")
 
@@ -5131,6 +5213,7 @@ class ZILCompiler:
             routine_fixups=routine_fixups,
             table_routine_fixups=table_routine_fixups,
             property_routine_fixups=property_routine_fixups,
+            property_routine_positional_fixups=property_routine_positional,
             extension_table=extension_table,
             alphabet_table=alphabet_table,
             string_placeholders=string_placeholders,
