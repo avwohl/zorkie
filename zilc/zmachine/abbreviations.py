@@ -128,6 +128,9 @@ class AbbreviationsTable:
         freq = self._freq_select(max_abbrevs)
         if freq:
             candidates.append(freq)
+        celf = self._celf_select(corpus, max_abbrevs)
+        if celf:
+            candidates.append(celf)
         if not candidates:
             self.abbreviations = []
             self.lookup = {}
@@ -172,6 +175,142 @@ class AbbreviationsTable:
             z = _zlen(a)
             total += z + (-z) % 3
         return total
+
+    def _celf_select(self, corpus, max_abbrevs):
+        """CELF-style lazy-greedy abbreviation pass ranked by TRUE marginal
+        gain.
+
+        Unlike `_greedy_select` (which scores candidates with the closed-form
+        `cnt * (z - 2) - stored` estimate over sentinel-collapsed text), this
+        pass evaluates each candidate's actual reduction of the same cost that
+        `_corpus_cost` measures: DP-optimal abbreviation application per
+        string, per-string padding to a 3-z-char word boundary, minus the
+        padded storage cost of the abbreviation string itself.  The closed-form
+        estimate is only used as an optimistic upper bound to order the lazy
+        re-evaluations (CELF): a candidate is accepted only when its freshly
+        computed true gain still tops every other candidate's bound.
+
+        Fully deterministic: heap entries are (-gain, text) so ties break on
+        the candidate text, never on dict/set iteration order.
+        """
+        import heapq
+
+        counts = _frequent_substrings(corpus)
+        if not counts:
+            return []
+
+        def _pad(z):
+            return z + (-z) % 3
+
+        # Optimistic initial bounds (an upper bound on the true gain: every
+        # counted -- possibly overlapping -- occurrence saving the full z - 2,
+        # with no padding loss).
+        heap = []
+        for sub, cnt in counts.items():
+            z = _zlen(sub)
+            if z <= 2 or cnt < 2:
+                continue
+            bound = cnt * (z - 2) - _pad(z)
+            if bound > 0:
+                heap.append((-bound, sub))
+        heapq.heapify(heap)
+
+        # Per-string current encoded cost under the chosen-so-far set.  With
+        # no abbreviations the DP degenerates to the plain z-char length.
+        cost = [_pad(_zlen(s)) for s in corpus]
+        by_first = {}
+        occurrences = {}   # sub -> indices of corpus strings containing it
+        fresh_at = {}      # sub -> version its heap gain was evaluated at
+        chosen = set()
+        version = 0
+        abbreviations = []
+
+        def _true_gain(sub):
+            idxs = occurrences.get(sub)
+            if idxs is None:
+                idxs = [i for i, s in enumerate(corpus) if sub in s]
+                occurrences[sub] = idxs
+            trial = dict(by_first)
+            trial[sub[0]] = trial.get(sub[0], []) + [sub]
+            gain = 0
+            for i in idxs:
+                gain += cost[i] - _pad(_dp_zchars(corpus[i], trial))
+            return gain - _pad(_zlen(sub))
+
+        while heap and len(abbreviations) < max_abbrevs:
+            neg, sub = heapq.heappop(heap)
+            if sub in chosen:
+                continue
+            if fresh_at.get(sub) == version:
+                if -neg <= 0:
+                    break
+                abbreviations.append(sub)
+                chosen.add(sub)
+                by_first.setdefault(sub[0], []).append(sub)
+                for i in occurrences[sub]:
+                    cost[i] = _pad(_dp_zchars(corpus[i], by_first))
+                version += 1
+            else:
+                gain = _true_gain(sub)
+                if gain > 0:
+                    fresh_at[sub] = version
+                    heapq.heappush(heap, (-gain, sub))
+
+        # Polish: swap the weakest chosen abbreviation for the best remaining
+        # candidate while that strictly lowers the true cost.  Marginal gains
+        # are not perfectly submodular here (per-string word padding), so the
+        # lazy pass above can strand a slightly better candidate; a few
+        # bounded exchange rounds recover it.  Fully deterministic (ties break
+        # on the candidate text).
+        for _round in range(24):
+            if not abbreviations:
+                break
+            contrib = {}
+            for a in abbreviations:
+                bf2 = {k: [x for x in v if x != a] for k, v in by_first.items()}
+                loss = 0
+                for i in occurrences[a]:
+                    loss += _pad(_dp_zchars(corpus[i], bf2)) - cost[i]
+                contrib[a] = loss - _pad(_zlen(a))
+            worst = min(abbreviations, key=lambda a: (contrib[a], a))
+            floor = contrib[worst]
+            cand_heap = []
+            for sub, cnt in counts.items():
+                if sub in chosen:
+                    continue
+                z = _zlen(sub)
+                if z <= 2:
+                    continue
+                b = cnt * (z - 2) - _pad(z)
+                if b > floor:
+                    cand_heap.append((-b, sub))
+            heapq.heapify(cand_heap)
+            evaluated = set()
+            best_add = None
+            while cand_heap:
+                nb, sub = heapq.heappop(cand_heap)
+                if sub in evaluated:
+                    best_add = (sub, -nb)
+                    break
+                gain = _true_gain(sub)
+                if gain > floor:
+                    evaluated.add(sub)
+                    heapq.heappush(cand_heap, (-gain, sub))
+            if best_add is None or best_add[1] <= floor:
+                break
+            sub = best_add[0]
+            abbreviations.remove(worst)
+            chosen.discard(worst)
+            by_first[worst[0]].remove(worst)
+            for i in occurrences[worst]:
+                cost[i] = _pad(_dp_zchars(corpus[i], by_first))
+            abbreviations.append(sub)
+            chosen.add(sub)
+            by_first.setdefault(sub[0], []).append(sub)
+            for i in occurrences[sub]:
+                cost[i] = _pad(_dp_zchars(corpus[i], by_first))
+
+        return abbreviations
 
     def _greedy_select(self, corpus, max_abbrevs):
         """Fresh greedy/iterative abbreviation pass.  Returns a list of

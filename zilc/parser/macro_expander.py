@@ -69,7 +69,8 @@ def _ct_bound_names(bindings):
         return set()
 
 
-def _cond_is_compile_time_mdl(node, bound=None):
+def _cond_is_compile_time_mdl(node, bound=None, ops=None, allow_quote=False):
+    _ops = ops if ops is not None else _CT_COND_OPS
     def ok(n, guarded):
         if isinstance(n, LocalVarNode):
             # .X is a compile-time test ONLY when X is a binding of the macro
@@ -89,12 +90,56 @@ def _cond_is_compile_time_mdl(node, bound=None):
         if isinstance(n, FormNode):
             if not isinstance(n.operator, AtomNode):
                 return False
-            if n.operator.value.upper() not in _CT_COND_OPS:
+            _opn = n.operator.value.upper()
+            if allow_quote and _opn == 'QUOTE':
+                return True     # a quoted expression is a constant
+            if _opn not in _ops:
                 return False
             return all(ok(op, guarded) for op in n.operands)
         return False
     for _c, _a in getattr(node, 'clauses', []):
         if not ok(_c, _gassigned_guarded_names(_c)):
+            return False
+    return True
+
+
+# Extended op set for STATEFUL all-COND macro bodies (see
+# _body_is_ct_cond_mdl): list accessors are pure and compile-time safe there.
+_CT_COND_EXT_OPS = _CT_COND_OPS | {'REST', 'NTH'}
+
+
+def _body_is_ct_cond_mdl(body, bound):
+    """True when EVERY top-level form of a DEFMAC body is a COND whose every
+    clause test is compile-time MDL over the macro's own bindings.
+
+    Such bodies (lurkinghorror/moonmist's P?) are stateful -- early conds SET
+    an "AUX" list that later conds read -- so the legacy pre-substitution
+    expansion can never work: the body must be EVALUATED with a live
+    environment.  The predicate is deliberately narrow (all-COND bodies,
+    binding-only variables, pure list-accessor tests) so ordinary macros keep
+    the legacy path."""
+    items = body if isinstance(body, list) else [body]
+    if not items:
+        return False
+    for it in items:
+        clauses = None
+        if isinstance(it, CondNode):
+            clauses = it.clauses
+        elif (isinstance(it, FormNode) and isinstance(it.operator, AtomNode)
+              and it.operator.value.upper() == 'COND'):
+            clauses = []
+            for _op in it.operands:
+                if (isinstance(_op, FormNode)
+                        and isinstance(_op.operator, AtomNode)
+                        and _op.operator.value == '()' and _op.operands):
+                    clauses.append((_op.operands[0], list(_op.operands[1:])))
+                else:
+                    return False
+        else:
+            return False
+        _shim = type('_CondShim', (), {'clauses': clauses})
+        if not _cond_is_compile_time_mdl(_shim, bound, ops=_CT_COND_EXT_OPS,
+                                         allow_quote=True):
             return False
     return True
 
@@ -373,6 +418,73 @@ class MDLEvaluator:
         elif op_name == 'VOC':
             # VOC creates a vocabulary word reference - return a placeholder form
             return self._eval_voc(operands, env)
+
+        # List literal (a b c) -- the parser represents it as a form whose
+        # operator is the atom "()".  Evaluate the elements into a real MDL
+        # list (inlining !-splices) so <SET L (<PE ...> !.L)> builds lists.
+        if op_name == '()':
+            result = []
+            for op in operands:
+                evaluated = self.evaluate(op, env)
+                if isinstance(evaluated, SpliceResultNode):
+                    result.extend(evaluated.items)
+                else:
+                    result.append(evaluated)
+            return result
+
+        # User DEFINE / DEFMAC application (e.g. lurkinghorror's PE helper
+        # inside the P? macro).  Bind evaluated args (raw AST for quoted
+        # params), then evaluate the body forms in order; the last value is
+        # the result.  Recursion is depth-capped; anything that fails falls
+        # through to the unknown-form behavior.
+        _macros = getattr(self.macro_expander, 'macros', None) or {}
+        if (op_name in _macros and getattr(self, '_apply_depth', 0) < 16
+                # The classic parser predicates are handled as codegen
+                # builtins (see expand()'s skip list); leave their FORMS
+                # for codegen rather than applying MULTIFROB here.
+                and op_name not in ('VERB?', 'PRSO?', 'PRSI?', 'ROOM?',
+                                    'HERE?', 'WINNER?', 'RARG?', 'CONTEXT?')):
+            macro = _macros[op_name]
+            try:
+                self._apply_depth = getattr(self, '_apply_depth', 0) + 1
+                new_env = {}
+                arg_i = 0
+                for param in macro.params:
+                    if len(param) == 5:
+                        p_name, p_quoted, p_tuple, p_aux, p_opt = param
+                    else:
+                        p_name, p_quoted, p_tuple, p_aux = param
+                        p_opt = False
+                    _defaults = getattr(macro, 'param_defaults', None) or {}
+                    if p_tuple:
+                        vals = []
+                        while arg_i < len(operands):
+                            v = operands[arg_i] if p_quoted else self.evaluate(operands[arg_i], env)
+                            vals.append(v)
+                            arg_i += 1
+                        new_env[p_name.upper()] = vals
+                    elif p_aux or (p_opt and arg_i >= len(operands)):
+                        if p_name in _defaults:
+                            # Defaults are EVALUATED at bind time with earlier
+                            # bindings visible (MULTIFROB's (OO (OR)) (O .OO)).
+                            new_env[p_name.upper()] = self.evaluate(
+                                copy.deepcopy(_defaults[p_name]), new_env)
+                        else:
+                            new_env[p_name.upper()] = []
+                    else:
+                        if arg_i < len(operands):
+                            v = operands[arg_i] if p_quoted else self.evaluate(operands[arg_i], env)
+                            new_env[p_name.upper()] = v
+                            arg_i += 1
+                        else:
+                            new_env[p_name.upper()] = None
+                body = macro.body if isinstance(macro.body, list) else [macro.body]
+                result = None
+                for b in body:
+                    result = self.evaluate(copy.deepcopy(b), new_env)
+                return result
+            finally:
+                self._apply_depth -= 1
 
         # Unknown form - return as-is (will be processed at runtime)
         return form
@@ -1917,7 +2029,8 @@ class MacroExpander:
         # the instruction stream desynced. The code generator has exact builtin
         # equivalents (gen_verb_test / gen_parser_eq_test), so leave these
         # unexpanded for it.
-        if macro_name in ('VERB?', 'PRSO?', 'PRSI?', 'ROOM?'):
+        if macro_name in ('VERB?', 'PRSO?', 'PRSI?', 'ROOM?', 'HERE?',
+                          'WINNER?', 'RARG?', 'CONTEXT?'):
             return None
 
         macro = self.macros[macro_name]
@@ -1952,18 +2065,38 @@ class MacroExpander:
         # pre-substitute .VARs with their initial values, so the loop body
         # could never observe its own SETs and the RepeatNode leaked into
         # codegen (FORM/LENGTH?/RETURN!- emitted as routine calls).
-        if isinstance(macro.body, RepeatNode):
+        if isinstance(macro.body, RepeatNode) or _body_is_ct_cond_mdl(
+                macro.body, _ct_bound_names(bindings)):
             _env = {}
+            _defaulted = getattr(self, '_last_defaulted_params', set())
             for _k, _v in bindings.items():
-                # "AUX" defaults arrive as the empty-list form (); the MDL
-                # evaluator needs real lists to build on.
+                _ku = str(_k).upper()
                 if isinstance(_v, FormNode) and isinstance(_v.operator, AtomNode) \
                         and _v.operator.value == '()' and not _v.operands:
-                    _env[_k] = []
+                    # "AUX" defaults arrive as the empty-list form (); the MDL
+                    # evaluator needs real lists to build on.
+                    _env[_ku] = []
+                elif _ku in _defaulted and _v is not None:
+                    # Declared defaults are EVALUATED at bind time, in
+                    # declaration order with earlier bindings visible --
+                    # MULTIFROB's "AUX" (OO (OR)) (O .OO) needs OO to be a
+                    # real one-element list and O to alias it.
+                    try:
+                        _env[_ku] = self.mdl_evaluator.evaluate(
+                            copy.deepcopy(_v), _env)
+                    except Exception:
+                        _env[_ku] = _v
                 else:
-                    _env[_k] = _v
+                    _env[_ku] = _v
             try:
-                _res = self.mdl_evaluator.evaluate(copy.deepcopy(macro.body), _env)
+                _body_items = (macro.body if isinstance(macro.body, list)
+                               else [macro.body])
+                _res = None
+                for _b in _body_items:
+                    # Sequential evaluation with a SHARED env: earlier conds'
+                    # SETs (P?'s list-building) are visible to later forms,
+                    # and the LAST form's value is the expansion.
+                    _res = self.mdl_evaluator.evaluate(copy.deepcopy(_b), _env)
             except Exception:
                 _res = None
             if _res is not None and not isinstance(_res, RepeatNode):
@@ -2079,6 +2212,11 @@ class MacroExpander:
         """
         bindings = {}
         arg_index = 0
+        # Names bound to their DECLARED DEFAULT (not a caller argument) this
+        # call -- the direct-eval path evaluates those defaults with the MDL
+        # evaluator (e.g. MULTIFROB's "AUX" (OO (OR)) must become a real
+        # list), while caller arguments stay raw ASTs.
+        self._last_defaulted_params = set()
 
         for param in macro.params:
             # Handle both old 4-tuple and new 5-tuple formats
@@ -2088,18 +2226,32 @@ class MacroExpander:
                 param_name, is_quoted, is_tuple, is_aux = param
                 is_optional = False
 
+            _defaults = getattr(macro, 'param_defaults', None) or {}
             if is_tuple:
                 # Collect all remaining arguments
                 bindings[param_name] = args[arg_index:]
                 arg_index = len(args)
             elif is_aux:
-                # AUX variables get default values (empty list for now)
-                bindings[param_name] = FormNode(AtomNode("()"), [])
+                # AUX variables get their declared default (empty list if none)
+                if param_name in _defaults:
+                    bindings[param_name] = self._unwrap_quote(
+                        copy.deepcopy(_defaults[param_name]))
+                else:
+                    bindings[param_name] = FormNode(AtomNode("()"), [])
+                self._last_defaulted_params.add(param_name.upper())
             elif is_optional:
                 # Optional parameter
                 if arg_index < len(args):
                     bindings[param_name] = args[arg_index]
                     arg_index += 1
+                elif param_name in _defaults:
+                    # Missing optional argument - bind the declared default,
+                    # unquoted per MDL binding semantics (lurkinghorror's
+                    # <DEFMAC P? ('V "OPT" ('O '*) ...)> binds O to the atom *
+                    # so <N==? .O '*> folds correctly).
+                    bindings[param_name] = self._unwrap_quote(
+                        copy.deepcopy(_defaults[param_name]))
+                    self._last_defaulted_params.add(param_name.upper())
                 else:
                     # Missing optional argument - bind to None (unassigned)
                     bindings[param_name] = None

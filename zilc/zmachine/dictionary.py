@@ -5,6 +5,7 @@ Builds the dictionary table with word separators and encoded words.
 """
 
 from typing import List, Set, Dict
+import re
 import struct
 import sys
 from .text_encoding import ZTextEncoder
@@ -53,6 +54,28 @@ class Dictionary:
         # Collision warnings generated during build
         self.collision_warnings: List[tuple] = []  # List of (code, message)
 
+    def _norm(self, word: str) -> str:
+        """Normalize a vocabulary word to its canonical dictionary spelling.
+
+        In ZIL a backslash quotes the next character inside an atom, so
+        FROG\\'S names the word FROG'S. Callers reach the dictionary with a
+        MIX of escaped and unescaped spellings (SYNONYM lists, THINGS/PSEUDO
+        <VOC ...> prescans, W?* code references), and keying them differently
+        split one word into two entries: LGOP's THINGS adjective FROG\\'S was
+        stored (and z-encoded!) WITH the backslash, then the W?FROG'S fixup
+        pass could not find the unescaped spelling and late-added "frog's"
+        AFTER the word-offset snapshot used for SYNONYM property fixups --
+        the insertion re-sorted the dictionary and shifted every entry after
+        it by one, so nouns resolved to the alphabetically preceding word
+        ("take stool" -> W?STONE: "You can't see any stool here!").
+        Unescaping at this single choke point makes every spelling of a word
+        land on one entry, and emits the real character (the typed input
+        "frog's" can actually match its entry).
+        """
+        if '\\' in word:
+            word = re.sub(r'\\(.)', r'\1', word)
+        return word.lower()
+
     def add_word(self, word: str, word_type: str = 'unknown', obj_num: int = None):
         """Add a word to the dictionary with optional type and object reference.
 
@@ -61,7 +84,7 @@ class Dictionary:
             word_type: Type of word (noun, verb, adjective, etc.)
             obj_num: Object number this word refers to (for SYNONYM)
         """
-        word_lower = word.lower()
+        word_lower = self._norm(word)
         self.words.add(word_lower)
 
         if word_type:
@@ -92,7 +115,7 @@ class Dictionary:
         old shared write let a later add_synonym clobber the A?-number
         (zork3 'stone': A?STONE=26 lost to ROCK's object number 138, so
         THIS-IT? never matched "stone door")."""
-        wl = adjective.lower()
+        wl = self._norm(adjective)
         self.add_word(wl, 'adjective', None)
         if not hasattr(self, 'adjective_values'):
             self.adjective_values = {}
@@ -108,7 +131,7 @@ class Dictionary:
             word: The verb word (e.g., 'TAKE')
             verb_number: The verb number (255, 254, 253, ...)
         """
-        word_lower = word.lower()
+        word_lower = self._norm(word)
         self.add_word(word_lower, 'verb')
         self.verb_numbers[word_lower] = verb_number
 
@@ -124,8 +147,8 @@ class Dictionary:
             synonym: The synonym word (e.g., 'CHUCK')
             main_verb: The main verb word (e.g., 'TOSS')
         """
-        synonym_lower = synonym.lower()
-        main_lower = main_verb.lower()
+        synonym_lower = self._norm(synonym)
+        main_lower = self._norm(main_verb)
 
         # Add the synonym as a verb
         self.add_word(synonym_lower, 'verb')
@@ -147,7 +170,7 @@ class Dictionary:
             word: The direction word (e.g., 'NORTH')
             prop_num: The property number for this direction
         """
-        word_lower = word.lower()
+        word_lower = self._norm(word)
         self.words.add(word_lower)
         if word_lower not in self.word_types:
             self.word_types[word_lower] = set()
@@ -174,7 +197,7 @@ class Dictionary:
             word: The preposition word (e.g., 'ON', 'IN', 'WITH')
             prep_number: The preposition number (1, 2, 3, ...)
         """
-        word_lower = word.lower()
+        word_lower = self._norm(word)
         self.add_word(word_lower, 'preposition')
         self.preposition_numbers[word_lower] = prep_number
 
@@ -495,7 +518,7 @@ class Dictionary:
         Returns:
             Byte offset within dictionary data, or -1 if word not found
         """
-        word_lower = word.lower()
+        word_lower = self._norm(word)
         if word_lower not in self.words:
             return -1
 

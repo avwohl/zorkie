@@ -31,6 +31,35 @@ class _PlaceholderScanDesync(Exception):
     """Raised when _walk_large_const_positions cannot decode a code stream."""
 
 
+def _collect_ast_names(node, acc):
+    """Collect every identifier-like string reachable in an AST subtree into
+    `acc` (both as written and uppercased).  Used to prove an AUX local is
+    NEVER referenced: any occurrence of its name anywhere -- atom, variable
+    reference, macro-call argument, table initializer -- keeps it.  String
+    LITERAL text is skipped (printed text can never reference a variable), so
+    single-letter locals are not pinned by prose."""
+    if node is None or isinstance(node, (int, float, bool, bytes)):
+        return
+    if isinstance(node, str):
+        acc.add(node)
+        acc.add(node.upper())
+        return
+    if isinstance(node, (list, tuple, set, frozenset)):
+        for x in node:
+            _collect_ast_names(x, acc)
+        return
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _collect_ast_names(k, acc)
+            _collect_ast_names(v, acc)
+        return
+    if isinstance(node, StringNode):
+        return
+    if isinstance(node, ASTNode):
+        for v in vars(node).values():
+            _collect_ast_names(v, acc)
+
+
 _2OP_STORE_OPS = frozenset({0x08, 0x09, 0x0F, 0x10, 0x11, 0x12, 0x13,
                             0x14, 0x15, 0x16, 0x17, 0x18})
 _2OP_BRANCH_OPS = frozenset({0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0A})
@@ -525,8 +554,28 @@ class ImprovedCodeGenerator:
         # its 257th (the Closet THINGS <VOC "HOLE" NOUN>) truncated to low
         # byte 0 -- resolving to whatever word held index 0 ("all").
         self._vocab_word_to_index: Dict[str, int] = {}
-        # Track vocab placeholder positions for resolution (routine_name, offset, placeholder_idx)
-        self._vocab_placeholder_positions: List[Tuple[str, int, int]] = []
+        # POSITIONAL vocab resolution (no 8-bit index limit). A vocab marker
+        # is a single in-band word, so only its LOW byte survives any scan;
+        # once the count of DISTINCT words passes 256 (trinity: 374) the
+        # marker value spills into the 0xFC code-string band and resolves to
+        # garbage. Exact positions are therefore recorded at emission:
+        #   - code: markers carry a PER-STATEMENT sequence number in the low
+        #     byte (_current_stmt_vocab_emits maps seq -> full idx); the
+        #     post-statement structural walk records each marker's offset,
+        #     rewrites the low byte to idx&0xFF (canonical, so the legacy
+        #     scan stays a valid backup for idx<256) and appends
+        #     (offset, full_idx) to _pending_vocab_positions, which the
+        #     peephole remaps exactly like _pending_placeholders.
+        #   - tables: (table_idx, byte_offset, full_idx) in _table_vocab_fixups.
+        #   - globals: global name -> full_idx in _global_vocab_fixups.
+        # Final code positions: (abs_code_offset, full_idx).
+        self._vocab_placeholder_positions: List[Tuple[int, int]] = []
+        self._pending_vocab_positions: List[Tuple[int, int]] = []
+        self._current_stmt_vocab_emits: List[int] = []
+        self._table_vocab_fixups: List[Tuple[int, int, int]] = []
+        self._global_vocab_fixups: Dict[str, int] = {}
+        self._encode_vocab_marker_offsets: List[Tuple[int, int]] = []
+        self._last_voc_form_idx = None
 
         # Track missing routines (referenced but not defined)
         self._missing_routines: set = set()
@@ -871,7 +920,23 @@ class ImprovedCodeGenerator:
 
         # Create VTBL (verb table) for parser syntax lookups
         # VTBL[index] = syntax table address for verb with number (255 - index)
-        if self.action_table and 'verb_numbers' in self.action_table:
+        # Only when the game actually references the name VTBL: classic games
+        # read ,VERBS / their own P-VTBL and never this compiler-synthesized
+        # stub, which cost 2 bytes per verb of pure-table space (236 bytes in
+        # moonmist) for a table nothing ever read.
+        _vtbl_referenced = 'VTBL' in self.globals
+        if not _vtbl_referenced:
+            _prog_names = set()
+            _collect_ast_names([r.body for r in program.routines], _prog_names)
+            _collect_ast_names([getattr(g, 'initial_value', None)
+                                for g in getattr(program, 'globals', []) or []],
+                               _prog_names)
+            _collect_ast_names([getattr(c, 'value', None)
+                                for c in getattr(program, 'constants', []) or []],
+                               _prog_names)
+            _vtbl_referenced = 'VTBL' in _prog_names
+        if (_vtbl_referenced and self.action_table
+                and 'verb_numbers' in self.action_table):
             verb_numbers = self.action_table['verb_numbers']
             verb_word_order = self.action_table.get('verb_word_order', [])
 
@@ -1044,6 +1109,11 @@ class ImprovedCodeGenerator:
                             # <VOC "word" pos> - vocabulary word reference
                             voc_val = self._handle_voc_form(global_node.initial_value)
                             self.global_values[global_node.name] = voc_val
+                            # Record the FULL index positionally (the marker's
+                            # low byte cannot carry indices >= 256).
+                            if self._last_voc_form_idx is not None:
+                                self._global_vocab_fixups[global_node.name] = \
+                                    self._last_voc_form_idx
                 elif isinstance(global_node.initial_value, StringNode):
                     # <GLOBAL X "string"> -- the global holds the PACKED address of the
                     # string. Register the string and store a 0xFC00|idx placeholder that
@@ -1058,6 +1128,11 @@ class ImprovedCodeGenerator:
                     ref_name = global_node.initial_value.name
                     if ref_name in self.global_values:
                         self.global_values[global_node.name] = self.global_values[ref_name]
+                        # A copied vocab-marker value needs its own positional
+                        # fixup (the marker low byte can't carry idx >= 256).
+                        if ref_name in self._global_vocab_fixups:
+                            self._global_vocab_fixups[global_node.name] = \
+                                self._global_vocab_fixups[ref_name]
                     else:
                         # Fall back to global number (for runtime globals)
                         init_val = self.get_operand_value(global_node.initial_value)
@@ -1079,6 +1154,24 @@ class ImprovedCodeGenerator:
         # Process constants
         for const_node in program.constants:
             self.eval_constant(const_node)
+
+        # ZILCH-builtin direction-exit constants.  Classic games rely on the
+        # compiler to define the PTSIZE-dispatch exit constants (lurkinghorror
+        # ships them commented out: ";<CONSTANT UEXIT 1> ..."), and without
+        # them V-WALK's <EQUAL? .PTS ,UEXIT> compiled against 0, no exit type
+        # ever matched, and GOTO ran with room 0 (the player vanished into
+        # the void on the first walk).  Values mirror encode_exit_classic's
+        # emitted layouts: UEXIT [room], NEXIT [str], FEXIT [fcn 0],
+        # CEXIT [room gnum els-str], DEXIT [room dobj els-str 0].
+        # A game's own definitions (zork1 defines these itself) take
+        # precedence -- only missing names are filled in.
+        for _nm, _val in (('REXIT', 0), ('UEXIT', 1), ('NEXIT', 2),
+                          ('FEXIT', 3), ('CEXIT', 4), ('DEXIT', 5),
+                          ('NEXITSTR', 0), ('FEXITFCN', 0),
+                          ('CEXITFLAG', 1), ('CEXITSTR', 1),
+                          ('DEXITOBJ', 1), ('DEXITSTR', 1)):
+            if _nm not in self.constants:
+                self.constants[_nm] = _val
 
         # Create SOFT-GLOBALS table AFTER constants (a table-CONSTANT can be
         # the overflow that lands in the funny table) and rewrite funny READS
@@ -1478,10 +1571,15 @@ class ImprovedCodeGenerator:
         if initial_size and table_type == 'ITABLE' and values:
             # ITABLE with size and values: repeat pattern 'size' times
             # <ITABLE 2 1 2 3> = [1, 2, 3, 1, 2, 3] (pattern repeated 2x)
+            self._encode_vocab_marker_offsets = []
             pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                       is_string=is_string, pattern=element_pattern)
+            _voc_pat = list(self._encode_vocab_marker_offsets)
+            _pending_voc_offs = []
             for _ in range(initial_size):
+                _rep_base = len(table_data)
                 table_data.extend(pattern_data)
+                _pending_voc_offs.extend((_rep_base + o, fi) for o, fi in _voc_pat)
         elif initial_size and table_type == 'ITABLE':
             # ITABLE with just size: create zero-filled table
             entry_size = 1 if is_byte else 2
@@ -1495,6 +1593,7 @@ class ImprovedCodeGenerator:
             self._encode_string_marker_offsets = []
             self._encode_routine_marker_offsets = []
             self._encode_nested_table_ptr_offsets = []
+            self._encode_vocab_marker_offsets = []
             self._emitted_nested_table_ptr = False
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
@@ -1507,6 +1606,7 @@ class ImprovedCodeGenerator:
             # 0xFF00 rescan resolves pure children with the impure base
             # formula; the positional path is exact.
             _nst_marker_offs = list(self._encode_nested_table_ptr_offsets)
+            _voc_marker_offs = list(self._encode_vocab_marker_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1521,6 +1621,7 @@ class ImprovedCodeGenerator:
             _pending_marker_offs = [_prefix + o for o in _str_marker_offs]
             _pending_rtn_offs = [_prefix + o for o in _rtn_marker_offs]
             _pending_nst_offs = [(_prefix + o, c) for o, c in _nst_marker_offs]
+            _pending_voc_offs = [(_prefix + o, fi) for o, fi in _voc_marker_offs]
 
         # Store the table
         table_idx = len(self.tables)
@@ -1534,6 +1635,8 @@ class ImprovedCodeGenerator:
             self._table_routine_marker_offsets.append((table_idx, _o))
         for _o, _child in locals().get('_pending_nst_offs') or []:
             self.table_addr_fixups.append((table_idx, _o, _child, 0))
+        for _o, _fi in locals().get('_pending_voc_offs') or []:
+            self._table_vocab_fixups.append((table_idx, _o, _fi))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = self._table_marker(table_idx); self.__dict__.setdefault('_tbl_marker_globals', set()).add(global_name)
@@ -1705,10 +1808,15 @@ class ImprovedCodeGenerator:
         if initial_size and table_type == 'ITABLE' and values:
             # ITABLE with size and values: repeat pattern 'size' times
             # <ITABLE 2 1 2 3> = [1, 2, 3, 1, 2, 3] (pattern repeated 2x)
+            self._encode_vocab_marker_offsets = []
             pattern_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                       is_string=is_string, pattern=element_pattern)
+            _voc_pat = list(self._encode_vocab_marker_offsets)
+            _pending_voc_offs = []
             for _ in range(initial_size):
+                _rep_base = len(table_data)
                 table_data.extend(pattern_data)
+                _pending_voc_offs.extend((_rep_base + o, fi) for o, fi in _voc_pat)
         elif initial_size and table_type == 'ITABLE':
             # ITABLE with just size: create zero-filled table
             entry_size = 1 if is_byte else 2
@@ -1722,6 +1830,7 @@ class ImprovedCodeGenerator:
             self._encode_string_marker_offsets = []
             self._encode_routine_marker_offsets = []
             self._encode_nested_table_ptr_offsets = []
+            self._encode_vocab_marker_offsets = []
             self._emitted_nested_table_ptr = False
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
@@ -1734,6 +1843,7 @@ class ImprovedCodeGenerator:
             # 0xFF00 rescan resolves pure children with the impure base
             # formula; the positional path is exact.
             _nst_marker_offs = list(self._encode_nested_table_ptr_offsets)
+            _voc_marker_offs = list(self._encode_vocab_marker_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1748,6 +1858,7 @@ class ImprovedCodeGenerator:
             _pending_marker_offs = [_prefix + o for o in _str_marker_offs]
             _pending_rtn_offs = [_prefix + o for o in _rtn_marker_offs]
             _pending_nst_offs = [(_prefix + o, c) for o, c in _nst_marker_offs]
+            _pending_voc_offs = [(_prefix + o, fi) for o, fi in _voc_marker_offs]
 
         # Legacy padding for ITABLE - shouldn't be needed with new logic
         if False and initial_size and table_type == 'ITABLE':
@@ -1770,6 +1881,8 @@ class ImprovedCodeGenerator:
             self._table_routine_marker_offsets.append((table_idx, _o))
         for _o, _child in locals().get('_pending_nst_offs') or []:
             self.table_addr_fixups.append((table_idx, _o, _child, 0))
+        for _o, _fi in locals().get('_pending_voc_offs') or []:
+            self._table_vocab_fixups.append((table_idx, _o, _fi))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = self._table_marker(table_idx); self.__dict__.setdefault('_tbl_marker_globals', set()).add(global_name)
@@ -2378,10 +2491,12 @@ class ImprovedCodeGenerator:
 
             # Write word/prep pairs - sorted by prep number for consistency
             for word, prep_num in sorted(entries.items(), key=lambda x: x[1]):
-                # Word address placeholder (0xFB00 | index)
+                # Word address placeholder: canonical marker + POSITIONAL
+                # fixup carrying the full index (see _table_vocab_fixups).
                 placeholder_idx = self._intern_vocab_placeholder(word)
-                placeholder_val = 0xFB00 | placeholder_idx
-                self._table_vocab_indices.add(placeholder_idx & 0xFF)
+                placeholder_val = 0xFB00 | (placeholder_idx & 0xFF)
+                self._table_vocab_fixups.append(
+                    (len(self.tables), len(table_data), placeholder_idx))
 
                 table_data.append((placeholder_val >> 8) & 0xFF)
                 table_data.append(placeholder_val & 0xFF)
@@ -2745,10 +2860,12 @@ class ImprovedCodeGenerator:
 
         # For each long word: word_addr + string
         for word in sorted(long_words):
-            # Word address placeholder (0xFB00 | index)
+            # Word address placeholder: canonical marker + POSITIONAL fixup
+            # carrying the full index (see _table_vocab_fixups).
             placeholder_idx = self._intern_vocab_placeholder(word)
-            placeholder_val = 0xFB00 | placeholder_idx
-            self._table_vocab_indices.add(placeholder_idx & 0xFF)
+            placeholder_val = 0xFB00 | (placeholder_idx & 0xFF)
+            self._table_vocab_fixups.append(
+                (len(self.tables), len(table_data), placeholder_idx))
 
             table_data.append((placeholder_val >> 8) & 0xFF)
             table_data.append(placeholder_val & 0xFF)
@@ -2979,6 +3096,29 @@ class ImprovedCodeGenerator:
         The assembler should replace these with dictionary word addresses.
         """
         return self._vocab_placeholders.copy()
+
+    def get_vocab_positional_fixups(self) -> List[Tuple[int, int]]:
+        """(code_offset, full_vocab_idx) pairs recorded at emission.
+
+        Validated against the final code bytes (must hold the canonical
+        marker 0xFB / idx&0xFF); a stale position is dropped -- the
+        assembler's legacy structural scan still covers any dropped marker
+        with idx < 256, and a dropped idx >= 256 gets a loud warning since
+        the low-byte backup would resolve it to the WRONG word.
+        """
+        out = []
+        seen = set()
+        for off, idx in self._vocab_placeholder_positions:
+            if off + 1 >= len(self.code) or off in seen:
+                continue
+            if self.code[off] != 0xFB or self.code[off + 1] != (idx & 0xFF):
+                if idx > 0xFF:
+                    self._warn(f"stale vocab marker position {off} for "
+                               f"index {idx} ('{self._vocab_placeholders.get(idx)}')")
+                continue
+            seen.add(off)
+            out.append((off, idx))
+        return out
 
     def get_voc_words(self) -> Dict[str, Optional[str]]:
         """Get VOC words with their part-of-speech types.
@@ -3562,6 +3702,19 @@ class ImprovedCodeGenerator:
                     else:
                         rep = bytes([0x8B, (val >> 8) & 0xFF, val & 0xFF])
                     if len(rep) < n - prev:
+                        # A pushed large constant may be a recorded in-band
+                        # placeholder (routine/vocab marker): its operand
+                        # moves from prev+2 (push) to prev+1 (ret), so remap
+                        # the recorded position instead of letting it go
+                        # stale.
+                        if len(rep) == 3:
+                            _old_pos = prev + 2
+                            self._pending_placeholders = [
+                                (prev + 1 if r == _old_pos else r, x)
+                                for r, x in self._pending_placeholders]
+                            self._pending_vocab_positions = [
+                                (prev + 1 if r == _old_pos else r, x)
+                                for r, x in self._pending_vocab_positions]
                         del b[prev:]
                         b.extend(rep)
                         continue
@@ -4032,6 +4185,8 @@ class ImprovedCodeGenerator:
                     _ph.add(_rel)
                 for _rel, _idx in self._pending_tell_positions:
                     _ph.add(_rel)
+                for _rel, _idx in self._pending_vocab_positions:
+                    _ph.add(_rel)
                 for k, r in enumerate(instrs):
                     if drop[k] or k in repl or k in jz2:
                         continue
@@ -4116,14 +4271,19 @@ class ImprovedCodeGenerator:
                     if (drop[k] or k in repl or k in force_br or k in jz2
                             or k in long2):
                         continue
+                    # Branch bytes / small-jump operands in the 0xF0-0xFF band
+                    # are safe now: every placeholder scan over code is gated
+                    # STRUCTURALLY (instruction-walker large-constant operand
+                    # positions), so a branch byte or a 1OP small-constant
+                    # operand can never be matched as a marker.  The old
+                    # `bb < 0xF0` / `off <= 0xEF` guards protected the retired
+                    # byte-blind scans only.
                     if (r['branch_pos'] is not None and r['branch_len'] == 2
                             and 2 <= r['branch_off'] <= 63
                             and r['branch_pos'] + 2 == r['n']):
-                        bb = (0x80 if r['branch_on'] else 0) | 0x40 | r['branch_off']
-                        if bb < 0xF0:
-                            narrow_b.add(k)
+                        narrow_b.add(k)
                     elif (r['jump_pos'] is not None and r['jump_len'] == 2
-                          and 2 <= r['jump_off'] <= 0xEF
+                          and 2 <= r['jump_off'] <= 0xFF
                           and r['jump_pos'] + 2 == r['n']
                           and r['jump_pos'] == r['a'] + 1):
                         narrow_j.add(k)
@@ -4191,7 +4351,7 @@ class ImprovedCodeGenerator:
                     nlen = new_len[k]
                     off = t - (base + nlen) + 2
                     if nlen == 2:
-                        if not (2 <= off <= 0xEF):
+                        if not (2 <= off <= 0xFF):
                             ok = False
                             break
                         pieces.append(bytearray([0x9C, off]))
@@ -4220,9 +4380,6 @@ class ImprovedCodeGenerator:
                                 ok = False
                                 break
                             bb = (0x80 if r['branch_on'] else 0) | 0x40 | off
-                            if bb >= 0xF0:
-                                ok = False
-                                break
                             nb[bp] = bb
                         else:
                             if not (-8192 <= off <= 8191) or off in (0, 1):
@@ -4244,7 +4401,7 @@ class ImprovedCodeGenerator:
                 if k in narrow_j:
                     t = new_target(r['jump_pos'] + r['jump_len'] + r['jump_off'] - 2)
                     off = None if t is None else t - (base + 2) + 2
-                    if off is None or not (2 <= off <= 0xEF):
+                    if off is None or not (2 <= off <= 0xFF):
                         ok = False
                         break
                     pieces.append(bytearray([0x9C, off]))
@@ -4257,9 +4414,6 @@ class ImprovedCodeGenerator:
                         ok = False
                         break
                     bb = (0x80 if r['branch_on'] else 0) | 0x40 | off
-                    if bb >= 0xF0:
-                        ok = False
-                        break
                     del nb[bp:]
                     nb.append(bb)
                     pieces.append(nb)
@@ -4277,9 +4431,6 @@ class ImprovedCodeGenerator:
                             ok = False
                             break
                         bb = (0x80 if r['branch_on'] else 0) | 0x40 | off
-                        if bb >= 0xF0:
-                            ok = False
-                            break
                         nb[bp] = bb
                     else:
                         if not (-8192 <= off <= 8191) or off in (0, 1):
@@ -4299,7 +4450,7 @@ class ImprovedCodeGenerator:
                     off = t - after + 2
                     jp = r['jump_pos'] - r['a']
                     if r['jump_len'] == 1:
-                        if not (2 <= off <= 0xEF):
+                        if not (2 <= off <= 0xFF):
                             ok = False
                             break
                         nb[jp] = off
@@ -4339,6 +4490,7 @@ class ImprovedCodeGenerator:
 
             self._pending_placeholders = remap(self._pending_placeholders)
             self._pending_tell_positions = remap(self._pending_tell_positions)
+            self._pending_vocab_positions = remap(self._pending_vocab_positions)
             routine_code = newcode
         return routine_code
     def _inline_string_ok(self, text):
@@ -4480,6 +4632,35 @@ class ImprovedCodeGenerator:
         self._current_routine_code = routine_code
         self._pending_placeholders.clear()
         self._pending_tell_positions.clear()
+        self._pending_vocab_positions.clear()
+        self._current_stmt_vocab_emits = []
+
+        # Trim AUX locals that are provably never referenced: each local slot
+        # costs 2 header bytes in V1-4 (its initial-value word).  Conservative
+        # by construction: a local is only dropped when its name occurs
+        # NOWHERE in the routine's body / local-default ASTs (see
+        # _collect_ast_names; string literal text does not count), it is not
+        # a parameter / optional parameter / activation (those slots are
+        # positional in the call convention), and its default value has no
+        # side effects (a FormNode default runs code at entry and is kept).
+        # Dropping a middle AUX renumbers the later ones, which is safe here
+        # because every body reference resolves by NAME through self.locals
+        # built below -- before any code is generated.
+        aux_list = routine.aux_vars
+        _trimmed_locals = []
+        if self.version <= 4:
+            _pinned = set(routine.opt_params or [])
+            if routine.activation:
+                _pinned.add(routine.activation)
+            if any(a not in _pinned for a in aux_list):
+                _named = set()
+                _collect_ast_names(routine.body, _named)
+                _collect_ast_names(list(routine.local_defaults.values()), _named)
+                aux_list = [a for a in aux_list
+                            if a in _pinned or a in _named or a.upper() in _named
+                            or isinstance(routine.local_defaults.get(a), FormNode)]
+                _trimmed_locals = [a for a in routine.aux_vars
+                                   if a not in aux_list]
 
         # Build local variable table
         self.locals = {}
@@ -4489,12 +4670,12 @@ class ImprovedCodeGenerator:
             self.locals[param] = var_num
             local_names.append(param)
             var_num += 1
-        for aux_var in routine.aux_vars:
+        for aux_var in aux_list:
             self.locals[aux_var] = var_num
             local_names.append(aux_var)
             var_num += 1
 
-        num_locals = len(routine.params) + len(routine.aux_vars)
+        num_locals = len(routine.params) + len(aux_list)
 
         # Track local variable usage for ZIL0210 warnings
         self.used_locals = set()  # Locals that have been read
@@ -4574,6 +4755,7 @@ class ImprovedCodeGenerator:
                 elif isinstance(default_node, FormNode):
                     # Complex expression - generate code to evaluate and store
                     # Generate the expression code (result ends up on stack)
+                    self._current_stmt_vocab_emits = []
                     expr_code = self.generate_form(default_node)
                     # Track any routine placeholders from the expression
                     # (instruction-walk: only large-constant operands qualify)
@@ -4582,6 +4764,15 @@ class ImprovedCodeGenerator:
                         self._pending_placeholders.append(
                             (len(routine_code) + i, placeholder_val)
                         )
+                    # Vocab seq markers: record positions, canonicalize bytes.
+                    _voc_hits = self._scan_stmt_vocab_markers(expr_code)
+                    if _voc_hits:
+                        expr_code = bytearray(expr_code)
+                        for _vp, _vfi in _voc_hits:
+                            expr_code[_vp + 1] = _vfi & 0xFF
+                            self._pending_vocab_positions.append(
+                                (len(routine_code) + _vp, _vfi))
+                        expr_code = bytes(expr_code)
                     routine_code.extend(expr_code)
                     # Store stack to local variable: STORE local_num, stack
                     # 2OP long form: bit7=0, bit6=first_type, bit5=second_type, bits4-0=opcode
@@ -4609,6 +4800,7 @@ class ImprovedCodeGenerator:
         for _stmt_i, stmt in enumerate(routine.body):
             # Clear per-statement tracking before generating
             self._current_stmt_routine_offsets.clear()
+            self._current_stmt_vocab_emits = []
             # A COND as the routine's LAST statement IS the routine's return value
             # (an implicit RET_POPPED follows). Generate it in value context so a
             # clause ending in <SETG ...> returns the assigned value, not 0 --
@@ -4658,6 +4850,18 @@ class ImprovedCodeGenerator:
                         placeholder_idx = placeholder_val - 0xE000
                         if placeholder_idx in self._tell_string_placeholders:
                             self._pending_tell_positions.append((stmt_offset + i, placeholder_idx))
+
+            # Vocab seq markers (see _code_vocab_marker): record each marker's
+            # exact offset with its FULL index and rewrite the low byte to the
+            # canonical idx & 0xFF form (keeps the assembler's legacy scan a
+            # valid backup for indices < 256).
+            _voc_hits = self._scan_stmt_vocab_markers(stmt_code)
+            if _voc_hits:
+                stmt_code = bytearray(stmt_code)
+                for _vp, _vfi in _voc_hits:
+                    stmt_code[_vp + 1] = _vfi & 0xFF
+                    self._pending_vocab_positions.append(
+                        (stmt_offset + _vp, _vfi))
             routine_code.extend(stmt_code)
 
         # Add implicit return if the routine doesn't end with a terminating instruction
@@ -4722,7 +4926,17 @@ class ImprovedCodeGenerator:
                         # ,W?FOO as a routine tail returns the dictionary word
                         # address (vocab placeholder), not the parser_constants
                         # stub 0 (NUMBER? compiled to 'ret 0' otherwise).
+                        # This runs AFTER the statement loop, so record the
+                        # marker's position directly (no scan runs here) and
+                        # emit the canonical low-byte form.
                         _t, _v = self._get_operand_type_and_value(last_stmt)
+                        _emits = self._current_stmt_vocab_emits
+                        if (0xFB00 <= _v <= 0xFBFF
+                                and (_v & 0xFF) < len(_emits)):
+                            _vfi = _emits[_v & 0xFF]
+                            self._pending_vocab_positions.append(
+                                (len(routine_code) + 1, _vfi))
+                            _v = 0xFB00 | (_vfi & 0xFF)
                         routine_code.append(0x8B)  # RET large constant
                         routine_code.append((_v >> 8) & 0xFF)
                         routine_code.append(_v & 0xFF)
@@ -4919,6 +5133,15 @@ class ImprovedCodeGenerator:
                         adjusted_tell.append((rel_offset, placeholder_idx))
                 self._pending_tell_positions = adjusted_tell
 
+                # And pending vocab positions
+                adjusted_voc = []
+                for rel_offset, placeholder_idx in self._pending_vocab_positions:
+                    if rel_offset >= header_end:
+                        adjusted_voc.append((rel_offset + bytes_inserted, placeholder_idx))
+                    else:
+                        adjusted_voc.append((rel_offset, placeholder_idx))
+                self._pending_vocab_positions = adjusted_voc
+
         # Pop routine loop context and patch AGAIN placeholders
         if hasattr(self, 'loop_stack') and self.loop_stack:
             routine_loop_ctx = self.loop_stack.pop()
@@ -4965,12 +5188,21 @@ class ImprovedCodeGenerator:
             self._tell_placeholder_positions.append((base_offset + rel_offset, placeholder_idx))
         self._pending_tell_positions.clear()
 
-        # Check for unused routine-level locals (ZIL0210)
+        # Adjust pending vocab positions to absolute offsets
+        for rel_offset, placeholder_idx in self._pending_vocab_positions:
+            self._vocab_placeholder_positions.append((base_offset + rel_offset, placeholder_idx))
+        self._pending_vocab_positions.clear()
+
+        # Check for unused routine-level locals (ZIL0210).  Trimmed AUX
+        # locals were dropped from the header precisely because they are
+        # never referenced, so they still warrant the warning.
         if hasattr(self, 'routine_level_locals') and self.compiler is not None:
             for local_name in self.routine_level_locals:
                 if (local_name not in self.used_locals and
                         local_name not in self.locals_with_side_effect_init):
                     self.compiler.warn("ZIL0210", f"local variable '{local_name}' is never used")
+            for local_name in _trimmed_locals:
+                self.compiler.warn("ZIL0210", f"local variable '{local_name}' is never used")
 
         self.code.extend(routine_code)
         return bytes(routine_code)
@@ -5668,13 +5900,36 @@ class ImprovedCodeGenerator:
         # Parser predicates
         elif op_name == 'VERB?':
             return self.gen_verb_test(form.operands)
-        elif op_name in ('PRSO?', 'PRSI?', 'ROOM?'):
-            # Classic-game MULTIFROB macros: <PRSO? a b> == <EQUAL? ,PRSO a b>.
-            # The MDL DEFMAC/MULTIFROB machinery isn't expanded by the front end,
-            # so handle them as builtins (same shape as VERB?).
+        elif op_name in ('PRSO?', 'PRSI?', 'ROOM?', 'HERE?', 'WINNER?'):
+            # Classic-game MULTIFROB macros: <PRSO? a b> == <EQUAL? ,PRSO a b>,
+            # <HERE? a b> == <EQUAL? ,HERE a b>, <WINNER? a> == <EQUAL?
+            # ,WINNER a>.  The MDL DEFMAC/MULTIFROB machinery isn't expanded
+            # by the front end, so handle them as builtins (same shape as
+            # VERB?).  Expanding them through the macro path instead leaked
+            # MULTIFROB's compile-time REPEAT into the instruction stream
+            # (lurkinghorror's V-LISTEN <HERE? ,YUGGOTH ...> emitted garbage
+            # bytes that crashed the routine and desynced every placeholder
+            # scan behind it).
             return self.gen_parser_eq_test(
-                {'PRSO?': 'PRSO', 'PRSI?': 'PRSI', 'ROOM?': 'HERE'}[op_name],
+                {'PRSO?': 'PRSO', 'PRSI?': 'PRSI', 'ROOM?': 'HERE',
+                 'HERE?': 'HERE', 'WINNER?': 'WINNER'}[op_name],
                 form.operands)
+        elif op_name in ('RARG?', 'CONTEXT?'):
+            # Classic MULTIFROB macro over the room-function argument:
+            # <RARG? LOOK> == <EQUAL? .RARG ,M-LOOK> (atoms not already
+            # prefixed with M- get the prefix, per MULTIFROB's .RARG branch).
+            _ops = []
+            for _o in form.operands:
+                if isinstance(_o, AtomNode):
+                    _nm = _o.value
+                    if not (len(_nm) > 2 and _nm.upper().startswith('M-')):
+                        _nm = 'M-' + _nm
+                    _ops.append(GlobalVarNode(_nm))
+                else:
+                    _ops.append(_o)
+            return self.generate_form(
+                FormNode(AtomNode('EQUAL?'),
+                         [LocalVarNode('RARG')] + _ops))
         elif op_name == 'PERFORM':
             # If a PERFORM routine exists (the game's own, or our injected
             # standard-library fallback), dispatch to it so the full action chain
@@ -6020,6 +6275,7 @@ class ImprovedCodeGenerator:
                     continue
 
             # Regular value
+            self._last_voc_form_idx = None
             val_int = self._get_table_value_int(val)
             if use_byte:
                 table_data.append(val_int & 0xFF)
@@ -6032,12 +6288,16 @@ class ImprovedCodeGenerator:
                 elif (val_int & 0xFFFF) in self._routine_placeholders:
                     # routine placeholder: same point-wise treatment
                     self._encode_routine_marker_offsets.append(len(table_data))
-                elif 0xFB00 <= (val_int & 0xFFFF) <= 0xFBFF:
-                    # vocab placeholder emitted into TABLE data -- record its
-                    # INDEX so the assembler's table scan only matches
-                    # table-emitted indices (zork3 CPEXITS: code-emitted idx 0
-                    # matched the 'fb 00' spanning -5 and P?NW).
-                    self._table_vocab_indices.add(val_int & 0xFF)
+                elif (self._last_voc_form_idx is not None
+                      and (val_int & 0xFFFF)
+                      == (0xFB00 | (self._last_voc_form_idx & 0xFF))):
+                    # vocab placeholder emitted into TABLE data: record its
+                    # exact offset AND full index for point-wise resolution
+                    # (the marker low byte cannot carry indices >= 256, and a
+                    # scan may match legal data -- zork3 CPEXITS: code-emitted
+                    # idx 0 matched the 'fb 00' spanning -5 and P?NW).
+                    self._encode_vocab_marker_offsets.append(
+                        (len(table_data), self._last_voc_form_idx))
                 table_data.extend(struct.pack('>H', val_int & 0xFFFF))
             i += 1
             pattern_idx += 1
@@ -6144,6 +6404,48 @@ class ImprovedCodeGenerator:
             self._vocab_word_to_index[word] = idx
         return idx
 
+    def _code_vocab_marker(self, idx: int) -> int:
+        """In-code marker word for vocab placeholder `idx`.
+
+        The low byte is a PER-STATEMENT emission sequence number (deduped by
+        idx), not the placeholder index -- the post-statement scan maps it
+        back through _current_stmt_vocab_emits so the FULL index is known at
+        the exact recorded position (indices >= 256 would not fit the byte).
+        """
+        emits = self._current_stmt_vocab_emits
+        try:
+            seq = emits.index(idx)
+        except ValueError:
+            if len(emits) > 0xFF:
+                self._error("more than 256 distinct vocab references in one "
+                            "statement (vocab marker sequence overflow)")
+                return 0xFB00
+            seq = len(emits)
+            emits.append(idx)
+        return 0xFB00 | seq
+
+    def _scan_stmt_vocab_markers(self, blob):
+        """(offset, full_idx) for every vocab seq marker in statement code.
+
+        Structural walk: only 2-byte large-constant operand positions can
+        hold a marker. Falls back to a byte-blind scan (with the assembler's
+        JUMP-offset guards) if the stream cannot be decoded.
+        """
+        emits = self._current_stmt_vocab_emits
+        if not emits:
+            return []
+        try:
+            positions = _walk_large_const_positions(bytes(blob), self.version)
+        except _PlaceholderScanDesync:
+            positions = [i for i in range(len(blob) - 1)
+                         if not (i >= 1 and blob[i - 1] == 0x8C)
+                         and not (i >= 2 and blob[i - 2] == 0x8C)]
+        res = []
+        for p in positions:
+            if p + 1 < len(blob) and blob[p] == 0xFB and blob[p + 1] < len(emits):
+                res.append((p, emits[blob[p + 1]]))
+        return res
+
     def _extract_voc_word(self, form: FormNode) -> Optional[str]:
         """Extract the word string from a VOC form.
 
@@ -6238,8 +6540,12 @@ class ImprovedCodeGenerator:
         # Create vocabulary placeholder (deduped by word)
         placeholder_idx = self._intern_vocab_placeholder(word)
 
-        # Return placeholder value (0xFB00 | idx)
-        return 0xFB00 | placeholder_idx
+        # Return the CANONICAL marker value (low byte = idx & 0xFF) and pass
+        # the full index through a side channel so data-emission sites
+        # (tables/globals) can record an exact positional fixup -- the full
+        # index does not fit the marker's low byte once >256 words exist.
+        self._last_voc_form_idx = placeholder_idx
+        return 0xFB00 | (placeholder_idx & 0xFF)
 
     def _add_table(self, node: TableNode) -> int:
         """Add a table from a TableNode and return its index.
@@ -6263,9 +6569,11 @@ class ImprovedCodeGenerator:
         sav_s = self._encode_string_marker_offsets
         sav_r = self._encode_routine_marker_offsets
         sav_n = self._encode_nested_table_ptr_offsets
+        sav_v = self._encode_vocab_marker_offsets
         self._encode_string_marker_offsets = []
         self._encode_routine_marker_offsets = []
         self._encode_nested_table_ptr_offsets = []
+        self._encode_vocab_marker_offsets = []
 
         table_data = bytearray()
         table_type = node.table_type
@@ -6286,14 +6594,18 @@ class ImprovedCodeGenerator:
             else:
                 table_data.extend(struct.pack('>H', len(node.values)))
 
-        my_s = my_r = my_n = ()
+        my_s = my_r = my_n = my_v = ()
         # Handle ITABLE with repeat count
         if node.size and table_type == 'ITABLE' and node.values:
             # ITABLE with size and values: repeat pattern 'size' times
             pattern_data = self._encode_table_values(node.values, default_is_byte=is_byte,
                                                       is_string=is_string)
+            _voc_pat = list(self._encode_vocab_marker_offsets)
+            my_v = []
             for _ in range(node.size):
+                _rep_base = len(table_data)
                 table_data.extend(pattern_data)
+                my_v.extend((_rep_base + o, fi) for o, fi in _voc_pat)
         elif node.size and table_type == 'ITABLE':
             # ITABLE with just size: create zero-filled table
             entry_size = 1 if is_byte else 2
@@ -6310,11 +6622,13 @@ class ImprovedCodeGenerator:
             my_s = [_prefix + o for o in self._encode_string_marker_offsets]
             my_r = [_prefix + o for o in self._encode_routine_marker_offsets]
             my_n = [(_prefix + o, c) for o, c in self._encode_nested_table_ptr_offsets]
+            my_v = [(_prefix + o, fi) for o, fi in self._encode_vocab_marker_offsets]
 
         # Restore the enclosing encode's collectors.
         self._encode_string_marker_offsets = sav_s
         self._encode_routine_marker_offsets = sav_r
         self._encode_nested_table_ptr_offsets = sav_n
+        self._encode_vocab_marker_offsets = sav_v
 
         # Store table and track offset
         table_id = f"_TABLE_{self.table_counter}"
@@ -6331,6 +6645,8 @@ class ImprovedCodeGenerator:
             self._table_routine_marker_offsets.append((table_index, _o))
         for _o, _child in my_n:
             self.table_addr_fixups.append((table_index, _o, _child, 0))
+        for _o, _fi in my_v:
+            self._table_vocab_fixups.append((table_index, _o, _fi))
 
         return table_index
 
@@ -8334,7 +8650,38 @@ class ImprovedCodeGenerator:
             Bytecode for the instruction
         """
         code = bytearray()
-        op2_type, op2_val = self._get_operand_type_and_value_ext(op2_node)
+
+        # An EXPRESSION operand (form/COND/REPEAT) or a funny-global read must
+        # be EVALUATED -- _get_operand_type_and_value_ext silently treats such
+        # nodes as the constant 0, so every 3rd+ operand of a variadic
+        # arithmetic chain that was itself an expression vanished:
+        # lurkinghorror's microwave timer <+ <GET ,TBL 0> <* <GET ,TBL 1> 10>
+        # <* <GET ,TBL 2> 60> <* <GET ,TBL 3> 600>> compiled its minute terms
+        # as literal +0, so the timer never reached 5:00 and the chinese food
+        # stayed cold.  The expression's value lands ON TOP of the running
+        # accumulator, so spill it to the dedicated scratch global and let the
+        # accumulator pop first (correct operand order for SUB/DIV/MOD too).
+        _needs_eval = isinstance(op2_node, (FormNode, CondNode, RepeatNode))
+        if not _needs_eval and isinstance(op2_node, GlobalVarNode) \
+                and hasattr(self, 'funny_globals_table') \
+                and op2_node.name in self.funny_globals_table:
+            _needs_eval = True
+        if _needs_eval:
+            if isinstance(op2_node, FormNode):
+                code.extend(self.generate_form(op2_node))
+            elif isinstance(op2_node, CondNode):
+                code.extend(self.generate_cond(op2_node, value_context=True))
+            elif isinstance(op2_node, RepeatNode):
+                code.extend(self.generate_repeat(op2_node))
+            else:
+                code.extend(self.gen_read_funny_global(op2_node.name))
+            _scr = self._alloc_top_global('_2OPS_SCRATCH_', initial=0)
+            code.append(0xE9)  # PULL (VAR:0x09)
+            code.append(0x7F)  # small-const operand = variable number
+            code.append(_scr & 0xFF)
+            op2_type, op2_val = 2, _scr
+        else:
+            op2_type, op2_val = self._get_operand_type_and_value_ext(op2_node)
 
         # First operand is always variable 0 (stack)
         # Long form: bit 6 = 1 (var), bit 5 = op2 type
@@ -8498,9 +8845,10 @@ class ImprovedCodeGenerator:
                 if self.compiler and hasattr(self.compiler, '_unescape_vocab_word'):
                     word = self.compiler._unescape_vocab_word(word)
                 placeholder_idx = self._intern_vocab_placeholder(word)
-                # Track position for resolution (will be filled in during code generation)
-                # Return large constant placeholder (0xFB00 | index)
-                return (0, 0xFB00 | placeholder_idx)
+                # Large-constant marker; low byte is a per-statement sequence
+                # number mapped back to the FULL index by the post-statement
+                # scan (see _code_vocab_marker).
+                return (0, self._code_vocab_marker(placeholder_idx))
             elif node.name in self.globals:
                 return (2, self.globals[node.name])  # Variable
             elif node.name in self.objects:
@@ -8668,8 +9016,9 @@ class ImprovedCodeGenerator:
                 if self.compiler and hasattr(self.compiler, '_unescape_vocab_word'):
                     word = self.compiler._unescape_vocab_word(word)
                 placeholder_idx = self._intern_vocab_placeholder(word)
-                # Return large constant placeholder (0xFB00 | index)
-                return (0, 0xFB00 | placeholder_idx)
+                # Large-constant marker; low byte is a per-statement sequence
+                # number (see _code_vocab_marker).
+                return (0, self._code_vocab_marker(placeholder_idx))
             elif node.name in self.globals:
                 return (1, self.globals[node.name])  # Global variable
             elif node.name in self.objects:
@@ -8784,8 +9133,9 @@ class ImprovedCodeGenerator:
                     # Word names like COMMA -> "comma"
                     word = name_part.lower()
                 placeholder_idx = self._intern_vocab_placeholder(word)
-                # Return large constant placeholder (0xFB00 | index)
-                return (0, 0xFB00 | placeholder_idx)
+                # Large-constant marker; low byte is a per-statement sequence
+                # number (see _code_vocab_marker).
+                return (0, self._code_vocab_marker(placeholder_idx))
             # Unknown atom - warn and default to 0
             self._warn(f"Unknown identifier '{node.value}' - using 0")
             return (0, 0)
@@ -16219,10 +16569,15 @@ class ImprovedCodeGenerator:
             code.append((low_direction >> 8) & 0xFF)
             code.append(low_direction & 0xFF)
 
-        # Branch on true (counter < LOW-DIRECTION) to exit
-        # Branch encoding: bit 7=polarity, bit 6=form (1=short, 0=long), bits 5-0=offset/high bits
+        # Branch on true (counter < LOW-DIRECTION) to exit.  Reserve the
+        # 2-byte long form: the loop body is arbitrary game code and easily
+        # exceeds the 1-byte form's 63-byte reach (lurkinghorror's I-URCHIN
+        # body is ~160 bytes; the old 1-byte placeholder truncated the offset
+        # so the "exit" landed back inside the body and the interrupt spun
+        # forever).  The size peephole re-narrows short ones afterwards.
         exit_branch_pos = len(code)
-        code.append(0xC0)  # Placeholder: branch on true, short form (will be patched)
+        code.append(0x80)  # Placeholder: branch on true, long form (patched)
+        code.append(0x00)  # Placeholder low byte
 
         # GETPT room, dir_var -> pt_var
         # GET_PROP_ADDR is 2OP opcode 0x12 (but actually it might be different)
@@ -16322,18 +16677,13 @@ class ImprovedCodeGenerator:
         # Exit point (where DEC_CHK branch goes)
         exit_point = len(code)
 
-        # Patch exit branch (DEC_CHK) - short form (1 byte)
+        # Patch exit branch (DEC_CHK) - long form (2 bytes)
         # Branch formula: Target = Address_after_branch + Offset - 2
-        # For 1-byte branch: Target = (exit_branch_pos + 1) + Offset - 2
-        # So: Offset = Target - exit_branch_pos + 1
-        exit_offset = exit_point - exit_branch_pos + 1
-        if exit_offset >= 2 and exit_offset <= 63:
-            # Short branch with offset (offset 0-1 are special: RFALSE/RTRUE)
-            code[exit_branch_pos] = 0xC0 | (exit_offset & 0x3F)
-        else:
-            # Need long branch - would require restructuring code
-            # For now, just use truncated offset (this is a bug if offset > 63)
-            code[exit_branch_pos] = 0xC0 | (exit_offset & 0x3F)
+        # For 2-byte branch: Target = (exit_branch_pos + 2) + Offset - 2
+        # So: Offset = Target - exit_branch_pos
+        exit_offset = exit_point - exit_branch_pos
+        code[exit_branch_pos] = 0x80 | ((exit_offset >> 8) & 0x3F)
+        code[exit_branch_pos + 1] = exit_offset & 0xFF
 
         # Patch again branch (JZ pt_var) - long form (2 bytes total)
         # Branch formula: Target = Address_after_branch + Offset - 2
@@ -17728,19 +18078,11 @@ class ImprovedCodeGenerator:
         # End of AND - success jumps here
         end_pos = len(code)
 
-        # NOP-pad: keep 2-byte branch low bytes and the jump low byte out of
-        # the placeholder-scanner bands (0xF0-0xF2 routine, 0xFA-0xFC
-        # vocab/string) -- starcross ADVENTURER-FCN's `80 f0` branch pair
-        # matched routine placeholder 0xF041 and got stamped with an address.
-        _danger = (0xF0, 0xF1, 0xF2, 0xFA, 0xFB, 0xFC)
-        while True:
-            _bad = any(((fail_target - (p + 2) + 2) & 0xFF) in _danger for p in fail_patches)
-            _joff = end_pos - success_jump_pos - 1
-            if not _bad and (_joff & 0xFF) not in _danger:
-                break
-            code.insert(fail_target, 0xB4)  # NOP (never executed)
-            fail_target += 1
-            end_pos += 1
+        # (No NOP padding needed any more: placeholder scans over code are
+        # structurally gated to large-constant operand positions, so branch /
+        # jump offset bytes in the old danger bands -- e.g. starcross
+        # ADVENTURER-FCN's `80 f0` branch pair that the retired byte-blind
+        # scan misread as routine placeholder 0xF041 -- can never match.)
 
         # Patch the failure jumps
         for patch_pos in fail_patches:
@@ -17906,13 +18248,10 @@ class ImprovedCodeGenerator:
                 code.append(op_val & 0xFF)
 
         # End of OR - success jumps here (with their truthy value on stack)
+        # (No NOP padding needed any more: placeholder scans over code are
+        # structurally gated, so a jump-offset byte in the old danger bands
+        # can never be matched as a marker.)
         end_pos = len(code)
-
-        # NOP-pad success-jump low bytes away from the placeholder-scanner bands.
-        _danger = (0xF0, 0xF1, 0xF2, 0xFA, 0xFB, 0xFC)
-        while any(((end_pos - p - 1) & 0xFF) in _danger for p in success_patches):
-            code.append(0xB4)  # NOP: executed after the last operand's value push -- harmless
-            end_pos = len(code)
 
         # Patch success jumps
         for patch_pos in success_patches:
@@ -18978,10 +19317,12 @@ class ImprovedCodeGenerator:
                 _rem = sum(clause_data[_j]['total_size'] for _j in range(_ci + 1, len(clause_data)))
                 _rem += default_false_size
                 _joff = _rem + 2
-                # Small-constant operand: positive offsets only, and stay
-                # below 0xF0 so the operand byte can never look like a
-                # placeholder-scanner band byte.
-                if 2 <= _joff <= 0xEF:
+                # Small-constant operand: positive offsets only.  (The operand
+                # byte may land in the 0xF0-0xFF band now: every placeholder
+                # scan over code is structurally gated to large-constant
+                # operand positions, so a 1OP small-constant operand can never
+                # be matched as a marker.)
+                if 2 <= _joff <= 0xFF:
                     clause['jump_size'] = 2
                     clause['total_size'] = (clause['test_size']
                                             + clause['actions_size']
@@ -18989,36 +19330,19 @@ class ImprovedCodeGenerator:
             if not clause['is_t_clause'] and clause['test_size'] > 0:
                 bytes_to_skip = clause['actions_size'] + clause['jump_size']
                 next_clause_offset = bytes_to_skip + 2
+                # Branch bytes (and 2-byte branch low bytes) in the 0xF0-0xFF
+                # band are safe now: every placeholder scan over code is gated
+                # STRUCTURALLY (instruction-walker large-constant operand
+                # positions), so branch bytes can never be matched as markers.
+                # The historical clobbers this path used to defend against
+                # (minizork GET-OBJECT's 0xFB branch byte, V-OPEN's 0xFB
+                # 2-byte-branch offset byte) predate that gating; only the
+                # 6-bit encoding limit forces the 2-byte form today.
                 needs_2byte = next_clause_offset >= 64
-                if not needs_2byte:
-                    # A 1-byte branch byte that lands in the placeholder high-byte
-                    # range (>= 0xFA) would be misread by the vocab/routine placeholder
-                    # scanners as a placeholder and silently rewritten -- e.g. a 0xFB
-                    # branch-on-true/offset-59 byte in minizork's GET-OBJECT got clobbered
-                    # to a dictionary word address, derailing the parser. A 2-byte branch's
-                    # first byte is always <= 0xBF, so force it in that case.
-                    branch_sense = clause['test_code'][-1] & 0x80
-                    one_byte = branch_sense | 0x40 | (next_clause_offset & 0x3F)
-                    if one_byte >= 0xF0:  # 0xF0-0xF3 = routine-placeholder band, 0xF4-0xF7 = data-string band
-                        needs_2byte = True
+                clause['needs_2byte_branch'] = needs_2byte
                 if needs_2byte:
-                    clause['needs_2byte_branch'] = True
                     clause['test_size'] += 1
                     clause['total_size'] += 1
-                    # A 2-byte branch's first byte is safe (<= 0xBF), but its LOW byte
-                    # is the raw offset and can land on a placeholder scanner high byte
-                    # (0xFA vocab-table / 0xFB vocab / 0xFC string-operand). Those
-                    # scanners are position-blind and would rewrite the branch (a 0xFB
-                    # offset byte in V-OPEN got read as vocab placeholder 0xFB4A and
-                    # overwrote the branch + the following test_attr, so "It is already
-                    # open" printed unconditionally). Pad the clause body with NOPs
-                    # until the offset's low byte is out of that range.
-                    while ((clause['actions_size'] + clause['jump_size'] + 2) & 0xFF) in (0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xF6, 0xF7, 0xFA, 0xFB, 0xFC):
-                        clause['actions_code'].extend([0xB4])  # NOP (0OP:0x04)
-                        clause['actions_size'] += 1
-                        clause['total_size'] += 1
-                else:
-                    clause['needs_2byte_branch'] = False
 
         # Fourth pass: generate with proper offsets (all sizes are now stable)
         for i, clause in enumerate(clause_data):
@@ -19449,7 +19773,10 @@ class ImprovedCodeGenerator:
                 dist = (tail - tramp_size) if (tramp and not s['last']) else tail
                 off = dist + 2
                 s['off'] = off
-                if off <= 62 and (sense | 0x40 | (off + 1)) < 0xF0:
+                # (0xF0-band branch bytes are safe now that placeholder scans
+                # are structurally gated -- only the off+1 growth headroom and
+                # the 6-bit encoding limit still constrain the 1-byte form.)
+                if off <= 62:
                     s['bsize'] = 1
                 else:
                     s['bsize'] = 2
@@ -20105,8 +20432,9 @@ class ImprovedCodeGenerator:
                     return bytes(code)
                 # Branch byte added by the shared fallthrough below
 
-            elif op_name in ('VERB?', 'PRSO?', 'PRSI?', 'ROOM?') and condition.operands and len(condition.operands) <= 3:
-                _gvar = self.globals.get({'VERB?': 'PRSA', 'PRSO?': 'PRSO', 'PRSI?': 'PRSI', 'ROOM?': 'HERE'}[op_name])
+            elif op_name in ('VERB?', 'PRSO?', 'PRSI?', 'ROOM?', 'HERE?', 'WINNER?') and condition.operands and len(condition.operands) <= 3:
+                _gvar = self.globals.get({'VERB?': 'PRSA', 'PRSO?': 'PRSO', 'PRSI?': 'PRSI', 'ROOM?': 'HERE',
+                                          'HERE?': 'HERE', 'WINNER?': 'WINNER'}[op_name])
                 _vals = []
                 _ok = _gvar is not None and 0 <= _gvar <= 255
                 if _ok:
@@ -20651,7 +20979,7 @@ class ImprovedCodeGenerator:
             for sz in sizes:
                 after = pos + sz
                 off = true_start - after + 2
-                if off < 0 or off > 63 or (0xC0 | (off & 0x3F)) >= 0xF0:
+                if off < 0 or off > 63:
                     ok = False
                     break
                 pos = after
@@ -20682,8 +21010,7 @@ class ImprovedCodeGenerator:
                     after = pos + sz
                     off = true_start - after + 2
                     offs.append(off)
-                    if bs[i] == 1 and (off < 0 or off > 63
-                                       or (0xC0 | (off & 0x3F)) >= 0xF0):
+                    if bs[i] == 1 and (off < 0 or off > 63):
                         bs[i] = 2
                         changed = True
                     pos = after
@@ -20692,13 +21019,6 @@ class ImprovedCodeGenerator:
                 for i, off in enumerate(offs):
                     if bs[i] == 2 and (off < 0 or off > 0x1FFF):
                         raise ValueError("JE chunk branch offset out of range")
-                # keep every emitted branch byte out of the placeholder band
-                if any(bs[i] == 2 and (off & 0xFF) >= 0xF0
-                       for i, off in enumerate(offs)):
-                    pad += 1
-                    if pad > 64:
-                        raise ValueError("JE chunk padding failed")
-                    continue
                 break
             pos = base
             for i, (ch, b) in enumerate(zip(chunks, bs)):

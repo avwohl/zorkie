@@ -571,7 +571,8 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return node
 
-            elif op_name in ("SYNONYM", "VERB-SYNONYM"):
+            elif op_name in ("SYNONYM", "VERB-SYNONYM", "ADJ-SYNONYM",
+                             "DIR-SYNONYM"):
                 # Standalone SYNONYM declaration (not in an object).
                 # VERB-SYNONYM is the ZILCH spelling used by the
                 # hollywood-hijinx-era syntax files (<VERB-SYNONYM PUSH PRESS
@@ -580,6 +581,9 @@ class Parser:
                 # dispatched at all, so it fell through to a generic FormNode
                 # and every alias was simply missing from the vocabulary
                 # ("press" -> "this story doesn't recognize the word").
+                # ADJ-SYNONYM / DIR-SYNONYM are the same family (lurkinghorror
+                # declares <ADJ-SYNONYM HIGH HI>; without it "press hi" parsed
+                # as an unknown usage and the microwave could not be set).
                 node = self.parse_synonym_declaration(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
@@ -1581,6 +1585,7 @@ class Parser:
 
         # Parse parameter list
         params = []
+        param_defaults = {}  # name -> default value AST (OPT/AUX bindings)
         if self.current_token.type == TokenType.LPAREN:
             self.advance()  # (
 
@@ -1647,12 +1652,22 @@ class Parser:
                     param_name = self.current_token.value
                     self.advance()
 
-                    # Parse default value (we'll store it but won't use it yet)
+                    # Parse default value
                     default_val = self.parse_expression()
+                    param_defaults[param_name] = default_val
 
-                    # Params with defaults are treated as AUX-like (optional)
                     # (name, is_quoted, is_tuple, is_aux, is_optional)
-                    params.append((param_name, param_is_quoted, False, True, True))
+                    if optional_mode:
+                        # A parenthesized "OPT" binding like ('O '*) is a real
+                        # OPTIONAL: it consumes a caller argument when one is
+                        # present and falls back to the default otherwise.
+                        # It was previously marked AUX, so the caller's
+                        # argument was never bound (lurkinghorror's
+                        # <P? DIG GLOBAL-HOLE *> lost GLOBAL-HOLE entirely and
+                        # the macro expanded to garbage).
+                        params.append((param_name, param_is_quoted, False, False, True))
+                    else:
+                        params.append((param_name, param_is_quoted, False, True, True))
                     self.expect(TokenType.RPAREN)
                 else:
                     self.error(f"Unexpected token in parameter list: {self.current_token.type}")
@@ -1668,7 +1683,9 @@ class Parser:
         if len(body) == 1:
             body = body[0]
 
-        return MacroNode(name, params, body, line, col)
+        node = MacroNode(name, params, body, line, col)
+        node.param_defaults = param_defaults
+        return node
 
     def parse_buzz(self, line: int, col: int):
         """Parse BUZZ noise word declaration.

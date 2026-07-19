@@ -90,6 +90,19 @@ class ZAssembler:
             return pure_base + (offset - impure)
         return table_base_addr + offset
 
+    def _vocab_idx_addr(self, idx, vocab_map, vword_map, dict_addr,
+                        table_base_addr, table_offsets):
+        """Resolved address for vocab placeholder `idx`: the dictionary word
+        address, or (NEW-PARSER? mode) the word's VWORD table address.
+        The compiler builds vocab_map/vword_map with disjoint index sets."""
+        if vocab_map and idx in vocab_map:
+            return dict_addr + vocab_map[idx]
+        if (vword_map and table_offsets and idx in vword_map
+                and vword_map[idx] in table_offsets):
+            return self._table_data_addr(table_base_addr,
+                                         table_offsets[vword_map[idx]])
+        return None
+
     def _resolve_table_placeholders(self, data: bytes, table_base_addr: int,
                                        table_offsets: dict,
                                        dict_addr: int = None) -> bytes:
@@ -832,7 +845,8 @@ class ZAssembler:
                                               vocab_fixups: list,
                                               dict_addr: int,
                                               start_offset: int,
-                                              length: int) -> None:
+                                              length: int,
+                                              skip_positions: set = None) -> None:
         """
         Resolve vocabulary word placeholders in a section of the story file.
 
@@ -860,15 +874,20 @@ class ZAssembler:
         # already-resolved table address (OOPS-INBUF's 0x1FFB) and rewrote it to
         # a dictionary address, shrinking the OOPS buffer pointer so the input
         # buffer copy overran into P-INBUF and every 2nd command read empty.
+        _skip = skip_positions if skip_positions is not None else set()
         end_offset = min(start_offset + length, len(story) - 1)
         i = start_offset
         while i < end_offset:
-            if story[i] == 0xFB:
+            if story[i] == 0xFB and i not in _skip:
                 placeholder_idx = story[i + 1]
                 if placeholder_idx in fixup_map:
                     word_addr = fixup_map[placeholder_idx]
                     story[i] = (word_addr >> 8) & 0xFF
                     story[i + 1] = word_addr & 0xFF
+                    # Record the write: a resolved dictionary address is
+                    # legal data that can alias later scans' marker bands
+                    # (0xF4-0xF7 string band etc.).
+                    _skip.add(i)
             i += 2
 
     def _resolve_vword_placeholders_in_story(self, story: bytearray,
@@ -876,7 +895,8 @@ class ZAssembler:
                                               table_base_addr: int,
                                               table_offsets: dict,
                                               start_offset: int,
-                                              length: int) -> None:
+                                              length: int,
+                                              skip_positions: set = None) -> None:
         """
         Resolve VWORD table placeholders in a section of the story file.
 
@@ -903,15 +923,17 @@ class ZAssembler:
                 fixup_map[placeholder_idx] = table_addr
 
         # Scan for 0xFB00 | index patterns (16-bit values)
+        _skip = skip_positions if skip_positions is not None else set()
         end_offset = min(start_offset + length, len(story) - 1)
         i = start_offset
         while i < end_offset:
-            if story[i] == 0xFB:
+            if story[i] == 0xFB and i not in _skip:
                 placeholder_idx = story[i + 1]
                 if placeholder_idx in fixup_map:
                     table_addr = fixup_map[placeholder_idx]
                     story[i] = (table_addr >> 8) & 0xFF
                     story[i + 1] = table_addr & 0xFF
+                    _skip.add(i)
             i += 1
 
     def _resolve_dict_placeholders(self, objects_data: bytes, dict_addr: int,
@@ -936,6 +958,15 @@ class ZAssembler:
             Modified object data with dictionary addresses resolved
         """
         result = bytearray(objects_data)
+
+        # Byte offsets (within the objects blob) that THIS pass resolves to
+        # real dictionary addresses. A resolved address is legal data that can
+        # land in ANY in-band marker range -- trinity's 'walkie' entry at
+        # 0xF5AE matched the 0xF4-0xF7 data-string band and the property
+        # string scan rewrote it to a packed string address, so 'drop walkie'
+        # resolved to garbage. Every later property scan must skip these.
+        patched = set()
+        self._prop_dict_patched = patched
 
         # POSITIONAL dict-word patches (obj_num, prop_num, byte_off,
         # word_offset), recorded at emission. These replace the SYNONYM marker
@@ -976,6 +1007,8 @@ class ZAssembler:
                             addr = dict_addr + word_offset
                             result[j] = (addr >> 8) & 0xFF
                             result[j + 1] = addr & 0xFF
+                            patched.add(j)
+                            patched.add(j + 1)
                         break
                     p += dlen
 
@@ -1046,6 +1079,11 @@ class ZAssembler:
                     continue
                 j = i
                 while j + 1 < prop_end and j + 1 < len(result):
+                    # Never rescan a position this pass already resolved --
+                    # a patched dictionary address can alias any marker band.
+                    if j in patched:
+                        j += 2
+                        continue
                     word = (result[j] << 8) | result[j + 1]
 
                     # Check for SYNONYM placeholder: 0x8000 | word_offset.
@@ -1057,6 +1095,8 @@ class ZAssembler:
                         actual_addr = dict_addr + word_offset
                         result[j] = (actual_addr >> 8) & 0xFF
                         result[j + 1] = actual_addr & 0xFF
+                        patched.add(j)
+                        patched.add(j + 1)
                         j += 2
                     # Check for ADJECTIVE placeholder: 0xFE00 | word_offset
                     elif (word & 0xFF00) == 0xFE00:
@@ -1064,6 +1104,8 @@ class ZAssembler:
                         actual_addr = dict_addr + word_offset
                         result[j] = (actual_addr >> 8) & 0xFF
                         result[j + 1] = actual_addr & 0xFF
+                        patched.add(j)
+                        patched.add(j + 1)
                         j += 2
                     # Check for VOC placeholder from PROPDEF: 0xFB00 | placeholder_idx
                     elif (word & 0xFF00) == 0xFB00:
@@ -1073,6 +1115,8 @@ class ZAssembler:
                             actual_addr = dict_addr + word_offset
                             result[j] = (actual_addr >> 8) & 0xFF
                             result[j + 1] = actual_addr & 0xFF
+                            patched.add(j)
+                            patched.add(j + 1)
                         j += 2
                     else:
                         j += 2  # Move by words in property data
@@ -1091,7 +1135,8 @@ class ZAssembler:
                                                     prop_defaults_size: int,
                                                     string_placeholders: dict,
                                                     string_table,
-                                                    data_placeholders: dict = None) -> None:
+                                                    data_placeholders: dict = None,
+                                                    skip_positions: set = None) -> None:
         """Resolve 0xFC00|idx string markers inside object PROPERTY data.
 
         Classic direction exits (NEXIT/CEXIT/DEXIT) embed the packed address of
@@ -1103,8 +1148,13 @@ class ZAssembler:
             return
 
         data_ph = data_placeholders or {}
+        _skip = skip_positions or ()
 
         def patch(j):
+            # Positions already resolved to real addresses (dict words,
+            # routine addresses) are legal data, not markers.
+            if j in _skip:
+                return None
             hi = story[j]
             if hi == 0xFC:
                 text = string_placeholders.get(story[j + 1])
@@ -1356,7 +1406,13 @@ class ZAssembler:
                 # Scan property DATA for 0xFD00 table address placeholders
                 prop_end = i + data_len
                 j = i
+                _dict_patched = getattr(self, '_prop_dict_patched', None) or ()
                 while j + 1 < prop_end and j + 1 < len(result):
+                    # Skip positions the dict-word pass resolved -- a real
+                    # dictionary address can alias the 0xFD/0xF9 bands.
+                    if j in _dict_patched:
+                        j += 2
+                        continue
                     word = (result[j] << 8) | result[j + 1]
 
                     # Check for table address placeholder: 0xFD00 | table_idx
@@ -1405,7 +1461,10 @@ class ZAssembler:
                         table_string_fixups: list = None,
                         table_addr_fixups: list = None,
                         prop_dict_fixups: list = None,
-                        property_routine_positional_fixups: list = None) -> bytes:
+                        property_routine_positional_fixups: list = None,
+                        vocab_positional_fixups: list = None,
+                        table_vocab_fixups: list = None,
+                        global_vocab_fixups: list = None) -> bytes:
         """
         Build complete story file.
 
@@ -1431,6 +1490,12 @@ class ZAssembler:
             vocab_fixups: List of (placeholder_idx, word_offset) for W?* vocabulary word resolution
             vword_fixups: List of (placeholder_idx, table_index) for NEW-PARSER? VWORD table resolution
             tchars_table_idx: Table index for TCHARS constant (terminating characters, header 0x2E)
+            vocab_positional_fixups: (code_offset, full_idx) vocab markers in ROUTINE
+                code, recorded at emission -- resolved point-wise, no 8-bit limit
+            table_vocab_fixups: (table_idx, byte_offset, full_idx) vocab markers in
+                TABLE data, recorded at encode time
+            global_vocab_fixups: (globals_data_offset, full_idx) vocab markers in
+                the GLOBALS region
 
         Returns:
             Complete story file as bytes
@@ -1689,6 +1754,38 @@ class ZAssembler:
             # Positions either pass patches are shared so the second pass can't
             # misread a resolved address whose low byte is 0xFB.
             table_patched_positions = set()
+
+            # POSITIONAL vocab markers in table data: exact (table, offset)
+            # pairs recorded at encode time carrying the FULL index (the
+            # marker's low byte cannot hold indices >= 256 -- trinity has
+            # 374 distinct W? words). Applied before the legacy scans, whose
+            # shared patched-position set then skips these bytes.
+            if table_vocab_fixups and table_offsets:
+                _vmap_t = dict(vocab_fixups or [])
+                _wmap_t = dict(vword_fixups or [])
+                _tba = bytearray(table_data)
+                for _tidx, _toff, _fidx in table_vocab_fixups:
+                    if _tidx not in table_offsets:
+                        continue
+                    _pos = table_offsets[_tidx] + _toff
+                    if _pos + 1 >= len(_tba) or _pos in table_patched_positions:
+                        continue
+                    # Validate the canonical marker bytes before patching.
+                    if _tba[_pos] != 0xFB or _tba[_pos + 1] != (_fidx & 0xFF):
+                        continue
+                    _addr = self._vocab_idx_addr(
+                        _fidx, _vmap_t, _wmap_t, dict_addr_for_tables,
+                        table_base_addr, table_offsets)
+                    if _addr is None:
+                        continue
+                    _tba[_pos] = (_addr >> 8) & 0xFF
+                    _tba[_pos + 1] = _addr & 0xFF
+                    table_patched_positions.add(_pos)
+                    table_patched_positions.add(_pos + 1)
+                table_data = bytes(_tba)
+                impure_table_data = table_data[:impure_tables_size]
+                pure_table_data = table_data[impure_tables_size:]
+
             if vword_fixups and table_offsets:
                 table_data = self._resolve_table_vword_placeholders(
                     table_data, vword_fixups, table_base_addr, table_offsets,
@@ -1845,18 +1942,45 @@ class ZAssembler:
             story.extend(dictionary)
             current_addr += len(dictionary)
 
+        # POSITIONAL vocab markers in the GLOBALS region: exact offsets
+        # recorded at emission with the FULL index. Patched bytes join a
+        # skip set so the legacy word-aligned scans below cannot misread a
+        # resolved address whose high byte happens to be 0xFB.
+        _gv_patched = set()
+        if global_vocab_fixups and globals_len > 0:
+            _vmap_g = dict(vocab_fixups or [])
+            _wmap_g = dict(vword_fixups or [])
+            for _goff, _fidx in global_vocab_fixups:
+                if _goff + 1 >= globals_len:
+                    continue
+                _pos = globals_addr + _goff
+                if _pos + 1 >= len(story):
+                    continue
+                if story[_pos] != 0xFB or story[_pos + 1] != (_fidx & 0xFF):
+                    continue
+                _addr = self._vocab_idx_addr(
+                    _fidx, _vmap_g, _wmap_g, dict_addr,
+                    table_base_addr, table_offsets)
+                if _addr is None:
+                    continue
+                story[_pos] = (_addr >> 8) & 0xFF
+                story[_pos + 1] = _addr & 0xFF
+                _gv_patched.add(_pos)
+
         # Resolve vocab placeholders in globals data now that dict_addr is known
         # (vocab placeholders are 0xFB00 | index, need to be patched to actual addresses)
         if vocab_fixups and globals_len > 0:
             self._resolve_vocab_placeholders_in_story(
-                story, vocab_fixups, dict_addr, globals_addr, globals_len
+                story, vocab_fixups, dict_addr, globals_addr, globals_len,
+                skip_positions=_gv_patched
             )
 
         # Resolve VWORD table placeholders in NEW-PARSER? mode
         # (same 0xFB00 format but resolves to table addresses instead of dictionary)
         if vword_fixups and globals_len > 0 and table_offsets:
             self._resolve_vword_placeholders_in_story(
-                story, vword_fixups, table_base_addr, table_offsets, globals_addr, globals_len
+                story, vword_fixups, table_base_addr, table_offsets, globals_addr, globals_len,
+                skip_positions=_gv_patched
             )
 
         # Align to even boundary
@@ -1943,6 +2067,15 @@ class ZAssembler:
         # emission, patched point-wise -- mirrors prop_dict_fixups.  When
         # supplied, the legacy 0xFA scan below never runs (the compiler
         # passes an empty property_routine_fixups list).
+        # Story-absolute positions in the OBJECTS region already resolved by
+        # an earlier pass (dict words, property routines). Later in-band
+        # property scans (0xFA routine scan, 0xF4-0xF7/0xFC string scan) must
+        # skip them: a resolved dictionary address like trinity's 'walkie'
+        # entry at 0xF5AE is legal data that aliases the string band.
+        _prop_story_patched = set(
+            objects_addr + _po
+            for _po in (getattr(self, '_prop_dict_patched', None) or ()))
+
         if property_routine_positional_fixups and objects:
             obj_entry_sz = 9 if self.version <= 3 else 14
             entries_base = objects_addr + prop_defaults_size
@@ -1984,6 +2117,8 @@ class ZAssembler:
                         if j + 1 < len(story) and _boff + 1 < dlen:
                             story[j] = (packed_addr >> 8) & 0xFF
                             story[j + 1] = packed_addr & 0xFF
+                            _prop_story_patched.add(j)
+                            _prop_story_patched.add(j + 1)
                         break
                     p += dlen
 
@@ -2019,7 +2154,8 @@ class ZAssembler:
             self._walk_property_data(
                 story, objects_addr, len(objects), prop_defaults_size,
                 lambda j: (fixup_map.get(story[j + 1])
-                           if story[j] == 0xFA else None))
+                           if story[j] == 0xFA
+                           and j not in _prop_story_patched else None))
 
         # Byte positions in `routines` that any resolution pass has already
         # written. Later scanners (vocab/vword) must skip them: resolved packed
@@ -2183,7 +2319,8 @@ class ZAssembler:
                 self._resolve_string_placeholders_in_story(
                     story, string_placeholders or {}, string_table,
                     globals_addr, globals_len,
-                    data_placeholders=string_data_placeholders
+                    data_placeholders=string_data_placeholders,
+                    skip_positions=_gv_patched
                 )
 
             # And in object property data: classic direction exits (NEXIT/CEXIT/
@@ -2192,7 +2329,8 @@ class ZAssembler:
                 self._resolve_string_placeholders_in_properties(
                     story, objects_addr, len(objects), prop_defaults_size,
                     string_placeholders or {}, string_table,
-                    data_placeholders=string_data_placeholders
+                    data_placeholders=string_data_placeholders,
+                    skip_positions=_prop_story_patched
                 )
 
         # Resolve routine call fixups (patch call addresses)
@@ -2208,6 +2346,31 @@ class ZAssembler:
             for code_offset, _routine_offset in routine_fixups:
                 protected_positions.add(code_offset)
                 protected_positions.add(code_offset + 1)
+
+        # POSITIONAL vocab markers in ROUTINE code: exact offsets recorded at
+        # emission with the FULL index (no 8-bit limit, no in-band collision).
+        # Patched bytes join protected_positions so the legacy scans below
+        # (kept as a backup for anything a desync fallback missed) skip them.
+        if vocab_positional_fixups and (vocab_fixups or vword_fixups):
+            _vmap_c = dict(vocab_fixups or [])
+            _wmap_c = dict(vword_fixups or [])
+            _rvb = bytearray(routines)
+            for _coff, _fidx in vocab_positional_fixups:
+                if _coff + 1 >= len(_rvb) or _coff in protected_positions:
+                    continue
+                # Validate the canonical marker bytes before patching.
+                if _rvb[_coff] != 0xFB or _rvb[_coff + 1] != (_fidx & 0xFF):
+                    continue
+                _addr = self._vocab_idx_addr(
+                    _fidx, _vmap_c, _wmap_c, dict_addr,
+                    table_base_addr, table_offsets)
+                if _addr is None:
+                    continue
+                _rvb[_coff] = (_addr >> 8) & 0xFF
+                _rvb[_coff + 1] = _addr & 0xFF
+                protected_positions.add(_coff)
+                protected_positions.add(_coff + 1)
+            routines = bytes(_rvb)
 
         # Resolve vocabulary word placeholders (W?* -> dictionary addresses)
         if vocab_fixups:

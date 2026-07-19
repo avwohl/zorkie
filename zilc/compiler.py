@@ -240,6 +240,75 @@ class ZILCompiler:
             # DEFAULT: reverse mention order (last mentioned = lowest number)
             ordered_names.sort(key=lambda n: mention_order[n], reverse=True)
 
+        # V4+ large-object promotion minimizer: an object number > 255 forces
+        # every 2OP/1OP object opcode and parser predicate that names it as a
+        # CONSTANT (<MOVE ,OBJ ,HERE>, <FSET? ,OBJ F>, <HERE? BROAD-WALK>) into
+        # the longer VAR / 2-byte-large-constant form (+1..2 bytes each). The
+        # numbers are otherwise arbitrary labels, so hand the <=255 slots to the
+        # objects referenced most in code. This drops ~2KB on Trinity (593
+        # objects) -- enough to fit the correct (16-byte SYNONYM / 2-byte
+        # ADJECTIVE) build under the V4 256KB cap. The object TREE (parent/
+        # child/sibling order, built from LOC) is unchanged, so scope traversal
+        # and parser disambiguation are identical; only the numeric labels move.
+        # Deterministic (fixed AST walk + stable tie-break), and V1-3 (<=255
+        # objects) never enters this branch, so their output is byte-identical.
+        if self.version >= 4 and len(ordered_names) > 255:
+            from .parser.ast_nodes import (ASTNode, FormNode as _FN,
+                                           GlobalVarNode as _GVN)
+            names = set(ordered_names)
+            cnt = {n: 0 for n in ordered_names}
+            # The promotion assumes object numbers are ARBITRARY labels. That
+            # is false for a game whose code compares object numbers
+            # RELATIONALLY -- amfv's MOBY-FIND iterates <IGRTR? OBJ
+            # ,MUSEUM-ENTRANCE>, relying on every findable object being
+            # numbered at or below that room (ZILCH definition order).
+            # Renumbering by frequency put MUSEUM-ENTRANCE at 48 and 'ask
+            # official about the plan' found nothing. Detect any relational
+            # comparison with an object-naming operand and keep the original
+            # ordering in that case.
+            _rel_ops = {'G?', 'L?', 'G=?', 'L=?', 'GRTR?', 'LESS?',
+                        'IGRTR?', 'DLESS?'}
+            order_sensitive = False
+            stack = list(getattr(program, 'routines', []) or [])
+            while stack:
+                x = stack.pop()
+                if x is None:
+                    continue
+                if isinstance(x, _GVN):
+                    if x.name in cnt:
+                        cnt[x.name] += 1
+                elif isinstance(x, AtomNode):
+                    if x.value in names:
+                        cnt[x.value] += 1
+                if (isinstance(x, _FN) and isinstance(x.operator, AtomNode)
+                        and x.operator.value.upper() in _rel_ops):
+                    for _op in x.operands:
+                        _nm = (_op.name if isinstance(_op, _GVN)
+                               else _op.value if isinstance(_op, AtomNode)
+                               else None)
+                        if _nm in names:
+                            order_sensitive = True
+                            break
+                if isinstance(x, ASTNode):
+                    for v in vars(x).values():
+                        if isinstance(v, ASTNode):
+                            stack.append(v)
+                        elif isinstance(v, (list, tuple)):
+                            for z in v:
+                                if isinstance(z, ASTNode):
+                                    stack.append(z)
+                                elif isinstance(z, (list, tuple)):
+                                    stack.extend(w for w in z if isinstance(w, ASTNode))
+                elif isinstance(x, (list, tuple)):
+                    stack.extend(w for w in x if isinstance(w, ASTNode))
+            if order_sensitive:
+                self.log("  Object-number promotion SKIPPED: code compares "
+                         "object numbers relationally (order-sensitive)")
+            else:
+                base_idx = {n: i for i, n in enumerate(ordered_names)}
+                ordered_names = sorted(ordered_names,
+                                       key=lambda n: (-cnt[n], base_idx[n]))
+
         # Assign object numbers (1-indexed)
         obj_name_to_num = {}
         for i, name in enumerate(ordered_names):
@@ -1459,15 +1528,76 @@ class ZILCompiler:
         # Evaluate each clause
         for test, result in clauses:
             if self._evaluate_compile_test(test):
-                # This clause matches, return its result
+                # This clause matches, return its result.
+                # A clause value may be PRECEDED by ;-comment forms:
+                #   (<GASSIGNED? PREDGEN> ;<NOT <ZERO? <GETB 0 18>>> ;"ZIP"
+                #    '<PROG () ...>)
+                # (amfv MOBY-FIND). Without stripping them, the leading
+                # quote was never seen, the spliced text stayed QUOTED, and
+                # the codegen dropped the whole PROG -- MOBY-FIND compiled
+                # to an empty shell and every not-here noun ('ask official
+                # about the plan') answered "[You'll have to be more
+                # specific.]".
+                result = self._strip_leading_zil_comments(result.strip())
                 # Strip leading quote if present (quote means "literal")
-                result = result.strip()
                 if result.startswith("'"):
                     result = result[1:].strip()
                 return result
 
         # No clause matched, return empty
         return ''
+
+    @staticmethod
+    def _strip_leading_zil_comments(text: str) -> str:
+        """Remove leading ;-comment forms (;"str", ;<form>, ;(list), ;atom)."""
+        pos = 0
+        n = len(text)
+        while True:
+            while pos < n and text[pos] in ' \t\n\r':
+                pos += 1
+            if pos >= n or text[pos] != ';':
+                return text[pos:]
+            pos += 1
+            while pos < n and text[pos] in ' \t\n\r':
+                pos += 1
+            if pos >= n:
+                return ''
+            ch = text[pos]
+            if ch == '"':
+                pos += 1
+                while pos < n:
+                    if text[pos] == '\\':
+                        pos += 2
+                        continue
+                    if text[pos] == '"':
+                        pos += 1
+                        break
+                    pos += 1
+            elif ch in '(<[':
+                close = {'(': ')', '<': '>', '[': ']'}[ch]
+                depth = 0
+                while pos < n:
+                    c = text[pos]
+                    if c == '"':
+                        pos += 1
+                        while pos < n:
+                            if text[pos] == '\\':
+                                pos += 2
+                                continue
+                            if text[pos] == '"':
+                                break
+                            pos += 1
+                    elif c == ch:
+                        depth += 1
+                    elif c == close:
+                        depth -= 1
+                        if depth == 0:
+                            pos += 1
+                            break
+                    pos += 1
+            else:
+                while pos < n and text[pos] not in ' \t\n\r':
+                    pos += 1
 
     def _parse_cond_clauses(self, body: str) -> list:
         """Parse COND clauses into (test, result) pairs."""
@@ -4010,8 +4140,12 @@ class ZILCompiler:
 
         # Get initial vocab placeholders from codegen (will be updated during object table build)
         vocab_placeholders = codegen.get_vocab_placeholders()
-        # Also get VOC words - these have proper part-of-speech and should NOT be pre-added as buzz
-        voc_words_set = set(codegen.get_voc_words().keys())
+        # Also get VOC words - these have proper part-of-speech and should NOT be pre-added as buzz.
+        # Compare by UNESCAPED spelling: a THINGS/PSEUDO VOC word recorded as
+        # FROG\'S must match the unescaped W?FROG'S reference below, or the
+        # pre-pass adds a spurious 'buzz' type to a real adjective/noun.
+        voc_words_set = set(self._unescape_vocab_word(k).lower()
+                            for k in codegen.get_voc_words().keys())
 
         # Pre-add W?* words that can't be resolved via aliases.
         # This ensures dict_word_offsets are stable when SYNONYM properties are stored.
@@ -4148,14 +4282,17 @@ class ZILCompiler:
             count = len(word_flag_entries) * 2
             table_data_wft.extend([(count >> 8) & 0xFF, count & 0xFF])
 
+            _wft_voc_offs = []
             for word_name, flags in word_flag_entries:
-                # Add vocabulary word placeholder (0xFB00 | index)
+                # Add vocabulary word placeholder (canonical marker + a
+                # positional fixup carrying the full index)
                 placeholder_idx = codegen._next_vocab_placeholder_index
                 codegen._vocab_placeholders[placeholder_idx] = word_name.lower()
                 codegen._next_vocab_placeholder_index += 1
                 # Track as internal to WORD-FLAG-TABLE (should resolve to dictionary, not VWORD)
                 word_flag_table_placeholders.add(placeholder_idx)
-                placeholder_val = 0xFB00 | placeholder_idx
+                placeholder_val = 0xFB00 | (placeholder_idx & 0xFF)
+                _wft_voc_offs.append((len(table_data_wft), placeholder_idx))
                 table_data_wft.extend([(placeholder_val >> 8) & 0xFF, placeholder_val & 0xFF])
                 # Add flags
                 table_data_wft.extend([(flags >> 8) & 0xFF, flags & 0xFF])
@@ -4163,6 +4300,8 @@ class ZILCompiler:
             # Add as impure table (needs word placeholder resolution)
             table_index = len(codegen.tables)
             codegen.tables.append(("_WORD_FLAG_TABLE", bytes(table_data_wft), False, False))
+            for _o, _fi in _wft_voc_offs:
+                codegen._table_vocab_fixups.append((table_index, _o, _fi))
 
             # Register WORD-FLAG-TABLE as a global pointing to the table
             if 'WORD-FLAG-TABLE' not in codegen.globals:
@@ -4270,7 +4409,9 @@ class ZILCompiler:
                 codegen._vocab_placeholders[placeholder_idx] = word.lower()
                 codegen._next_vocab_placeholder_index += 1
                 vword_internal_placeholders.add(placeholder_idx)  # Track as internal
-                placeholder_val = 0xFB00 | placeholder_idx
+                placeholder_val = 0xFB00 | (placeholder_idx & 0xFF)
+                codegen._table_vocab_fixups.append(
+                    (len(codegen.tables), 0, placeholder_idx))
                 vword_data.extend([(placeholder_val >> 8) & 0xFF, placeholder_val & 0xFF])
 
                 # Field 1: WORD-CLASSIFICATION-NUMBER (type bits)
@@ -4319,7 +4460,9 @@ class ZILCompiler:
                 codegen._vocab_placeholders[placeholder_idx] = synonym.lower()
                 codegen._next_vocab_placeholder_index += 1
                 vword_internal_placeholders.add(placeholder_idx)  # Track as internal
-                placeholder_val = 0xFB00 | placeholder_idx
+                placeholder_val = 0xFB00 | (placeholder_idx & 0xFF)
+                codegen._table_vocab_fixups.append(
+                    (len(codegen.tables), 0, placeholder_idx))
                 vword_data.extend([(placeholder_val >> 8) & 0xFF, placeholder_val & 0xFF])
 
                 # Field 1: WORD-CLASSIFICATION-NUMBER (copy from main word)
@@ -5435,14 +5578,21 @@ class ZILCompiler:
                             _prp_state['positional'].append(
                                 (obj_idx, _pn, 0, pend[_val & 0xFF]))
                     elif isinstance(_val, (bytes, bytearray)):
+                        # Routine markers are emitted as WORD-ALIGNED words
+                        # within property byte values (FEXIT/PSEUDO/PROPDEF
+                        # word slots), so scan even offsets ONLY. The old
+                        # byte-blind scan matched the second byte of a DEXIT
+                        # door-object word plus a zero string byte -- trinity's
+                        # NWGATE is object 506 (0x01FA), so 'fa 00' at odd
+                        # offset 3 minted a bogus fixup that overwrote the
+                        # door/string words with a packed routine address and
+                        # walled off the ranch yard ("q is" garbage).
                         _j = 0
                         while _j + 1 < len(_val):
                             if _val[_j] == 0xFA and _val[_j + 1] in pend:
                                 _prp_state['positional'].append(
                                     (obj_idx, _pn, _j, pend[_val[_j + 1]]))
-                                _j += 2
-                                continue
-                            _j += 1
+                            _j += 2
             _prp_state['pending'] = []
             _prp_state['overrides'] = {}
             _prp_state['used_global'] = set()
@@ -5621,6 +5771,18 @@ class ZILCompiler:
                 vocab_fixups.append((placeholder_idx, dict_word_offsets[found_alias]))
             else:
                 # Word not in dictionary - try to add it (unescaped)
+                # LOUD warning: inserting a word HERE re-sorts the dictionary,
+                # which shifts the offset of every word sorting after it and
+                # silently stales all SYNONYM-property fixups already baked
+                # from the earlier get_word_offsets() snapshot (LGOP: a late
+                # "frog's" made "take stool" resolve to W?STONE). Any word
+                # reaching this path should instead be registered before the
+                # final snapshot; this add is a last resort for words that
+                # would otherwise be missing entirely.
+                import sys as _sys
+                print(f"[compiler] Warning: vocab word '{unescaped_word}' added "
+                      f"AFTER the dictionary offset snapshot; earlier word-address "
+                      f"fixups may now be stale", file=_sys.stderr)
                 dictionary.add_word(unescaped_word, 'buzz')  # PROPDEF VOC uses BUZZ type
                 # Re-get offsets to include the new word
                 dict_word_offsets = dictionary.get_word_offsets()
@@ -5748,6 +5910,20 @@ class ZILCompiler:
         # Structural gate inputs for the routine-code vocab scans.
         assembler._routine_offsets_map = dict(getattr(codegen, 'routines', {}) or {})
         assembler._codegen_code_len = len(bytes(getattr(codegen, 'code', b'') or b''))
+        # POSITIONAL vocab fixups (no 8-bit index limit): exact positions
+        # recorded at emission for routine code, table data, and globals.
+        vocab_positional = codegen.get_vocab_positional_fixups()
+        table_vocab_positional = list(getattr(codegen, '_table_vocab_fixups', []) or [])
+        global_vocab_positional = []
+        for _gname, _gidx in (getattr(codegen, '_global_vocab_fixups', {}) or {}).items():
+            _gnum = codegen.globals.get(_gname)
+            if isinstance(_gnum, int) and 0x10 <= _gnum < 0x100:
+                global_vocab_positional.append(((_gnum - 0x10) * 2, _gidx))
+        if vocab_positional or table_vocab_positional or global_vocab_positional:
+            self.log(f"  Positional vocab fixups: {len(vocab_positional)} code, "
+                     f"{len(table_vocab_positional)} table, "
+                     f"{len(global_vocab_positional)} globals "
+                     f"({len(codegen.get_vocab_placeholders())} distinct words)")
         story = assembler.build_story_file(
             routines_code,
             objects_data,
@@ -5785,7 +5961,10 @@ class ZILCompiler:
             # Positional dict-word patches for SYNONYM/PSEUDO/ADJECTIVE prop
             # data (see _resolve_dict_placeholders).
             prop_dict_fixups=dict_word_fixups,
-            table_string_fixups=codegen._table_string_fixups
+            table_string_fixups=codegen._table_string_fixups,
+            vocab_positional_fixups=vocab_positional,
+            table_vocab_fixups=table_vocab_positional,
+            global_vocab_fixups=global_vocab_positional
         )
 
         return story
