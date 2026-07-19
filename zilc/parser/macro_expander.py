@@ -30,21 +30,45 @@ _CT_COND_OPS = {'ASSIGNED?', 'GASSIGNED?', 'TYPE?', 'NOT', 'AND', 'OR', 'EMPTY?'
                 'G=?', 'L=?', '0?', '1?', 'SPNAME'}
 
 
+_ZILCH_ENV_ASSIGNED = {'ZILCH', 'PREDGEN'}
+
+
+def _gassigned_guarded_names(test_node):
+    names = set()
+    def walk(n):
+        if isinstance(n, FormNode):
+            if isinstance(n.operator, AtomNode) and \
+               n.operator.value.upper() in ('GASSIGNED?', 'ASSIGNED?'):
+                for op in n.operands:
+                    if isinstance(op, AtomNode):
+                        names.add(op.value.upper())
+                    elif isinstance(op, (GlobalVarNode, LocalVarNode)):
+                        names.add(op.name.upper())
+            for op in n.operands:
+                walk(op)
+    walk(test_node)
+    return names
+
+
 def _cond_is_compile_time_mdl(node):
-    def ok(n):
+    def ok(n, guarded):
         if isinstance(n, (NumberNode, StringNode, LocalVarNode)):
             return True
         if isinstance(n, AtomNode):
             return True
+        if isinstance(n, GlobalVarNode):
+            # ,X is compile-time only when the same test GASSIGNED?-guards X
+            # (the classic <AND <GASSIGNED? X> ,X> ZILCH-switch idiom).
+            return n.name.upper() in guarded
         if isinstance(n, FormNode):
             if not isinstance(n.operator, AtomNode):
                 return False
             if n.operator.value.upper() not in _CT_COND_OPS:
                 return False
-            return all(ok(op) for op in n.operands)
+            return all(ok(op, guarded) for op in n.operands)
         return False
     for _c, _a in getattr(node, 'clauses', []):
-        if not ok(_c):
+        if not ok(_c, _gassigned_guarded_names(_c)):
             return False
     return True
 
@@ -144,6 +168,22 @@ class MDLEvaluator:
 
     def _evaluate_form(self, form: FormNode, env: Dict[str, Any]) -> Any:
         """Evaluate a form (function call)."""
+        _op = getattr(form, 'operator', None)
+        if isinstance(_op, AtomNode) and _op.value.upper() == 'GASSIGNED?':
+            # ZILCH/PREDGEN are parts of the ZILCH compiler environment and
+            # always GASSIGNED when compiling a real game.
+            if not form.operands:
+                return False
+            _t = form.operands[0]
+            if isinstance(_t, AtomNode):
+                _nm = _t.value.upper()
+            elif isinstance(_t, (GlobalVarNode, LocalVarNode)):
+                _nm = _t.name.upper()
+            else:
+                return False
+            if _nm in _ZILCH_ENV_ASSIGNED:
+                return True
+            return _nm in env and env[_nm] is not None
         # Handle numeric operators as NTH: <1 .ARGS> means <NTH .ARGS 1>
         if isinstance(form.operator, NumberNode):
             index = form.operator.value
@@ -2340,6 +2380,26 @@ class MacroExpander:
         # Register all macros
         for macro in program.macros:
             self.define_macro(macro)
+
+        # MDL macro ALIASING via <SETG NEW ,OLDMACRO> (monkeypatch fix E)
+        _macro_names = {m.name for m in program.macros}
+        _kept_globals = []
+        for _g in program.globals:
+            _iv = getattr(_g, 'initial_value', None)
+            if (isinstance(_iv, GlobalVarNode) and _iv.name in _macro_names
+                    and _g.name not in _macro_names
+                    and '!-' not in _g.name and '!-' not in _iv.name):
+                # (names with !- are MDL-namespaced, e.g. the ZILF
+                # REWRITE-ROUTINE!-HOOKS!-ZILF hook global -- leave those)
+                _src = next(_m for _m in program.macros if _m.name == _iv.name)
+                _alias = copy.copy(_src)
+                _alias.name = _g.name
+                program.macros.append(_alias)
+                self.define_macro(_alias)
+                _macro_names.add(_g.name)
+                continue
+            _kept_globals.append(_g)
+        program.globals = _kept_globals
 
         # Check for PRE-COMPILE hook
         pre_compile_hook = None

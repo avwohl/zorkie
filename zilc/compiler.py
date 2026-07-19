@@ -258,6 +258,7 @@ class ZILCompiler:
         Returns:
             True if compilation succeeded, False otherwise
         """
+        self._main_source_path = input_path
         # Determine output path
         if output_path is None:
             input_file = Path(input_path)
@@ -422,7 +423,19 @@ class ZILCompiler:
 
         # Pattern to match <IFILE "filename"> or <INSERT-FILE "filename" T>
         # Second parameter (T or other) is optional and ignored
-        ifile_pattern = r'<\s*(?:IFILE|INSERT-FILE)\s+"([^"]+)"(?:\s+[^>]*)?\s*>'
+        aliases = getattr(self, '_ifile_aliases', None)
+        if aliases is None:
+            aliases = set(); self._ifile_aliases = aliases
+        for m in re.finditer(r'<\s*DEFINE\s+([A-Z0-9!?\-]+)', source, re.IGNORECASE):
+            content, _end = self._extract_balanced_content(source, m.start())
+            name = m.group(1).upper()
+            if not content or name in ('IFILE', 'INSERT-FILE'):
+                continue
+            known = ['IFILE', 'INSERT-FILE'] + sorted(aliases)
+            if re.search(r'<\s*(?:%s)\s+\.' % '|'.join(re.escape(k) for k in known), content, re.IGNORECASE):
+                aliases.add(name)
+        names = ['IFILE', 'INSERT-FILE'] + sorted(aliases)
+        ifile_pattern = r'<\s*(?:%s)\s+"([^"]+)"(?:\s+[^>]*)?\s*>' % '|'.join(re.escape(n) for n in names)
 
         def replace_ifile(match):
             filename = match.group(1)
@@ -458,7 +471,23 @@ class ZILCompiler:
             except FileNotFoundError:
                 raise FileNotFoundError(f"IFILE not found: {file_path}")
 
-        return re.sub(ifile_pattern, replace_ifile, source, flags=re.IGNORECASE)
+        _result_src = re.sub(ifile_pattern, replace_ifile, source, flags=re.IGNORECASE)
+        _setg_top = set(re.findall(r'(?m)^<SETG\s+([A-Z0-9?!\.\-]+)\s', _result_src))
+        _global_decl = set(re.findall(r'<GLOBAL\s+([A-Z0-9?!\.\-]+)', _result_src))
+        _const_decl = set(re.findall(r'<CONSTANT\s+([A-Z0-9?!\.\-]+)', _result_src))
+        _demote = getattr(self, '_setg_demote', None)
+        if _demote is None:
+            _demote = set(); self._setg_demote = _demote
+        for _name in _setg_top - _global_decl:
+            _esc = re.escape(_name)
+            _runtime_ref = re.search(r',' + _esc + r'(?![A-Z0-9?!\.\-])', _result_src)
+            _inner_setg = re.search(r'(?m)^[ \t].*<SETG\s+' + _esc + r'(?![A-Z0-9?!\.\-])', _result_src)
+            if _name in _const_decl:
+                _demote.add(_name)      # CONSTANT redefinition wins (ZILCH)
+            elif not _runtime_ref and not _inner_setg:
+                _demote.add(_name)      # pure compile-time atom, no runtime use
+
+        return _result_src
 
     def preprocess_control_characters(self, source: str) -> str:
         """
@@ -496,8 +525,12 @@ class ZILCompiler:
         """
         import re
 
-        # Track compile-time global values for %<COND> evaluation
-        self.compile_globals = {}
+        # Track compile-time global values for %<COND> evaluation.
+        # Seed the ZILCH compiler environment (fix B): Infocom sources probe
+        # <GASSIGNED? ZILCH> / <GASSIGNED? PREDGEN> to select the compiler
+        # arm over the MDL-interpreter arm (whose code references listener
+        # subrs: suspect's ELSE arms called ASCII/ERROR/NTH!-/QUITTER).
+        self.compile_globals = {'ZILCH': True, 'PREDGEN': True}
 
         # Extract SET and SETG directives to track compile-time values
         # <SET VARNAME value> or <SETG VARNAME value>
@@ -693,6 +726,11 @@ class ZILCompiler:
 
         # Fourth pass: Evaluate %<COND> compile-time conditionals
         source = self._process_compile_cond(source)
+
+        # Fourth-and-a-half: evaluate top-level PLAIN <COND ...> file forms
+        # (MDL compile-time; fix C). Previously dropped wholesale, losing e.g.
+        # enchanter's <COND (<==? ,ZORK-NUMBER 4> <ROUTINE MOBY-FIND ...> ...)>.
+        source = self._process_toplevel_cond(source)
 
         # Fifth pass: Evaluate %<+>, %<->, %<*>, etc. compile-time arithmetic
         source = self._process_compile_arithmetic(source)
@@ -1048,8 +1086,10 @@ class ZILCompiler:
         return False
 
     def _is_table_form(self, value) -> bool:
-        """Check if value is a TABLE/ITABLE/LTABLE/PTABLE FormNode."""
-        from .parser.ast_nodes import AtomNode, FormNode
+        """Check if value is a TABLE-family FormNode or a parsed TableNode."""
+        from .parser.ast_nodes import AtomNode, FormNode, TableNode
+        if isinstance(value, TableNode):
+            return True
         if isinstance(value, FormNode) and isinstance(value.operator, AtomNode):
             op_name = value.operator.value.upper()
             return op_name in ('TABLE', 'ITABLE', 'LTABLE', 'PTABLE')
@@ -1281,6 +1321,68 @@ class ZILCompiler:
             'true_expr': true_expr,
             'false_expr': false_expr
         }
+
+    def _process_toplevel_cond(self, source: str) -> str:
+        """Evaluate top-level plain <COND ...> file forms at compile time.
+
+        Real ZILCH runs file-scope <COND (<==? ,ZORK-NUMBER 4> <ROUTINE ...>
+        ...)> in the MDL listener while compiling. We previously dropped the
+        whole form (routines inside were never defined). Splice the first
+        clause whose test evaluates true, using the same evaluator as %<COND>;
+        a form with no true clause evaluates to nothing (MDL false)."""
+        import re
+        for _ in range(5):
+            new = self._toplevel_cond_pass(source)
+            if new == source:
+                break
+            source = new
+        return source
+
+    def _toplevel_cond_pass(self, source: str) -> str:
+        import re
+        result = []
+        pos = 0
+        n = len(source)
+        depth = 0
+        in_string = False
+        i = 0
+        while i < n:
+            ch = source[i]
+            if in_string:
+                if ch == '\\' and i + 1 < n:
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = False
+                i += 1
+                continue
+            if ch == '!' and i + 1 < n and source[i + 1] == '\\':
+                i += 3  # character literal !\x (may be " < >)
+                continue
+            if ch == '"':
+                in_string = True
+                i += 1
+                continue
+            if ch == '<' and depth == 0:
+                m = re.match(r'<\s*COND(?![A-Z0-9?\-])', source[i:i + 16],
+                             re.IGNORECASE)
+                prev = source[i - 1] if i > 0 else ''
+                if m and prev not in (';', "'", '%'):
+                    content, end = self._extract_balanced_content(source, i)
+                    if content:
+                        result.append(source[pos:i])
+                        result.append(self._evaluate_compile_cond(content))
+                        pos = end
+                        i = end
+                        continue
+            if ch == '<':
+                depth += 1
+            elif ch == '>':
+                if depth > 0:
+                    depth -= 1
+            i += 1
+        result.append(source[pos:])
+        return ''.join(result)
 
     def _process_compile_cond(self, source: str) -> str:
         """
@@ -1989,10 +2091,12 @@ class ZILCompiler:
         for bs in program.bit_synonyms:
             # Handle both single alias and list of aliases
             if isinstance(bs.alias, list):
-                # Infocom style: group name + multiple flags
-                # These are defining new flags (no alias mapping needed)
+                # Infocom style: <BIT-SYNONYM HEAD f1 f2 ...> -- every listed
+                # flag SHARES the head's attribute bit (ZILCH semantics;
+                # hollywoodhijinx declares 51 flag names over 32 real bits).
                 for flag in bs.alias:
-                    self.log(f"  BIT-SYNONYM flag: {flag} (group: {bs.original})")
+                    if flag != bs.original:
+                        bit_synonym_map[flag] = bs.original
             else:
                 bit_synonym_map[bs.alias] = bs.original
                 self.log(f"  BIT-SYNONYM: {bs.alias} -> {bs.original}")
@@ -2494,6 +2598,37 @@ class ZILCompiler:
                 if action_routine in actions:
                     preactions[preaction_routine] = actions[action_routine]
 
+
+        if getattr(self, '_is_classic_parser', False):
+            # Densify action numbers: verb-word-first numbering left >255
+            # action numbers in verb-heavy games (deadline had 296) which
+            # cannot live in dict value bytes; identical routines share one
+            # number and the survivors renumber densely from 1.
+            _canon = {}
+            for _old, _routine in action_num_to_routine.items():
+                _canon[_old] = actions.get(_routine, _old)
+            _kept = sorted(set(_canon.values()))
+            _dense = {_o: _i + 1 for _i, _o in enumerate(_kept)}
+            _remap = {_o: _dense[_c] for _o, _c in _canon.items()}
+            actions = {_r: _remap.get(_n, _n) for _r, _n in actions.items()}
+            preactions = {_r: _remap.get(_n, _n) for _r, _n in preactions.items()}
+            _new_ntr, _new_ntp = {}, {}
+            for _old, _routine in action_num_to_routine.items():
+                _new_ntr[_remap[_old]] = _routine
+            for _old, _pre in action_num_to_preaction.items():
+                _nn = _remap[_old]
+                if _new_ntp.get(_nn) is None:
+                    _new_ntp[_nn] = _pre
+            action_num_to_routine, action_num_to_preaction = _new_ntr, _new_ntp
+            for _k in list(verb_constants):
+                _v = verb_constants[_k]
+                if not isinstance(_v, int) or _v not in _remap:
+                    continue
+                if _k.startswith('V?'):
+                    verb_constants[_k] = _remap[_v]
+                elif _k.startswith('ACT?') and _k[4:] not in verb_numbers:
+                    verb_constants[_k] = _remap[_v]
+
         # V?<name> names an ACTION, and an action is named after its routine
         # (V-<name>). The verb-word pass above assigns V?<verb> from the verb's
         # FIRST syntax line, which is wrong when a same-named routine exists on a
@@ -2938,10 +3073,73 @@ class ZILCompiler:
                 for statement in routine.body:
                     collect_strings_from_node(statement)
 
+            # Strings inside TABLE-family values (parsed TableNodes and
+            # TABLE/LTABLE/PLTABLE forms) of properties and globals: these
+            # are stored in the string table like any other string, but the
+            # collection above never walked them, so abbreviation selection
+            # ignored the game's biggest text mass (e.g. Suspended's
+            # per-robot PLTABLE descriptions).
+            from .parser.ast_nodes import TableNode as _AbbrTN
+            def _collect_from_table_value(value):
+                if isinstance(value, _AbbrTN):
+                    for _v in value.values:
+                        if isinstance(_v, StringNode):
+                            all_strings.append(_v.value)
+                        elif isinstance(_v, _AbbrTN):
+                            _collect_from_table_value(_v)
+                        elif isinstance(_v, FormNode):
+                            collect_strings_from_node(_v)
+                elif isinstance(value, FormNode):
+                    collect_strings_from_node(value)
+            for obj in program.objects + program.rooms:
+                for _k, _v in obj.properties.items():
+                    _collect_from_table_value(_v)
+            for _g in getattr(program, 'globals', []) or []:
+                _iv = getattr(_g, 'initial_value', None)
+                if _iv is not None:
+                    _collect_from_table_value(_iv)
+                    if isinstance(_iv, StringNode):
+                        all_strings.append(_iv.value)
+            for _c in getattr(program, 'constants', []) or []:
+                _cv = getattr(_c, 'value', None)
+                if _cv is not None:
+                    _collect_from_table_value(_cv)
+                    if isinstance(_cv, StringNode):
+                        all_strings.append(_cv.value)
+
+            # The encoder TRANSFORMS text before encoding (CRLF char ->
+            # newline, literal newlines -> spaces, post-period space
+            # collapsing). Selection must see the SAME text the encoder
+            # will match against, or abbreviations containing '|' or
+            # newlines never apply.
+            import re as _abbr_re
+            _crlf = self.compile_globals.get('CRLF-CHARACTER', '|')
+            _pres = self.compile_globals.get('PRESERVE-SPACES?', False)
+            _sent = 'SENTENCE-ENDS?' in getattr(self, 'file_flags', set())
+            _crlf_esc = _abbr_re.escape(_crlf)
+            def _abbr_xform(t):
+                t = _abbr_re.sub(_crlf_esc + r'(?:\r\n|\r|\n)', _crlf, t)
+                t = _abbr_re.sub(r'\r\n|\r|\n', ' ', t)
+                t = t.replace(_crlf, '\n')
+                if not _pres and not _sent:
+                    t = _abbr_re.sub(r'\.( {2,})', lambda m: '.' + m.group(1)[:-1], t)
+                    t = _abbr_re.sub(r'\n( {2,})', lambda m: '\n' + m.group(1)[:-1], t)
+                return t
+            if not _sent:
+                all_strings = [_abbr_xform(s) for s in all_strings if isinstance(s, str)]
+
             self.log(f"  Collected {len(all_strings)} strings")
 
             # Build abbreviations table (now directly generates non-overlapping abbreviations)
             abbreviations_table = AbbreviationsTable()
+            try:
+                from pathlib import Path as _P
+                _cand = sorted(_P(self._main_source_path).resolve().parent.glob('*freq.xzap')) \
+                    if getattr(self, '_main_source_path', None) else []
+                if _cand:
+                    abbreviations_table.freq_xzap = str(_cand[0])
+            except Exception:
+                pass
             abbreviations_table.analyze_strings(all_strings, max_abbrevs=96)
             self.log(f"  Generated {len(abbreviations_table)} non-overlapping abbreviations")
 
@@ -3275,6 +3473,39 @@ class ZILCompiler:
                 elif hasattr(synonyms, 'value'):
                     self._check_vocab_word_apostrophe(synonyms.value, 'SYNONYM', room_name)
                     dictionary.add_synonym(synonyms.value, obj_num)
+            if 'ADJECTIVE' in room.properties:
+                # Rooms carry adjectives too (Suspended: (ADJECTIVE WEATHE));
+                # mirror the object loop, including the classic A?<word>
+                # adjective-number value.
+                _radjs = room.properties['ADJECTIVE']
+
+                def _radj_value(word, _obj_num=obj_num):
+                    if getattr(self, '_is_classic_parser', False):
+                        an = (self._action_table or {}).get('verb_constants', {}).get(
+                            f'A?{str(word).upper()}')
+                        if isinstance(an, int) and an > 0:
+                            return an
+                    return _obj_num
+
+                if hasattr(_radjs, '__iter__') and not isinstance(_radjs, str):
+                    for _ra in _radjs:
+                        if hasattr(_ra, 'value'):
+                            _rv = _ra.value
+                            if isinstance(_rv, (int, float)):
+                                _rv = str(_rv)
+                            self._check_vocab_word_apostrophe(_rv, 'ADJECTIVE', room_name)
+                            dictionary.add_adjective(_rv, _radj_value(_rv))
+                        elif isinstance(_ra, str):
+                            self._check_vocab_word_apostrophe(_ra, 'ADJECTIVE', room_name)
+                            dictionary.add_adjective(_ra, _radj_value(_ra))
+                        elif isinstance(_ra, (int, float)):
+                            dictionary.add_adjective(str(_ra), _radj_value(str(_ra)))
+                elif hasattr(_radjs, 'value'):
+                    _rv = _radjs.value
+                    if isinstance(_rv, (int, float)):
+                        _rv = str(_rv)
+                    self._check_vocab_word_apostrophe(_rv, 'ADJECTIVE', room_name)
+                    dictionary.add_adjective(_rv, _radj_value(_rv))
             if 'PSEUDO' in room.properties:
                 # (PSEUDO "WORD" RTN ...): quoted words must be dictionary nouns.
                 _ps = room.properties['PSEUDO']
@@ -3707,8 +3938,10 @@ class ZILCompiler:
         for bs in program.bit_synonyms:
             # Handle both single alias and list of aliases
             if isinstance(bs.alias, list):
-                # Infocom style: group name + multiple flags (no mapping needed)
-                pass
+                # Every listed flag shares the head's bit (see the first site).
+                for flag in bs.alias:
+                    if flag != bs.original:
+                        bit_synonym_map[flag] = bs.original
             else:
                 bit_synonym_map[bs.alias] = bs.original
 
@@ -4465,14 +4698,20 @@ class ZILCompiler:
                             props[prop_num] = value
                     # Check for TABLE/ITABLE/LTABLE/PTABLE FormNode - compile the table
                     elif self._is_table_form(value):
-                        op_name = value.operator.value.upper()
-                        # Compile the table and use its address as property value
-                        table_name = f"_PROPSPEC_{obj_node.name}_{key}"
-                        codegen._compile_global_table(table_name, value, op_name)
-                        # Get the table index and create a placeholder
-                        table_idx = len(codegen.tables) - 1
-                        # Store 0xFD00 | idx as placeholder for table address
-                        props[prop_num] = 0xFD00 | table_idx
+                        from .parser.ast_nodes import TableNode as _TN
+                        if isinstance(value, _TN):
+                            # Parsed TableNode (e.g. PLTABLE): compile directly.
+                            table_idx = codegen._add_table(value)
+                        else:
+                            op_name = value.operator.value.upper()
+                            # Compile the table and use its address as property value
+                            table_name = f"_PROPSPEC_{obj_node.name}_{key}"
+                            codegen._compile_global_table(table_name, value, op_name)
+                            # Get the table index and create a placeholder
+                            table_idx = len(codegen.tables) - 1
+                        # Store 0xFD00 | idx (or ext 0xF900|(idx-256)) marker
+                        props[prop_num] = (0xFD00 | table_idx) if table_idx <= 0xFF \
+                            else (0xF900 | (table_idx - 0x100))
                     # Extract value from AST node
                     elif hasattr(value, 'value'):
                         from .parser.ast_nodes import StringNode as _SN
@@ -4500,14 +4739,20 @@ class ZILCompiler:
                     prop_num = prop_map[key]
                     # Check for TABLE/ITABLE/LTABLE/PTABLE FormNode - compile the table
                     if self._is_table_form(value):
-                        op_name = value.operator.value.upper()
-                        # Compile the table and use its address as property value
-                        table_name = f"_PROPSPEC_{obj_node.name}_{key}"
-                        codegen._compile_global_table(table_name, value, op_name)
-                        # Get the table index and create a placeholder
-                        table_idx = len(codegen.tables) - 1
-                        # Store 0xFD00 | idx as placeholder for table address
-                        props[prop_num] = 0xFD00 | table_idx
+                        from .parser.ast_nodes import TableNode as _TN
+                        if isinstance(value, _TN):
+                            # Parsed TableNode (e.g. PLTABLE): compile directly.
+                            table_idx = codegen._add_table(value)
+                        else:
+                            op_name = value.operator.value.upper()
+                            # Compile the table and use its address as property value
+                            table_name = f"_PROPSPEC_{obj_node.name}_{key}"
+                            codegen._compile_global_table(table_name, value, op_name)
+                            # Get the table index and create a placeholder
+                            table_idx = len(codegen.tables) - 1
+                        # Store 0xFD00 | idx (or ext 0xF900|(idx-256)) marker
+                        props[prop_num] = (0xFD00 | table_idx) if table_idx <= 0xFF \
+                            else (0xF900 | (table_idx - 0x100))
                     elif hasattr(value, 'value'):
                         from .parser.ast_nodes import StringNode as _SN
                         if isinstance(value, _SN) and prop_num != 1:
@@ -4858,6 +5103,20 @@ class ZILCompiler:
         assembler = ZAssembler(self.version)
         # Table 0xFB scan may only match table-emitted vocab indices.
         assembler._table_vocab_indices = set(getattr(codegen, '_table_vocab_indices', set()) or set())
+        # Overflow string-operand markers (data band / ext band) recorded at
+        # structurally-discovered ROUTINE-code positions; resolved point-wise.
+        _sdp_overflow = codegen.get_string_data_placeholders()
+        _sde_overflow = dict(getattr(codegen, '_string_data_ext', {}) or {})
+        assembler._string_data_ext = _sde_overflow
+        assembler._code_string_marker_fixups = [
+            (_off, _w)
+            for _off, _w in getattr(codegen, '_placeholder_positions', [])
+            if (0xF400 <= _w <= 0xF7FF and (_w & 0x3FF) in _sdp_overflow)
+            or _w in _sde_overflow
+        ]
+        # Structural gate inputs for the routine-code vocab scans.
+        assembler._routine_offsets_map = dict(getattr(codegen, 'routines', {}) or {})
+        assembler._codegen_code_len = len(bytes(getattr(codegen, 'code', b'') or b''))
         story = assembler.build_story_file(
             routines_code,
             objects_data,

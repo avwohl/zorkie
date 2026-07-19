@@ -154,127 +154,6 @@ def _walk_large_const_positions(code, version):
     return out
 
 
-
-def _walk_print_paddr_positions(code, version):
-    """Walk a V3+ instruction stream; return byte offsets of every 0x8D
-    short-form print_paddr OPCODE byte (large-constant operand form), i.e.
-    positions that may legally hold a TELL string placeholder.
-    Raises _PlaceholderScanDesync when the stream cannot be decoded."""
-    v = version
-    n = len(code)
-    i = 0
-    out = []
-    while i < n:
-        op = code[i]
-        if op == 0xBE:  # extended (V5+)
-            if v < 5 or i + 2 >= n:
-                raise _PlaceholderScanDesync()
-            ext = code[i + 1]
-            tb = code[i + 2]
-            i += 3
-            for sh in (6, 4, 2, 0):
-                t = (tb >> sh) & 3
-                if t == 3:
-                    break
-                if t == 0:
-                    if i + 1 >= n:
-                        raise _PlaceholderScanDesync()
-                    i += 2
-                else:
-                    i += 1
-            if ext in _EXT_STORE_OPS:
-                i += 1
-            if ext in _EXT_BRANCH_OPS:
-                if i >= n:
-                    raise _PlaceholderScanDesync()
-                b = code[i]
-                i += 1
-                if not (b & 0x40):
-                    i += 1
-            continue
-        if op < 0x80:  # long 2OP
-            opnum = op & 0x1F
-            if opnum == 0:
-                raise _PlaceholderScanDesync()
-            i += 3
-            store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
-            branch = opnum in _2OP_BRANCH_OPS
-        elif op < 0xB0:  # short 1OP
-            opnum = op & 0x0F
-            t = (op >> 4) & 3
-            opcode_pos = i
-            i += 1
-            if t == 0:
-                if i + 1 >= n:
-                    raise _PlaceholderScanDesync()
-                if opnum == 0x0D:  # print_paddr with large constant = 0x8D
-                    out.append(opcode_pos)
-                i += 2
-            else:
-                i += 1
-            store = opnum in (0x01, 0x02, 0x03, 0x04, 0x0E) \
-                or (opnum == 0x08 and v >= 4) \
-                or (opnum == 0x0F and v <= 4)
-            branch = opnum in _1OP_BRANCH_OPS
-        elif op < 0xC0:  # short 0OP
-            opnum = op & 0x0F
-            i += 1
-            if opnum in (0x02, 0x03):  # print / print_ret inline z-string
-                while True:
-                    if i + 1 >= n:
-                        raise _PlaceholderScanDesync()
-                    w = (code[i] << 8) | code[i + 1]
-                    i += 2
-                    if w & 0x8000:
-                        break
-            store = (opnum in (0x05, 0x06) and v == 4)
-            branch = (opnum in (0x05, 0x06) and v <= 3) or opnum in (0x0D, 0x0F)
-        else:  # variable form
-            opnum = op & 0x1F
-            var_of_2op = op < 0xE0
-            i += 1
-            ntypes = 2 if (not var_of_2op and v >= 4 and opnum in (0x0C, 0x1A)) else 1
-            if i + ntypes > n:
-                raise _PlaceholderScanDesync()
-            tbs = code[i:i + ntypes]
-            i += ntypes
-            done = False
-            for tb in tbs:
-                for sh in (6, 4, 2, 0):
-                    t = (tb >> sh) & 3
-                    if t == 3:
-                        done = True
-                        break
-                    if t == 0:
-                        if i + 1 >= n:
-                            raise _PlaceholderScanDesync()
-                        i += 2
-                    else:
-                        i += 1
-                if done:
-                    break
-            if var_of_2op:
-                store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
-                branch = opnum in _2OP_BRANCH_OPS
-            else:
-                store = opnum in (0x00, 0x07) \
-                    or (v >= 4 and opnum in (0x0C, 0x16, 0x17)) \
-                    or (v >= 5 and opnum in (0x04, 0x18))
-                branch = (v >= 4 and opnum == 0x17) or (v >= 5 and opnum == 0x1F)
-        if store:
-            i += 1
-        if branch:
-            if i >= n:
-                raise _PlaceholderScanDesync()
-            b = code[i]
-            i += 1
-            if not (b & 0x40):
-                i += 1
-        if i > n:
-            raise _PlaceholderScanDesync()
-    return out
-
-
 class ImprovedCodeGenerator:
     """Enhanced code generator with extensive opcode support."""
 
@@ -3485,19 +3364,11 @@ class ImprovedCodeGenerator:
             for i, placeholder_val in self._scan_placeholder_words(stmt_code, tracked_positions):
                 self._pending_placeholders.append((stmt_offset + i, placeholder_val))
 
-            # Scan for TELL placeholder positions in statement code.
-            # STRUCTURAL discovery: only an 0x8D byte that STARTS a short-form
-            # print_paddr instruction (large-constant operand) can hold a TELL
-            # placeholder. The byte-blind scan matched a jz long-branch second
-            # byte 0x8D + call opcode 'e0 3f' as placeholder 0x3F and the
-            # resolver overwrote the call opcode (zork2 PKH-FCN).
-            try:
-                _pp_positions = _walk_print_paddr_positions(stmt_code, self.version)
-            except _PlaceholderScanDesync:
-                _pp_positions = [i for i in range(len(stmt_code) - 2)
-                                 if stmt_code[i] == 0x8D]
-            for i in _pp_positions:
-                if i + 2 < len(stmt_code):
+            # Scan for TELL placeholder positions in statement code
+            # TELL placeholders: 0x8D followed by value in range 0xE000-0xFFFD
+            # Only match if the placeholder index is in our dictionary
+            for i in range(len(stmt_code) - 2):
+                if stmt_code[i] == 0x8D:
                     placeholder_val = (stmt_code[i + 1] << 8) | stmt_code[i + 2]
                     if 0xE000 <= placeholder_val <= 0xFFFD:
                         placeholder_idx = placeholder_val - 0xE000
@@ -19491,41 +19362,18 @@ class ImprovedCodeGenerator:
 
     # ===== Object Tree Traversal =====
 
-    def _resolve_obj_operand(self, node, code):
-        """Resolve a single object operand for a 1OP instruction, EVALUATING
-        nested FormNode/CondNode operands to the stack (mirrors
-        _resolve_two_cmp_operands): _get_operand_type_and_value on a form
-        returns (1,0)="stack" WITHOUT emitting its code, so e.g.
-        <FIRST? <PKH ,PRSI>> ran get_child on a stale stack value (zork2's
-        Dreary Room key never left the keyhole)."""
-        if self._is_empty_false_form(node):
-            return (0, 0)
-        if (isinstance(node, FormNode) and isinstance(node.operator, AtomNode)
-                and node.operator.value.upper() == 'QUOTE'):
-            return self._get_operand_type_and_value(node)
-        if isinstance(node, (FormNode, CondNode)):
-            before = len(self._current_stmt_routine_offsets)
-            insert_pos = len(code)
-            expr = (self.generate_form(node) if isinstance(node, FormNode)
-                    else self.generate_cond(node, value_context=True))
-            for k in range(before, len(self._current_stmt_routine_offsets)):
-                rel, ph = self._current_stmt_routine_offsets[k]
-                self._current_stmt_routine_offsets[k] = (insert_pos + rel, ph)
-            code.extend(expr)
-            return (1, 0)  # stack
-        return self._get_operand_type_and_value(node)
-
     def gen_get_child(self, operands: List[ASTNode]) -> bytes:
         """Generate GET_CHILD (get first child of object)."""
         if len(operands) != 1:
             raise ValueError("FIRST? requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._resolve_obj_operand(operands[0], code)
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_CHILD is 1OP opcode 0x02 (store + branch)
         # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
         # 0x92 = small constant, 0xA2 = variable
+        # _get_operand_type_and_value returns: 0=constant, 1=variable
         if op_type == 1:  # Variable
             code.append(0xA2)
         else:  # Constant (small)
@@ -19544,7 +19392,7 @@ class ImprovedCodeGenerator:
             raise ValueError("NEXT? requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._resolve_obj_operand(operands[0], code)
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_SIBLING is 1OP opcode 0x01 (store + branch)
         # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
@@ -19567,7 +19415,7 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op_type, op_val = self._resolve_obj_operand(operands[0], code)
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_PARENT is 1OP opcode 0x03 (store only)
         # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
@@ -19597,7 +19445,7 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        op_type, op_val = self._resolve_obj_operand(operands[0], code)
+        op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_CHILD stores child object (0 if none)
         # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable

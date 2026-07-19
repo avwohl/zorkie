@@ -20,9 +20,12 @@ class Dictionary:
         self.encoder = ZTextEncoder(version, custom_alphabets=custom_alphabets, language=language)
         # Default separators plus SIBREAKS (self-inserting breaks)
         # SIBREAKS characters both act as separators AND become words themselves
-        default_separators = '.,;:?!()[]{}'
-        all_separators = default_separators + sibreaks
-        self.separators = [ord(c) for c in all_separators]
+        default_separators = '.,"'
+        seps = []
+        for c in default_separators + (sibreaks or ''):
+            if c != '\\' and c not in seps:
+                seps.append(c)
+        self.separators = [ord(c) for c in seps]
         self.words: Set[str] = set()
 
         # NEW-PARSER? mode changes vocabulary format

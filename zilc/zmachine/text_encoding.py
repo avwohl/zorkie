@@ -249,137 +249,109 @@ class ZTextEncoder:
         low = zscii_code & 0x1F
         return ([5, 6, high, low], 0)
 
-    def encode_string(self, text: str, max_words: int = None, use_abbreviations: bool = True,
-                       literal: bool = False) -> List[int]:
-        """
-        Encode a string to Z-characters packed into 16-bit words.
+    def encode_string(self, text, max_words=None, use_abbreviations=True,
+                          literal=False):
+        """encode_string with DP-OPTIMAL abbreviation application (V3+).
 
-        Args:
-            text: The string to encode
-            max_words: Maximum number of 16-bit words (for dictionary entries)
-            use_abbreviations: Whether to use abbreviations table (default True)
-            literal: If True, skip all text transformations (for abbreviation strings)
-
-        Returns:
-            List of 16-bit words with Z-characters packed in
+        The greedy longest-match application is suboptimal (a long abbrev can
+        block two short ones that together save more). DP minimizes z-chars
+        exactly. Text transformations are identical to the original.
         """
-        # ZIL string translation (skipped if literal=True):
-        # - Language escape sequences (e.g., %o -> ö for German)
-        # - CRLF character (default |) becomes newline in output
-        # - Literal newlines immediately after CRLF character are absorbed (ignored)
-        # - Other literal newlines (CRLF, CR, LF) become spaces
-        # - Unless PRESERVE-SPACES? is set, collapse 2+ spaces after periods to 1 space
         if not literal:
             import re
 
-            # Step 0: Process language-specific escape sequences (e.g., %o -> ö for German)
             if self.language == 'GERMAN':
                 def replace_german_escape(m):
                     escape_char = m.group(1)
                     if escape_char in self.GERMAN_ESCAPES:
                         return self.GERMAN_ESCAPES[escape_char]
-                    return m.group(0)  # Keep original if not a known escape
+                    return m.group(0)
                 text = re.sub(r'%([aouAOUSs<>])', replace_german_escape, text)
 
             crlf = self.crlf_character
-            # Escape the character for regex use
             crlf_escaped = re.escape(crlf)
-            # Step 1: Absorb newlines immediately after CRLF character
             text = re.sub(crlf_escaped + r'(?:\r\n|\r|\n)', crlf, text)
-            # Step 1.5: For SENTENCE-ENDS? mode, mark punctuation + space before newline
-            # These should become two regular spaces, not sentence space
-            # Use \x00 as a placeholder marker (will be restored after SENTENCE-ENDS?)
             if self.sentence_ends:
                 text = re.sub(r'([.!?]) (?=\r\n|\r|\n)', lambda m: m.group(1) + '\x00', text)
-            # Step 2: Replace remaining literal newlines with space
             text = re.sub(r'\r\n|\r|\n', ' ', text)
-            # Step 3: Replace CRLF character with newline
             text = text.replace(crlf, '\n')
-            # Step 4: Handle SENTENCE-ENDS? or collapse multiple spaces
             if self.sentence_ends:
-                # SENTENCE-ENDS? mode: Two spaces after sentence-ending punctuation
-                # (.!?) become a sentence space (0x0B = vertical tab)
-                # More than two spaces: sentence space + remaining spaces minus 2
                 def convert_sentence_space(m):
                     punct = m.group(1)
                     spaces = m.group(2)
                     if len(spaces) >= 2:
-                        # Convert to sentence space (0x0B) + any extra spaces beyond 2
                         return punct + '\x0b' + spaces[2:]
-                    return m.group(0)  # Keep as-is if less than 2 spaces
+                    return m.group(0)
                 text = re.sub(r'([.!?])( {2,})', convert_sentence_space, text)
-                # Restore marked patterns: \x00 + space -> two regular spaces
                 text = text.replace('\x00 ', '  ')
             elif not self.preserve_spaces:
-                # Collapse multiple spaces after periods (and after newlines from CRLF)
-                # The rule is: reduce runs of 2+ spaces after periods/newlines by 1
-                # e.g., 2 spaces → 1, 3 spaces → 2
-                # After period followed by 2+ spaces, reduce by removing one space
                 def reduce_period_spaces(m):
                     spaces = m.group(1)
-                    return '.' + spaces[:-1]  # Remove one space
+                    return '.' + spaces[:-1]
                 text = re.sub(r'\.( {2,})', reduce_period_spaces, text)
-                # After newline followed by 2+ spaces, reduce by removing one space
                 def reduce_newline_spaces(m):
                     spaces = m.group(1)
-                    return '\n' + spaces[:-1]  # Remove one space
+                    return '\n' + spaces[:-1]
                 text = re.sub(r'\n( {2,})', reduce_newline_spaces, text)
 
-        # Convert string to Z-characters
+        ab = self.abbreviations_table if (use_abbreviations and self.version >= 3) else None
+        n = len(text)
         zchars = []
-        current_alphabet = 0
+        if ab and len(ab) > 0 and n:
+            by_first = {}
+            for idx, a in enumerate(ab.abbreviations):
+                if a:
+                    by_first.setdefault(a[0], []).append((idx, a))
+            INF = 1 << 30
+            dp = [INF] * (n + 1)
+            dp[n] = 0
+            choice = [None] * (n + 1)
+            for i in range(n - 1, -1, -1):
+                zc, _ = self.char_to_zchar(text[i], 0)
+                dp[i] = dp[i + 1] + len(zc)
+                choice[i] = (1, zc, None)
+                for idx, a in by_first.get(text[i], ()):
+                    L = len(a)
+                    if i + L <= n and dp[i + L] + 2 < dp[i] and text.startswith(a, i):
+                        dp[i] = dp[i + L] + 2
+                        choice[i] = (L, None, idx)
+            i = 0
+            while i < n:
+                L, zc, idx = choice[i]
+                if idx is None:
+                    zchars.extend(zc)
+                else:
+                    zchars.extend([1 + idx // 32, idx % 32])
+                i += L
+        else:
+            current_alphabet = 0
+            i = 0
+            while i < n:
+                if ab and len(ab) > 0:
+                    match = ab.find_abbreviation(text, i)
+                    if match:
+                        abbrev_index, abbrev_length = match
+                        zchars.extend([1 + abbrev_index // 32, abbrev_index % 32])
+                        i += abbrev_length
+                        continue
+                ch_zchars, current_alphabet = self.char_to_zchar(text[i], current_alphabet)
+                zchars.extend(ch_zchars)
+                i += 1
 
-        # Process text with abbreviation support
-        i = 0
-        while i < len(text):
-            # Try to find abbreviation match if enabled
-            if use_abbreviations and self.abbreviations_table and len(self.abbreviations_table) > 0:
-                match = self.abbreviations_table.find_abbreviation(text, i)
-                if match:
-                    abbrev_index, abbrev_length = match
-                    # Encode abbreviation reference
-                    # Z-char 1-3 followed by index within that table (0-31)
-                    table_num = abbrev_index // 32  # 0, 1, or 2
-                    table_index = abbrev_index % 32
-                    abbrev_zchar = 1 + table_num  # Z-char 1, 2, or 3
-                    zchars.extend([abbrev_zchar, table_index])
-                    i += abbrev_length
-                    continue
-
-            # No abbreviation match - encode character normally
-            ch = text[i]
-            ch_zchars, current_alphabet = self.char_to_zchar(ch, current_alphabet)
-            zchars.extend(ch_zchars)
-            i += 1
-
-        # Pad to multiple of 3
         while len(zchars) % 3 != 0:
-            zchars.append(5)  # Padding character
-
-        # If max_words specified, truncate or pad
+            zchars.append(5)
         if max_words:
             max_zchars = max_words * 3
             if len(zchars) > max_zchars:
                 zchars = zchars[:max_zchars]
             while len(zchars) < max_zchars:
                 zchars.append(5)
-
-        # Pack into 16-bit words (3 z-chars per word)
         words = []
         for i in range(0, len(zchars), 3):
-            z0 = zchars[i] if i < len(zchars) else 5
-            z1 = zchars[i+1] if i+1 < len(zchars) else 5
-            z2 = zchars[i+2] if i+2 < len(zchars) else 5
-
-            # Pack: bit 15 = end marker, bits 14-10 = z0, bits 9-5 = z1, bits 4-0 = z2
-            word = (z0 << 10) | (z1 << 5) | z2
-
-            # Set end marker on last word
+            word = (zchars[i] << 10) | (zchars[i + 1] << 5) | zchars[i + 2]
             if i + 3 >= len(zchars):
                 word |= 0x8000
-
             words.append(word)
-
         return words
 
     def encode_dictionary_word(self, word: str) -> List[int]:

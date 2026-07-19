@@ -609,8 +609,15 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return node
 
-            elif op_name in ("TABLE", "ITABLE", "LTABLE"):
-                node = self.parse_table(op_name, line, col)
+            elif op_name in ("TABLE", "ITABLE", "LTABLE", "PLTABLE"):
+                # PLTABLE (classic ZIL, Suspended era) = LTABLE placed in
+                # PURE (static) memory: a length-prefixed table of values.
+                if op_name == "PLTABLE":
+                    node = self.parse_table("LTABLE", line, col)
+                    if "PURE" not in node.flags:
+                        node.flags.append("PURE")
+                else:
+                    node = self.parse_table(op_name, line, col)
                 self.expect(TokenType.RANGLE)
                 return node
 

@@ -415,7 +415,13 @@ class Lexer:
             else:
                 break
 
-        return ''.join(chars)
+        value = ''.join(chars)
+        # MDL oblist trailer: an unescaped terminal '!' (ROUTINE FOO!) names the
+        # same atom as FOO. '!-' trailers are handled elsewhere and '\\!' is a
+        # literal escape.
+        if len(value) > 1 and value.endswith('!') and not value.endswith('\\!'):
+            value = value[:-1]
+        return value
 
     def is_atom_char(self, ch: str) -> bool:
         """Check if character is valid in an atom.

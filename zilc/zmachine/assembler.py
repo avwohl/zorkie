@@ -106,8 +106,9 @@ class ZAssembler:
                 result[i] = (dict_addr >> 8) & 0xFF
                 result[i + 1] = dict_addr & 0xFF
             # Check if this is a table placeholder (0xFF00-0xFFFF)
-            elif word >= 0xFF00 and word <= 0xFFFF and table_offsets:
-                table_index = word & 0x00FF
+            elif ((0xFF00 <= word <= 0xFFFF) or (0xF800 <= word <= 0xF8FF)) and table_offsets:
+                # 0xF800|(idx-256): ext band for table indexes 256..511
+                table_index = (word & 0x00FF) + (0x100 if (word & 0xFF00) == 0xF800 else 0)
                 if table_index in table_offsets:
                     # Calculate actual table address
                     actual_addr = table_base_addr + table_offsets[table_index]
@@ -152,8 +153,9 @@ class ZAssembler:
                 result[i] = (dict_addr >> 8) & 0xFF
                 result[i + 1] = dict_addr & 0xFF
             # Check if this is a table placeholder (0xFF00-0xFFFF)
-            elif word >= 0xFF00 and word <= 0xFFFF and table_offsets:
-                table_index = word & 0x00FF
+            elif ((0xFF00 <= word <= 0xFFFF) or (0xF800 <= word <= 0xF8FF)) and table_offsets:
+                # 0xF800|(idx-256): ext band for table indexes 256..511
+                table_index = (word & 0x00FF) + (0x100 if (word & 0xFF00) == 0xF800 else 0)
                 if table_index in table_offsets:
                     offset = table_offsets[table_index]
                     # Determine which section this table is in
@@ -445,6 +447,11 @@ class ZAssembler:
                 text = string_placeholders.get(story[i + 1])
             elif 0xF4 <= hi <= 0xF7 and step == 2:
                 text = data_ph.get(((hi & 0x03) << 8) | story[i + 1])
+            elif 0xF0 <= hi <= 0xF3 and step == 2:
+                # ext data-string marker (band overflow); value-keyed dict,
+                # cannot collide with routine placeholders (disjoint pools)
+                text = (getattr(self, '_string_data_ext', {}) or {}).get(
+                    (hi << 8) | story[i + 1])
             if text is not None:
                 packed_addr = string_table.get_packed_address(text, self.version)
                 if packed_addr is not None:
@@ -454,7 +461,120 @@ class ZAssembler:
                     continue
             i += step
 
-    def _resolve_vocab_placeholders(self, routines: bytes, vocab_fixups: list,
+    def _structural_positions(self, blob):
+        """(allowed_positions, fallback_ranges) for the routines blob via the
+        codegen instruction walker, or (None, None) when structure is
+        unavailable. Positions gate the 0xFB scans STRUCTURALLY: only a 2-byte
+        large-constant operand may hold a vocab placeholder (an infidel call
+        placeholder's argument bytes previously false-matched)."""
+        offs_map = getattr(self, '_routine_offsets_map', None)
+        code_len = getattr(self, '_codegen_code_len', None)
+        if not offs_map or code_len is None or code_len != len(blob):
+            return None, None
+        from ..codegen.codegen_improved import (_walk_large_const_positions,
+                                                _PlaceholderScanDesync)
+        offs = sorted(set(offs_map.values()))
+        if not offs:
+            return None, None
+        allowed = set()
+        fallback = []
+        n = len(blob)
+        for idx, r in enumerate(offs):
+            if r >= n:
+                continue
+            end = offs[idx + 1] if idx + 1 < len(offs) else n
+            nl = blob[r]
+            cs = r + 1 + (2 * nl if self.version <= 4 else 0)
+            if nl > 15 or cs > end:
+                fallback.append((r, end))
+                continue
+            chunk = bytes(blob[cs:end])
+            try:
+                pos = _walk_large_const_positions(chunk, self.version)
+            except _PlaceholderScanDesync:
+                try:
+                    pos = _walk_large_const_positions(chunk.rstrip(b'\x00'), self.version)
+                except _PlaceholderScanDesync:
+                    fallback.append((cs, end))
+                    continue
+            for p in pos:
+                allowed.add(cs + p)
+        return allowed, fallback
+
+    @staticmethod
+    def _structural_pos_ok(i, allowed, fallback):
+        if i in allowed:
+            return True
+        for a, b in fallback:
+            if a <= i < b:
+                return True
+        return False
+
+    def _resolve_vocab_placeholders(self, routines, vocab_fixups, dict_addr,
+                                    protected_positions=None):
+        if not vocab_fixups:
+            return routines
+        allowed, fallback = self._structural_positions(routines)
+        if allowed is None:
+            return self._resolve_vocab_placeholders_legacy(
+                routines, vocab_fixups, dict_addr, protected_positions)
+        result = bytearray(routines)
+        protected = protected_positions if protected_positions is not None else set()
+        fixup_map = {}
+        for placeholder_idx, word_offset in vocab_fixups:
+            fixup_map[placeholder_idx] = dict_addr + word_offset
+        i = 0
+        while i < len(result) - 1:
+            if (routines[i] == 0xFB and i not in protected
+                    and self._structural_pos_ok(i, allowed, fallback)
+                    and not (i >= 1 and routines[i - 1] == 0x8C)
+                    and not (i >= 2 and routines[i - 2] == 0x8C)):
+                placeholder_idx = routines[i + 1]
+                if placeholder_idx in fixup_map:
+                    word_addr = fixup_map[placeholder_idx]
+                    result[i] = (word_addr >> 8) & 0xFF
+                    result[i + 1] = word_addr & 0xFF
+                    protected.add(i)
+                    protected.add(i + 1)
+                    i += 2
+                    continue
+            i += 1
+        return bytes(result)
+
+    def _resolve_vword_placeholders(self, routines, vword_fixups, table_base_addr,
+                                    table_offsets, protected_positions=None):
+        if not vword_fixups:
+            return routines
+        allowed, fallback = self._structural_positions(routines)
+        if allowed is None:
+            return self._resolve_vword_placeholders_legacy(
+                routines, vword_fixups, table_base_addr, table_offsets,
+                protected_positions)
+        result = bytearray(routines)
+        protected = protected_positions if protected_positions is not None else set()
+        fixup_map = {}
+        for placeholder_idx, table_index in vword_fixups:
+            if table_index in table_offsets:
+                fixup_map[placeholder_idx] = table_base_addr + table_offsets[table_index]
+        i = 0
+        while i < len(result) - 1:
+            if (routines[i] == 0xFB and i not in protected
+                    and self._structural_pos_ok(i, allowed, fallback)
+                    and not (i >= 1 and routines[i - 1] == 0x8C)
+                    and not (i >= 2 and routines[i - 2] == 0x8C)):
+                placeholder_idx = routines[i + 1]
+                if placeholder_idx in fixup_map:
+                    table_addr = fixup_map[placeholder_idx]
+                    result[i] = (table_addr >> 8) & 0xFF
+                    result[i + 1] = table_addr & 0xFF
+                    protected.add(i)
+                    protected.add(i + 1)
+                    i += 2
+                    continue
+            i += 1
+        return bytes(result)
+
+    def _resolve_vocab_placeholders_legacy(self, routines: bytes, vocab_fixups: list,
                                        dict_addr: int, protected_positions: set = None) -> bytes:
         """
         Resolve vocabulary word placeholders (W?*) in routine bytecode.
@@ -518,7 +638,7 @@ class ZAssembler:
 
         return bytes(result)
 
-    def _resolve_vword_placeholders(self, routines: bytes, vword_fixups: list,
+    def _resolve_vword_placeholders_legacy(self, routines: bytes, vword_fixups: list,
                                      table_base_addr: int, table_offsets: dict,
                                      protected_positions: set = None) -> bytes:
         """
@@ -960,6 +1080,9 @@ class ZAssembler:
                 text = string_placeholders.get(story[j + 1])
             elif 0xF4 <= hi <= 0xF7:
                 text = data_ph.get(((hi & 0x03) << 8) | story[j + 1])
+            elif 0xF0 <= hi <= 0xF3:
+                text = (getattr(self, '_string_data_ext', {}) or {}).get(
+                    (hi << 8) | story[j + 1])
             else:
                 return None
             if text is None:
@@ -1207,8 +1330,9 @@ class ZAssembler:
                     word = (result[j] << 8) | result[j + 1]
 
                     # Check for table address placeholder: 0xFD00 | table_idx
-                    if (word & 0xFF00) == 0xFD00:
-                        table_idx = word & 0x00FF
+                    # (0xF900|(idx-256) = ext band for prop-table idx 256..511)
+                    if (word & 0xFF00) in (0xFD00, 0xF900):
+                        table_idx = (word & 0x00FF) + (0x100 if (word & 0xFF00) == 0xF900 else 0)
                         if table_idx in table_offsets:
                             table_offset = table_offsets[table_idx]
                             actual_addr = tables_base + table_offset
@@ -1785,7 +1909,7 @@ class ZAssembler:
             # So we shrink by (5 + text_len - 3) = (2 + text_len) per marker
             final_routines_len = len(routines)
             i = 0
-            while i < len(routines):
+            while (not tell_placeholder_positions) and i < len(routines):
                 if (i + 4 < len(routines) and
                     routines[i] == 0x8D and
                     routines[i+1] == 0xFF and
@@ -1843,6 +1967,35 @@ class ZAssembler:
                     patched_positions=code_patched_positions
                 )
 
+            # Point-wise OVERFLOW string markers in ROUTINE code (data band /
+            # ext band, used once the 256-slot 0xFC00 band is full). Only
+            # positions discovered structurally at generation time are
+            # patched -- no byte scan can safely match these bands in code.
+            _csm = getattr(self, '_code_string_marker_fixups', None)
+            _sde = getattr(self, '_string_data_ext', {}) or {}
+            if _csm and string_table is not None:
+                _sdp = string_data_placeholders or {}
+                _rba = bytearray(routines)
+                for _off, _w in _csm:
+                    if _off + 1 >= len(_rba) or _off in code_patched_positions:
+                        continue
+                    if ((_rba[_off] << 8) | _rba[_off + 1]) != _w:
+                        continue
+                    if 0xF400 <= _w <= 0xF7FF:
+                        _text = _sdp.get(_w & 0x3FF)
+                    else:
+                        _text = _sde.get(_w)
+                    if _text is None:
+                        continue
+                    _paddr = string_table.get_packed_address(_text, self.version)
+                    if _paddr is None:
+                        continue
+                    _rba[_off] = (_paddr >> 8) & 0xFF
+                    _rba[_off + 1] = _paddr & 0xFF
+                    code_patched_positions.add(_off)
+                    code_patched_positions.add(_off + 1)
+                routines = bytes(_rba)
+
             # Also resolve string placeholders in table data (LONG-WORD-TABLE,
             # string elements of global tables like INDENTS). Byte-stepped: table
             # data has mixed byte/word layouts.
@@ -1869,8 +2022,10 @@ class ZAssembler:
                     if pos + 1 >= len(story):
                         continue
                     w = (story[pos] << 8) | story[pos + 1]
-                    if 0xF400 <= w <= 0xF7FF:
-                        text = string_data_placeholders.get(w & 0x3FF)
+                    _sde2 = getattr(self, '_string_data_ext', {}) or {}
+                    if 0xF400 <= w <= 0xF7FF or w in _sde2:
+                        text = (string_data_placeholders.get(w & 0x3FF)
+                                if w >= 0xF400 else _sde2.get(w))
                         if text is not None:
                             paddr = string_table.get_packed_address(text, self.version)
                             if paddr is not None:

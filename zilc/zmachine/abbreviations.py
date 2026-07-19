@@ -18,6 +18,44 @@ from collections import Counter
 from typing import List, Tuple, Dict, Optional
 
 
+import collections
+
+_A2_EXTRA = set('\n0123456789.,!?_#\'"/\\-:()')
+
+def _zl(ch):
+    if 'a' <= ch <= 'z' or ch == ' ':
+        return 1
+    if 'A' <= ch <= 'Z':
+        return 2
+    if ch in _A2_EXTRA or ch == '|':
+        return 2
+    return 4
+
+
+def _zlen(s):
+    return sum(_zl(c) for c in s)
+
+
+_MAXL = 30
+_SENT = '\x00'
+
+
+def _add_string_counts(counts, s, sign=1):
+    n = len(s)
+    for i in range(n - 1):
+        if s[i] == _SENT:
+            continue
+        maxj = min(n, i + _MAXL)
+        for j in range(i + 2, maxj + 1):
+            if s[j - 1] == _SENT:
+                break
+            if sign > 0:
+                counts[s[i:j]] += 1
+            else:
+                counts[s[i:j]] -= 1
+
+
+
 class AbbreviationsTable:
     """Manages abbreviation selection and encoding for Z-machine."""
 
@@ -26,56 +64,87 @@ class AbbreviationsTable:
         self.lookup: Dict[str, int] = {}  # Maps string -> abbreviation index
         self.encoded_strings: List[bytes] = []  # Encoded abbreviation strings
 
-    def analyze_strings(self, strings: List[str], max_abbrevs: int = 96) -> None:
-        """
-        Analyze a collection of strings and select best non-overlapping abbreviations.
+    def analyze_strings(self, strings, max_abbrevs=96):
+        _p = getattr(self, 'freq_xzap', None)
+        if _p is not None:
+            # <FREQUENT-WORDS?>: use the game's ZILCH-precomputed freq.xzap
+            # .FSTR abbreviation list (historically exact selection).
+            try:
+                import re as _re
+                _words = [m.group(1) for m in
+                          _re.finditer(r'\.FSTR\s+FSTR\?\d+,"((?:[^"\\]|\\.)*)"',
+                                       open(_p).read())]
+                _words = [w for w in _words if w][:max_abbrevs]
+                if len(_words) >= 8:
+                    self.abbreviations = list(_words)
+                    self.lookup = {w: i for i, w in enumerate(_words)}
+                    return
+            except Exception:
+                pass
+        # Deduplicate: each unique string is stored (and encoded) once.
+        corpus = [s for s in dict.fromkeys(strings) if isinstance(s, str) and len(s) >= 2]
 
-        Args:
-            strings: List of all strings from the game
-            max_abbrevs: Maximum number of abbreviations (default 96 for V3+)
-        """
-        # Find all substrings and count occurrences
-        substring_counts = Counter()
+        # ---- initial counts, Apriori by length to bound memory ----
+        counts = collections.Counter()
+        # length 2 level
+        lvl_prev = collections.Counter()
+        for s in corpus:
+            for i in range(len(s) - 1):
+                lvl_prev[s[i:i + 2]] += 1
+        frequent_prev = {k for k, c in lvl_prev.items() if c >= 2}
+        for k in frequent_prev:
+            counts[k] = lvl_prev[k]
+        for L in range(3, _MAXL + 1):
+            lvl = collections.Counter()
+            for s in corpus:
+                n = len(s)
+                for i in range(n - L + 1):
+                    if s[i:i + L - 1] in frequent_prev:
+                        lvl[s[i:i + L]] += 1
+            frequent_prev = {k for k, c in lvl.items() if c >= 2}
+            if not frequent_prev:
+                break
+            for k in frequent_prev:
+                counts[k] = lvl[k]
 
-        for string in strings:
-            # Generate substrings of various lengths
-            for length in range(2, min(21, len(string) + 1)):
-                for i in range(len(string) - length + 1):
-                    substr = string[i:i+length]
-                    # Only meaningful substrings
-                    if substr.strip() and not substr.isspace():
-                        substring_counts[substr] += 1
+        def score(sub, cnt):
+            z = _zlen(sub)
+            if z <= 2:
+                return -1
+            stored = z + (-z) % 3          # abbrev string padded to a full word
+            return cnt * (z - 2) - stored - 3   # z-char units; 3 ~ table entry
 
-        # Calculate savings for each substring
-        candidates = []
-        for substr, count in substring_counts.items():
-            if count >= 2:  # Lower threshold for more candidates
-                savings = self._calculate_savings(substr, count)
-                if savings > 0:
-                    candidates.append((savings, count, substr))
-
-        # Sort by savings (best first)
-        candidates.sort(reverse=True)
-
-        # Select non-overlapping abbreviations using greedy strategy
+        work = list(corpus)
         self.abbreviations = []
         self.lookup = {}
 
-        for savings, count, substr in candidates:
-            # Check if this candidate overlaps with any already-selected abbreviation
-            overlaps = False
-            for existing in self.abbreviations:
-                if existing in substr or substr in existing:
-                    overlaps = True
-                    break
+        for _pick in range(max_abbrevs):
+            best = None
+            best_score = 0
+            for sub, cnt in counts.items():
+                if cnt < 2:
+                    continue
+                sc = score(sub, cnt)
+                if sc > best_score:
+                    best_score = sc
+                    best = sub
+            if best is None:
+                break
+            idx = len(self.abbreviations)
+            self.abbreviations.append(best)
+            self.lookup[best] = idx
+            # Re-count only affected strings: remove their contributions, apply
+            # the abbreviation (non-overlapping, left-to-right, mirroring the
+            # encoder's greedy application), re-add.
+            for si, s in enumerate(work):
+                if best in s:
+                    _add_string_counts(counts, s, sign=-1)
+                    s2 = s.replace(best, _SENT)
+                    work[si] = s2
+                    _add_string_counts(counts, s2, sign=1)
+            counts.pop(best, None)
 
-            if not overlaps:
-                idx = len(self.abbreviations)
-                self.abbreviations.append(substr)
-                self.lookup[substr] = idx
-
-                if len(self.abbreviations) >= max_abbrevs:
-                    break
+        return
 
     def _calculate_savings(self, substr: str, count: int) -> float:
         """
