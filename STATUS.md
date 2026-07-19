@@ -6,7 +6,7 @@ overrides any status claim in older docs. Reference/spec docs (Z-machine and ZIL
 specs, dialect notes, header/opcode references) live under docs/ and
 tests/test-games/ and are not status reports.
 
-## Session 8 (2026-07-19): 16 -> 20 games, machine migrated to macOS
+## Session 8 (2026-07-19): 16 -> 20 games, machine migrated to macOS, size-reduction pass landed
 
 The zwalker L2 suite (compile ZIL source -> replay a source-matched walkthrough
 -> verified win) is **20/20**: microquest, mazekey, reactor, minizork 350/350,
@@ -33,20 +33,31 @@ lines, TELL quoted-object -> PRINT_OBJ, then fix an 8-bit vocab-placeholder
 overflow (per-occurrence VOC placeholders hit index 256 -> low byte 0 -> aliased
 'hole' to 'all'); deduped by word (294 -> 187). Lockstep-clean over all 394 cmds.
 
-Frontier (diagnosed, not yet winning -- all blocked on zorkie output being ~4KB
-bloated vs the official ZILCH builds, so the fixing feature overflows the cap):
-- **spellbreaker** 440/600, lockstep-clean through cmd 330; 8 general V3 fixes on
-  branch `wip/spellbreaker-v3-8fixes`. Stalls at 'answer dimithio' (needs the
-  THINGS/PSEUDO table, +1.8KB over cap). NOTE: since round-6 restored THINGS for
-  hollywood, spellbreaker (same PSEUDO macro) now needs it too and no longer fits.
-- **trinity** (V4) plays through cmd 7 matching official lockstep; 8 general V4
-  fixes on branch `wip/trinity-v4-8fixes`. Stalls at 'buy bag' (needs the HERE?
-  MULTIFROB DEFMAC unexpanded, +7KB over cap).
-- Both WIP branches are gate-green (pytest 696/3, minizork/zork1 350/350); they
-  merge once a **general size-reduction pass** lands (the single highest-leverage
-  next step -- it also re-fits spellbreaker and unblocks the size bucket below).
-- Size bucket still over the V3 cap: stationfall (~+420), leathergoddesses
-  (x1.zil, ~+1446), plunderedhearts, moonmist, lurkinghorror.
+### Size-reduction pass LANDED (commit "Size reduction ...")
+zorkie output was ~2-6KB heavier than the official ZILCH builds. Three general
+levers closed most of the gap: (1) abbreviation selection now computes both a
+fresh greedy/iterative pass and the ZILCH freq.xzap list and keeps whichever is
+smaller by a DP-optimal cost model (freq.xzap was uniformly WORSE than greedy,
+-2.6..5.1KB/game); (2) peephole rule G (VAR-form 2OP -> long form, -1 byte each);
+(3) VERBS pointer table sized to real entries not a fixed 256. Plus a latent
+table-string byte-scan miscompile fixed (a 0xFC literal low byte -- Suspect's
+-4=0xFFFC -- was misread as a code-string marker; now resolved point-wise).
+Result: **four more games now FIT the V3 cap** -- spellbreaker 129400, stationfall
+127526, leathergoddesses 130066, plunderedhearts 129626 -- and trinity has ~15KB
+of V4 headroom (246316). moonmist (~+950) and lurkinghorror (~+2600) still over.
+
+Frontier (compile+fit; being driven to wins on the reduced base):
+- **spellbreaker** now FITS (129400); 8 general V3 fixes on `wip/spellbreaker-v3-8fixes`
+  take it to 440/600 lockstep-clean; THINGS is restored in main, so merging the 8
+  fixes should clear 'answer dimithio'. (round-7 workflow.)
+- **trinity** (V4) FITS with headroom; 8 general V4 fixes on `wip/trinity-v4-8fixes`
+  + the HERE? MULTIFROB-DEFMAC fix (now affordable) should clear 'buy bag'. (round-7.)
+- **stationfall** FITS; official route replays 61/80 -- needs lockstep diagnosis. (round-7.)
+- **plunderedhearts** FITS; official route replays 7/25 -- needs lockstep diagnosis. (round-7.)
+- **leathergoddesses** FITS (130066) but has no verified route on file yet.
+- Still over the V3 cap: moonmist (~+950), lurkinghorror (~+2600) -- need a second
+  non-string size lever (a CELF marginal-gain abbreviation selector was prototyped
+  but exposed a codegen placeholder bug; the byte-scan fix above may now unblock it).
 - amfv (V4): behavioral death mid-route; a prior fix was incomplete and grew the
   build over the V4 cap -- deferred.
 - planetfall: comptwo.zil is a TRUNCATED historical checkout (ends mid-object at
