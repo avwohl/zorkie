@@ -2135,21 +2135,23 @@ class ZAssembler:
                     code_patched_positions.add(_off + 1)
                 routines = bytes(_rba)
 
-            # Also resolve string placeholders in table data (LONG-WORD-TABLE,
-            # string elements of global tables like INDENTS). Byte-stepped: table
-            # data has mixed byte/word layouts.
-            if (string_placeholders or string_data_placeholders) and table_data_len > 0:
-                self._resolve_string_placeholders_in_story(
-                    story, string_placeholders or {}, string_table,
-                    table_data_start, table_data_len, step=1,
-                    data_placeholders=string_data_placeholders,
-                    skip_positions=table_routine_patched
-                )
-
-            # Point-wise data-string markers inside tables (positions recorded at
-            # encode time -- scanning can't distinguish a marker from a packed
-            # routine address with an 0xF4-0xF7 low byte).
-            if table_string_fixups and string_data_placeholders and table_offsets:
+            # String markers inside TABLE data are resolved ONLY at the exact
+            # offsets the codegen recorded at emission (_table_string_fixups),
+            # NEVER by a byte-stepped scan.  The byte scan for the 0xFC code-
+            # string prefix false-matched the LOW byte of any literal word
+            # ending in 0xFC: Suspect's COCHRANE-LOOP <TABLE 0 6 -4 BALLROOM-1
+            # 6 -4 BALLROOM-9 0> stores -4 as 0xFFFC, and the 'fc 00' straddling
+            # that -4 and the following (small) room number was eaten as string
+            # placeholder 0, corrupting both words with the packed address of
+            # string 0 (a build-dependent value once inline-string offsets
+            # shift).  Data-string (0xF4-0xF7) and code-string (0xFC) markers in
+            # tables are BOTH recorded point-wise below, so a literal is never
+            # confused with a marker that happens to share a marker byte.
+            if table_string_fixups and table_offsets and (
+                    string_data_placeholders or string_placeholders):
+                _sdp = string_data_placeholders or {}
+                _sp = string_placeholders or {}
+                _sde2 = getattr(self, '_string_data_ext', {}) or {}
                 for _tidx, _off in table_string_fixups:
                     if _tidx not in table_offsets:
                         continue
@@ -2161,15 +2163,18 @@ class ZAssembler:
                     if pos + 1 >= len(story):
                         continue
                     w = (story[pos] << 8) | story[pos + 1]
-                    _sde2 = getattr(self, '_string_data_ext', {}) or {}
                     if 0xF400 <= w <= 0xF7FF or w in _sde2:
-                        text = (string_data_placeholders.get(w & 0x3FF)
-                                if w >= 0xF400 else _sde2.get(w))
-                        if text is not None:
-                            paddr = string_table.get_packed_address(text, self.version)
-                            if paddr is not None:
-                                story[pos] = (paddr >> 8) & 0xFF
-                                story[pos + 1] = paddr & 0xFF
+                        text = (_sdp.get(w & 0x3FF) if w >= 0xF400
+                                else _sde2.get(w))
+                    elif 0xFC00 <= w <= 0xFCFF:
+                        text = _sp.get(w & 0xFF)
+                    else:
+                        text = None
+                    if text is not None:
+                        paddr = string_table.get_packed_address(text, self.version)
+                        if paddr is not None:
+                            story[pos] = (paddr >> 8) & 0xFF
+                            story[pos + 1] = paddr & 0xFF
 
             # Also resolve string placeholders in the globals table: a global
             # initialized to a string constant (<GLOBAL X "text">) holds a 0xFC00|idx

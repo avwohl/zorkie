@@ -55,6 +55,50 @@ def _add_string_counts(counts, s, sign=1):
                 counts[s[i:j]] -= 1
 
 
+def _frequent_substrings(corpus):
+    """Count occurrences of every substring (length 2.._MAXL) that appears at
+    least twice, using an Apriori sweep by length to bound memory."""
+    counts = collections.Counter()
+    lvl_prev = collections.Counter()
+    for s in corpus:
+        for i in range(len(s) - 1):
+            lvl_prev[s[i:i + 2]] += 1
+    frequent_prev = {k for k, c in lvl_prev.items() if c >= 2}
+    for k in frequent_prev:
+        counts[k] = lvl_prev[k]
+    for L in range(3, _MAXL + 1):
+        lvl = collections.Counter()
+        for s in corpus:
+            n = len(s)
+            for i in range(n - L + 1):
+                if s[i:i + L - 1] in frequent_prev:
+                    lvl[s[i:i + L]] += 1
+        frequent_prev = {k for k, c in lvl.items() if c >= 2}
+        if not frequent_prev:
+            break
+        for k in frequent_prev:
+            counts[k] = lvl[k]
+    return counts
+
+
+def _dp_zchars(s, by_first):
+    """Minimum z-chars to encode `s` given abbreviations grouped by first
+    character in `by_first` (each reference costs 2 z-chars).  Mirrors the
+    encoder's DP-optimal application."""
+    n = len(s)
+    dp = [0] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        best = dp[i + 1] + _zl(s[i])
+        for a in by_first.get(s[i], ()):
+            L = len(a)
+            if i + L <= n and s.startswith(a, i):
+                c = dp[i + L] + 2
+                if c < best:
+                    best = c
+        dp[i] = best
+    return dp[0]
+
+
 
 class AbbreviationsTable:
     """Manages abbreviation selection and encoding for Z-machine."""
@@ -65,47 +109,74 @@ class AbbreviationsTable:
         self.encoded_strings: List[bytes] = []  # Encoded abbreviation strings
 
     def analyze_strings(self, strings, max_abbrevs=96):
-        _p = getattr(self, 'freq_xzap', None)
-        if _p is not None:
-            # <FREQUENT-WORDS?>: use the game's ZILCH-precomputed freq.xzap
-            # .FSTR abbreviation list (historically exact selection).
-            try:
-                import re as _re
-                _words = [m.group(1) for m in
-                          _re.finditer(r'\.FSTR\s+FSTR\?\d+,"((?:[^"\\]|\\.)*)"',
-                                       open(_p).read())]
-                _words = [w for w in _words if w][:max_abbrevs]
-                if len(_words) >= 8:
-                    self.abbreviations = list(_words)
-                    self.lookup = {w: i for i, w in enumerate(_words)}
-                    return
-            except Exception:
-                pass
         # Deduplicate: each unique string is stored (and encoded) once.
         corpus = [s for s in dict.fromkeys(strings) if isinstance(s, str) and len(s) >= 2]
 
-        # ---- initial counts, Apriori by length to bound memory ----
-        counts = collections.Counter()
-        # length 2 level
-        lvl_prev = collections.Counter()
+        # Compute candidate abbreviation sets and keep whichever encodes the
+        # whole corpus smallest.  A precomputed ZILCH freq.xzap list (if any)
+        # and a fresh greedy/iterative pass frequently disagree on which is
+        # best per game, so both are scored against the real encoded-word cost
+        # (DP-optimal application, per-string padding to a word boundary) and
+        # the cheaper one wins.  Abbreviations are transparent to runtime
+        # behaviour, so any valid set is correct -- only size differs.  The
+        # selection is fully deterministic (no dependence on hash-seed / dict
+        # ordering), so a given source always yields byte-identical output.
+        candidates = []
+        greedy = self._greedy_select(corpus, max_abbrevs)
+        if greedy:
+            candidates.append(greedy)
+        freq = self._freq_select(max_abbrevs)
+        if freq:
+            candidates.append(freq)
+        if not candidates:
+            self.abbreviations = []
+            self.lookup = {}
+            return
+        best = min(candidates, key=lambda ab: self._corpus_cost(corpus, ab))
+        self.abbreviations = list(best)
+        self.lookup = {w: i for i, w in enumerate(best)}
+        return
+
+    def _freq_select(self, max_abbrevs):
+        """ZILCH-precomputed freq.xzap .FSTR abbreviation list, if present."""
+        _p = getattr(self, 'freq_xzap', None)
+        if _p is None:
+            return None
+        try:
+            import re as _re
+            _words = [m.group(1) for m in
+                      _re.finditer(r'\.FSTR\s+FSTR\?\d+,"((?:[^"\\]|\\.)*)"',
+                                   open(_p).read())]
+            _words = [w for w in _words if w][:max_abbrevs]
+            if len(_words) >= 8:
+                return _words
+        except Exception:
+            pass
+        return None
+
+    def _corpus_cost(self, corpus, abbrevs):
+        """Total encoded size of `corpus` under `abbrevs`, in z-chars, with
+        each string padded to a 3-z-char word boundary, plus the cost of
+        storing the abbreviation strings themselves (also padded).  Mirrors the
+        encoder's DP-optimal abbreviation application, so a smaller cost here
+        corresponds to fewer bytes emitted."""
+        by_first = {}
+        for a in abbrevs:
+            if a:
+                by_first.setdefault(a[0], []).append(a)
+        total = 0
         for s in corpus:
-            for i in range(len(s) - 1):
-                lvl_prev[s[i:i + 2]] += 1
-        frequent_prev = {k for k, c in lvl_prev.items() if c >= 2}
-        for k in frequent_prev:
-            counts[k] = lvl_prev[k]
-        for L in range(3, _MAXL + 1):
-            lvl = collections.Counter()
-            for s in corpus:
-                n = len(s)
-                for i in range(n - L + 1):
-                    if s[i:i + L - 1] in frequent_prev:
-                        lvl[s[i:i + L]] += 1
-            frequent_prev = {k for k, c in lvl.items() if c >= 2}
-            if not frequent_prev:
-                break
-            for k in frequent_prev:
-                counts[k] = lvl[k]
+            z = _dp_zchars(s, by_first)
+            total += z + (-z) % 3
+        for a in abbrevs:
+            z = _zlen(a)
+            total += z + (-z) % 3
+        return total
+
+    def _greedy_select(self, corpus, max_abbrevs):
+        """Fresh greedy/iterative abbreviation pass.  Returns a list of
+        abbreviation strings (does not mutate self)."""
+        counts = _frequent_substrings(corpus)
 
         def score(sub, cnt):
             z = _zlen(sub)
@@ -115,24 +186,28 @@ class AbbreviationsTable:
             return cnt * (z - 2) - stored - 3   # z-char units; 3 ~ table entry
 
         work = list(corpus)
-        self.abbreviations = []
-        self.lookup = {}
+        abbreviations = []
 
         for _pick in range(max_abbrevs):
             best = None
-            best_score = 0
+            best_key = None
             for sub, cnt in counts.items():
                 if cnt < 2:
                     continue
                 sc = score(sub, cnt)
-                if sc > best_score:
-                    best_score = sc
+                if sc <= 0:                 # only positive net savings (as before)
+                    continue
+                # Deterministic selection: rank by (score, count, length,
+                # text).  The final text key gives a total order, so the pick
+                # never depends on dict/set iteration order (hash seed) -- the
+                # output is byte-stable across runs.
+                key = (sc, cnt, len(sub), sub)
+                if best_key is None or key > best_key:
+                    best_key = key
                     best = sub
             if best is None:
                 break
-            idx = len(self.abbreviations)
-            self.abbreviations.append(best)
-            self.lookup[best] = idx
+            abbreviations.append(best)
             # Re-count only affected strings: remove their contributions, apply
             # the abbreviation (non-overlapping, left-to-right, mirroring the
             # encoder's greedy application), re-add.
@@ -144,7 +219,7 @@ class AbbreviationsTable:
                     _add_string_counts(counts, s2, sign=1)
             counts.pop(best, None)
 
-        return
+        return abbreviations
 
     def _calculate_savings(self, substr: str, count: int) -> float:
         """

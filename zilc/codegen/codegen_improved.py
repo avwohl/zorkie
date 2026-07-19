@@ -18,7 +18,7 @@ _SZ3_INLINE = 'inline' in _SZ3_LEVERS
 _SZ3_TAIL = 'tail' in _SZ3_LEVERS
 _SZ3_PEEP = (_sz3_os.environ.get('MP_SZ3_PEEP')
              if _sz3_os.environ.get('MP_SZ3_PEEP') is not None
-             else ('DPQSTJLRNBZK' if 'peep' in _SZ3_LEVERS else ''))
+             else ('DPQSTJLRNBZKG' if 'peep' in _SZ3_LEVERS else ''))
 _SZ3_RULES = set((_sz3_os.environ.get('MP_SZ3_RULES') or 'R0,R1,R2,R3').split(','))
 _SZ3_R0 = 'R0' in _SZ3_RULES
 _SZ3_R1 = 'R1' in _SZ3_RULES
@@ -2568,12 +2568,25 @@ class ImprovedCodeGenerator:
         self._table_data_size += len(blob)
         self.tables.append(('_SYNTAX_ENTRIES', bytes(blob), True, False))
 
-        # VERBS: 256-entry word array of pointers, indexed by (255 - verb_number).
+        # VERBS: word array of pointers, indexed by (255 - verb_number).
         # Pointer slots start as zero and are patched positionally by the
         # assembler (table_addr_fixups) to blob_address + block_offset.
+        #
+        # The parser only ever reads VERBS[255 - vnum] for a verb number vnum
+        # that was actually assigned (verb numbers count down from 255, so every
+        # dictionary verb byte holds a number >= min(verb_numbers)). Indices
+        # above 255 - min(verb_numbers) therefore address only trailing zero
+        # slots that no verb can ever select, so dropping them is
+        # behavior-preserving. This trims the classic fixed 512-byte array to
+        # 2 * (256 - min_vnum) bytes.
         verbs_table_index = blob_index + 1
         verbs_data = bytearray()
-        for i in range(256):
+        if verb_numbers:
+            num_slots = 256 - min(verb_numbers.values())
+            num_slots = max(1, min(256, num_slots))
+        else:
+            num_slots = 256
+        for i in range(num_slots):
             vnum = 255 - i
             if vnum in verbnum_to_block_offset:
                 self.table_addr_fixups.append(
@@ -2670,9 +2683,18 @@ class ImprovedCodeGenerator:
             self.tables.append((f'_SYNTAX_ENTRY_{action_num}', bytes(entry_data), True, False))
             entry_table_indices[action_num] = table_index
 
-        # VERBS: array of pointers indexed by (255 - action_num)
+        # VERBS: array of pointers indexed by (255 - action_num). The parser
+        # only reads VERBS[255 - action] for verb action numbers that have a
+        # syntax entry (entry_table_indices); higher indices address trailing
+        # zero slots no verb can select, so we stop at 255 - min(action_num)
+        # instead of always emitting the full 512-byte array.
         verbs_data = bytearray()
-        for i in range(256):
+        if entry_table_indices:
+            num_slots = 256 - min(entry_table_indices.keys())
+            num_slots = max(1, min(256, num_slots))
+        else:
+            num_slots = 256
+        for i in range(num_slots):
             action_num = 255 - i
             if action_num in entry_table_indices:
                 placeholder = self._table_marker(entry_table_indices[action_num])
@@ -2736,7 +2758,6 @@ class ImprovedCodeGenerator:
                 # exact (table, offset) for point-wise resolution.
                 self._string_code_overflow = True
                 str_placeholder_val = self.register_data_string(word.lower())
-                self._table_string_fixups.append((len(self.tables), len(table_data)))
             else:
                 str_placeholder_idx = self._next_string_operand_index
                 self._string_operand_placeholders[str_placeholder_idx] = word.lower()
@@ -2744,6 +2765,15 @@ class ImprovedCodeGenerator:
                 self._next_string_operand_index += 1
                 # String placeholders are 0xFC00 | index (same as routine operands)
                 str_placeholder_val = 0xFC00 | str_placeholder_idx
+
+            # Record the marker's exact (table_idx, byte_offset) so the assembler
+            # resolves it POINT-WISE.  This is the only site that emits a 0xFC00
+            # code-string marker into TABLE data; the byte-stepped table scan that
+            # used to catch it also mis-resolved the 0xFC low byte of a plain
+            # literal like -4 (0xFFFC) in an unrelated table (Suspect's
+            # COCHRANE-LOOP), so the scan is gone and every table string marker
+            # -- data band (0xF4-0xF7) and code band (0xFC) -- is now positional.
+            self._table_string_fixups.append((len(self.tables), len(table_data)))
 
             table_data.append((str_placeholder_val >> 8) & 0xFF)
             table_data.append(str_placeholder_val & 0xFF)
@@ -3979,6 +4009,45 @@ class ImprovedCodeGenerator:
             # whose offset fits the small-constant form) can be re-encoded one
             # byte shorter.  Skipped in round 0 so an infeasible narrowing can
             # never discard the round that carries the other rules' gains.
+            # --- G: a VAR-form 2OP naming exactly two operands, each a small
+            # constant or a variable, re-encodes one byte shorter as a long
+            # 2OP (the type byte is dropped).  Some emit paths always pick the
+            # VAR form for STORE/ADD/SUB/LOADW/JE even when the long form fits;
+            # this reclaims the byte generically.  A large-constant operand
+            # (type 00) is never converted -- it might be an unresolved in-band
+            # placeholder -- so no placeholder byte is ever inside a rewrite,
+            # but we also refuse any instruction that a pending placeholder or
+            # TELL position lands in, belt-and-suspenders.
+            long2 = {}
+            if 'G' in _SZ3_PEEP:
+                _ph = set()
+                for _rel, _idx in self._pending_placeholders:
+                    _ph.add(_rel)
+                for _rel, _idx in self._pending_tell_positions:
+                    _ph.add(_rel)
+                for k, r in enumerate(instrs):
+                    if drop[k] or k in repl or k in jz2:
+                        continue
+                    op = r['op']
+                    if not (0xC0 <= op < 0xE0):
+                        continue
+                    opnum = op & 0x1F
+                    if opnum == 0:
+                        continue
+                    tb = code[r['a'] + 1]
+                    t0 = (tb >> 6) & 3
+                    t1 = (tb >> 4) & 3
+                    t2 = (tb >> 2) & 3
+                    if t2 != 3 or t0 not in (1, 2) or t1 not in (1, 2):
+                        continue
+                    if any(r['a'] <= p < r['n'] for p in _ph):
+                        continue
+                    o1 = code[r['a'] + 2]
+                    o2 = code[r['a'] + 3]
+                    long_op = (((1 if t0 == 2 else 0) << 6)
+                               | ((1 if t1 == 2 else 0) << 5) | opnum)
+                    long2[k] = (long_op, o1, o2)
+
             # --- A: thread a branch/jump whose target is an unconditional
             # JUMP straight through to that jump's own target; the jump then
             # usually becomes unreachable and rule D removes it.
@@ -3999,7 +4068,7 @@ class ImprovedCodeGenerator:
                         depth += 1
                     return addr
                 for k, r in enumerate(instrs):
-                    if drop[k] or k in repl or k in jz2:
+                    if drop[k] or k in repl or k in jz2 or k in long2:
                         continue
                     if r['branch_pos'] is not None and r['branch_off'] not in (0, 1):
                         t0 = r['n'] + r['branch_off'] - 2
@@ -4019,7 +4088,7 @@ class ImprovedCodeGenerator:
             force_br = {}
             if 'B' in _SZ3_PEEP:
                 for k, r in enumerate(instrs):
-                    if (drop[k] or k in repl or k in jz2
+                    if (drop[k] or k in repl or k in jz2 or k in long2
                             or r['branch_pos'] is None
                             or r['branch_off'] in (0, 1)
                             or r['branch_pos'] + r['branch_len'] != r['n']):
@@ -4037,7 +4106,8 @@ class ImprovedCodeGenerator:
             narrow_j = set()
             if 'N' in _SZ3_PEEP and _round > 0:
                 for k, r in enumerate(instrs):
-                    if drop[k] or k in repl or k in force_br or k in jz2:
+                    if (drop[k] or k in repl or k in force_br or k in jz2
+                            or k in long2):
                         continue
                     if (r['branch_pos'] is not None and r['branch_len'] == 2
                             and 2 <= r['branch_off'] <= 63
@@ -4052,7 +4122,7 @@ class ImprovedCodeGenerator:
                         narrow_j.add(k)
 
             if (not any(drop) and not repl and not narrow_b and not narrow_j
-                    and not force_br and not retarget and not jz2):
+                    and not force_br and not retarget and not jz2 and not long2):
                 return routine_code
 
             # --- rebuild -------------------------------------------------------
@@ -4066,7 +4136,7 @@ class ImprovedCodeGenerator:
                     # 3-byte jz+1B branch -> 2-byte small jump;
                     # 4-byte jz+2B branch -> 3-byte large jump
                     new_len[k] = (r['n'] - r['a']) - 1
-                elif k in narrow_b or k in narrow_j:
+                elif k in narrow_b or k in narrow_j or k in long2:
                     new_len[k] = (r['n'] - r['a']) - 1
                 elif k in force_br:
                     new_len[k] = (r['n'] - r['a']) - (r['branch_len'] - 1)
@@ -4122,6 +4192,40 @@ class ImprovedCodeGenerator:
                         u = off & 0xFFFF
                         pieces.append(bytearray([0x8C, (u >> 8) & 0xFF,
                                                  u & 0xFF]))
+                    continue
+                if k in long2:
+                    long_op, o1, o2 = long2[k]
+                    # long prefix (3 bytes) + original tail (store byte and/or
+                    # branch bytes) which sat after the two operands at a+4
+                    nb = bytearray([long_op, o1, o2])
+                    nb.extend(code[r['a'] + 4:r['n']])
+                    if (r['branch_pos'] is not None
+                            and r['branch_off'] not in (0, 1)):
+                        t = new_target(r['n'] + r['branch_off'] - 2)
+                        if t is None:
+                            ok = False
+                            break
+                        after = base + new_len[k]
+                        off = t - after + 2
+                        bp = (r['branch_pos'] - r['a']) - 1
+                        if r['branch_len'] == 1:
+                            if not (2 <= off <= 63):
+                                ok = False
+                                break
+                            bb = (0x80 if r['branch_on'] else 0) | 0x40 | off
+                            if bb >= 0xF0:
+                                ok = False
+                                break
+                            nb[bp] = bb
+                        else:
+                            if not (-8192 <= off <= 8191) or off in (0, 1):
+                                ok = False
+                                break
+                            u = off & 0x3FFF
+                            nb[bp] = ((0x80 if r['branch_on'] else 0)
+                                      | ((u >> 8) & 0x3F))
+                            nb[bp + 1] = u & 0xFF
+                    pieces.append(nb)
                     continue
                 if k in force_br:
                     bp = r['branch_pos'] - r['a']
@@ -4210,7 +4314,7 @@ class ImprovedCodeGenerator:
             posmap = {}
             for k, r in enumerate(instrs):
                 if (drop[k] or (k in repl and k not in repl_same)
-                        or k in narrow_j or k in jz2):
+                        or k in narrow_j or k in jz2 or k in long2):
                     continue
                 lim = ((r['branch_pos'] - r['a'])
                        if (k in narrow_b or k in force_br) else (r['n'] - r['a']))
