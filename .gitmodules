@@ -1,0 +1,153 @@
+[submodule "tests/test-games/beyondzork"]
+	path = tests/test-games/beyondzork
+	url = https://github.com/historicalsource/beyondzork.git
+[submodule "tests/test-games/bureaucracy"]
+	path = tests/test-games/bureaucracy
+	url = https://github.com/historicalsource/bureaucracy.git
+[submodule "tests/test-games/enchanter"]
+	path = tests/test-games/enchanter
+	url = https://github.com/historicalsource/enchanter.git
+[submodule "tests/test-games/infocom-zil/abyss"]
+	path = tests/test-games/infocom-zil/abyss
+	url = https://github.com/historicalsource/abyss.git
+[submodule "tests/test-games/infocom-zil/amfv"]
+	path = tests/test-games/infocom-zil/amfv
+	url = https://github.com/historicalsource/amfv.git
+[submodule "tests/test-games/infocom-zil/arthur"]
+	path = tests/test-games/infocom-zil/arthur
+	url = https://github.com/historicalsource/arthur.git
+[submodule "tests/test-games/infocom-zil/ballyhoo"]
+	path = tests/test-games/infocom-zil/ballyhoo
+	url = https://github.com/historicalsource/ballyhoo.git
+[submodule "tests/test-games/infocom-zil/beyondzork"]
+	path = tests/test-games/infocom-zil/beyondzork
+	url = https://github.com/historicalsource/beyondzork.git
+[submodule "tests/test-games/infocom-zil/borderzone"]
+	path = tests/test-games/infocom-zil/borderzone
+	url = https://github.com/historicalsource/borderzone.git
+[submodule "tests/test-games/infocom-zil/bureaucracy"]
+	path = tests/test-games/infocom-zil/bureaucracy
+	url = https://github.com/historicalsource/bureaucracy.git
+[submodule "tests/test-games/infocom-zil/checkpoint"]
+	path = tests/test-games/infocom-zil/checkpoint
+	url = https://github.com/historicalsource/checkpoint.git
+[submodule "tests/test-games/infocom-zil/cutthroats"]
+	path = tests/test-games/infocom-zil/cutthroats
+	url = https://github.com/historicalsource/cutthroats.git
+[submodule "tests/test-games/infocom-zil/deadline"]
+	path = tests/test-games/infocom-zil/deadline
+	url = https://github.com/historicalsource/deadline.git
+[submodule "tests/test-games/infocom-zil/enchanter"]
+	path = tests/test-games/infocom-zil/enchanter
+	url = https://github.com/historicalsource/enchanter.git
+[submodule "tests/test-games/infocom-zil/hitchhikersguide"]
+	path = tests/test-games/infocom-zil/hitchhikersguide
+	url = https://github.com/historicalsource/hitchhikersguide.git
+[submodule "tests/test-games/infocom-zil/hollywoodhijinx"]
+	path = tests/test-games/infocom-zil/hollywoodhijinx
+	url = https://github.com/historicalsource/hollywoodhijinx.git
+[submodule "tests/test-games/infocom-zil/infidel"]
+	path = tests/test-games/infocom-zil/infidel
+	url = https://github.com/historicalsource/infidel.git
+[submodule "tests/test-games/infocom-zil/infocom-sampler"]
+	path = tests/test-games/infocom-zil/infocom-sampler
+	url = https://github.com/historicalsource/infocom-sampler.git
+[submodule "tests/test-games/infocom-zil/journey"]
+	path = tests/test-games/infocom-zil/journey
+	url = https://github.com/historicalsource/journey.git
+[submodule "tests/test-games/infocom-zil/leathergoddesses"]
+	path = tests/test-games/infocom-zil/leathergoddesses
+	url = https://github.com/historicalsource/leathergoddesses.git
+[submodule "tests/test-games/infocom-zil/lurkinghorror"]
+	path = tests/test-games/infocom-zil/lurkinghorror
+	url = https://github.com/historicalsource/lurkinghorror.git
+[submodule "tests/test-games/infocom-zil/minizork-1982"]
+	path = tests/test-games/infocom-zil/minizork-1982
+	url = https://github.com/historicalsource/minizork-1982.git
+[submodule "tests/test-games/infocom-zil/minizork-1987"]
+	path = tests/test-games/infocom-zil/minizork-1987
+	url = https://github.com/historicalsource/minizork-1987.git
+[submodule "tests/test-games/infocom-zil/moonmist"]
+	path = tests/test-games/infocom-zil/moonmist
+	url = https://github.com/historicalsource/moonmist.git
+[submodule "tests/test-games/infocom-zil/nordandbert"]
+	path = tests/test-games/infocom-zil/nordandbert
+	url = https://github.com/historicalsource/nordandbert.git
+[submodule "tests/test-games/infocom-zil/planetfall"]
+	path = tests/test-games/infocom-zil/planetfall
+	url = https://github.com/historicalsource/planetfall.git
+[submodule "tests/test-games/infocom-zil/plunderedhearts"]
+	path = tests/test-games/infocom-zil/plunderedhearts
+	url = https://github.com/historicalsource/plunderedhearts.git
+[submodule "tests/test-games/infocom-zil/restaurant"]
+	path = tests/test-games/infocom-zil/restaurant
+	url = https://github.com/historicalsource/restaurant.git
+[submodule "tests/test-games/infocom-zil/seastalker"]
+	path = tests/test-games/infocom-zil/seastalker
+	url = https://github.com/historicalsource/seastalker.git
+[submodule "tests/test-games/infocom-zil/sherlock"]
+	path = tests/test-games/infocom-zil/sherlock
+	url = https://github.com/historicalsource/sherlock.git
+[submodule "tests/test-games/infocom-zil/sorcerer"]
+	path = tests/test-games/infocom-zil/sorcerer
+	url = https://github.com/historicalsource/sorcerer.git
+[submodule "tests/test-games/infocom-zil/spellbreaker"]
+	path = tests/test-games/infocom-zil/spellbreaker
+	url = https://github.com/historicalsource/spellbreaker.git
+[submodule "tests/test-games/infocom-zil/starcross"]
+	path = tests/test-games/infocom-zil/starcross
+	url = https://github.com/historicalsource/starcross.git
+[submodule "tests/test-games/infocom-zil/stationfall"]
+	path = tests/test-games/infocom-zil/stationfall
+	url = https://github.com/historicalsource/stationfall.git
+[submodule "tests/test-games/infocom-zil/suspect"]
+	path = tests/test-games/infocom-zil/suspect
+	url = https://github.com/historicalsource/suspect.git
+[submodule "tests/test-games/infocom-zil/suspended"]
+	path = tests/test-games/infocom-zil/suspended
+	url = https://github.com/historicalsource/suspended.git
+[submodule "tests/test-games/infocom-zil/trinity"]
+	path = tests/test-games/infocom-zil/trinity
+	url = https://github.com/historicalsource/trinity.git
+[submodule "tests/test-games/infocom-zil/wishbringer"]
+	path = tests/test-games/infocom-zil/wishbringer
+	url = https://github.com/historicalsource/wishbringer.git
+[submodule "tests/test-games/infocom-zil/witness"]
+	path = tests/test-games/infocom-zil/witness
+	url = https://github.com/historicalsource/witness.git
+[submodule "tests/test-games/infocom-zil/zilf"]
+	path = tests/test-games/infocom-zil/zilf
+	url = https://github.com/taradinoc/zilf.git
+[submodule "tests/test-games/infocom-zil/zork1"]
+	path = tests/test-games/infocom-zil/zork1
+	url = https://github.com/historicalsource/zork1.git
+[submodule "tests/test-games/infocom-zil/zork2"]
+	path = tests/test-games/infocom-zil/zork2
+	url = https://github.com/historicalsource/zork2.git
+[submodule "tests/test-games/infocom-zil/zork3"]
+	path = tests/test-games/infocom-zil/zork3
+	url = https://github.com/historicalsource/zork3.git
+[submodule "tests/test-games/infocom-zil/zorkzero"]
+	path = tests/test-games/infocom-zil/zorkzero
+	url = https://github.com/historicalsource/zorkzero.git
+[submodule "tests/test-games/sherlock"]
+	path = tests/test-games/sherlock
+	url = https://github.com/historicalsource/sherlock.git
+[submodule "tests/test-games/zilf"]
+	path = tests/test-games/zilf
+	url = https://github.com/taradinoc/zilf.git
+[submodule "tests/test-games/zork-german"]
+	path = tests/test-games/zork-german
+	url = https://github.com/historicalsource/zork-german.git
+[submodule "tests/test-games/zork1"]
+	path = tests/test-games/zork1
+	url = https://github.com/historicalsource/zork1.git
+[submodule "tests/test-games/zork2"]
+	path = tests/test-games/zork2
+	url = https://github.com/historicalsource/zork2.git
+[submodule "tests/test-games/zork3"]
+	path = tests/test-games/zork3
+	url = https://github.com/historicalsource/zork3.git
+[submodule "tests/test-games/zorkzero"]
+	path = tests/test-games/zorkzero
+	url = https://github.com/historicalsource/zorkzero.git
