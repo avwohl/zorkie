@@ -2544,9 +2544,15 @@ class ZILCompiler:
                 flags[original] = flags[alias]
 
         # Standard property assignments (must match _build_object_table prop_map)
-        # Only DESC and LDESC are pre-defined; others are assigned dynamically
+        # Only DESC and LDESC are pre-defined; others are assigned dynamically.
+        # DESC is a PSEUDO-property (number 0): the short name lives in the
+        # property-table header, never in a numbered property block, so slot 1
+        # stays reclaimable as a spill slot when the sequential range runs into
+        # the direction properties (ZILCH fits e.g. hollywood's 19 numbered
+        # properties + 12 directions in V3's 31 slots only because DESC/SDESC
+        # take no slot; keeping DESC at 1 made CONTFCN collide with P?OUT).
         properties = {
-            'P?DESC': 1,
+            'P?DESC': 0,
             'P?LDESC': 2,
         }
         next_prop = 3  # Custom properties start at 3
@@ -2713,19 +2719,30 @@ class ZILCompiler:
         # Sort by object number (same order as extract_properties is called)
         all_items_sorted = sorted(all_items, key=lambda x: obj_name_to_num.get(x[0], 0))
 
-        # Now iterate in the same order as object building
+        # Now iterate in the same order as object building.
+        # next_prop == low_direction would COLLIDE with the lowest direction
+        # property (the old `>` check allowed it: hollywood's 20th property
+        # CONTFCN got 20 == P?OUT, so PERFORM's <GETP <LOC .O> ,P?CONTFCN>
+        # fetched the OUT exit byte and APPLYed a garbage address). When the
+        # sequential range is exhausted, spill ONE property into slot 1 --
+        # free because DESC is header-only (must mirror compile_string).
+        slot1_free = 1 not in properties.values()
         for name, obj, is_room, _ in all_items_sorted:
             for key in obj.properties.keys():
                 if key not in reserved_props:
                     prop_name = f'P?{key}'
                     if prop_name not in properties:
-                        if next_prop > low_direction:
+                        if next_prop < low_direction:
+                            properties[prop_name] = next_prop
+                            next_prop += 1
+                        elif slot1_free:
+                            properties[prop_name] = 1
+                            slot1_free = False
+                        else:
                             raise ValueError(
                                 f"ZIL0404: too many properties defined "
                                 f"(max {low_direction - 1} in V{self.version})"
                             )
-                        properties[prop_name] = next_prop
-                        next_prop += 1
 
         # Parser part-of-speech constants (matching dictionary flag bits)
         parser_constants = {
@@ -3994,11 +4011,47 @@ class ZILCompiler:
         dict_word_offsets = dictionary.get_word_offsets()
         self.log(f"  Dictionary contains {len(dictionary.words)} words")
 
+        # Pre-register VOC words embedded in object/room property values
+        # (e.g. THINGS pseudo tables built by <MAPF ,PLTABLE ...>): those
+        # tables are ENCODED during object building, long AFTER this
+        # dictionary is finalized. Discovering a word only then forces a
+        # 'buzz' add mid-placeholder-resolution, which re-sorts the
+        # dictionary and stales every previously recorded word offset
+        # (all SYNONYM property fixups shift; every noun lookup breaks).
+        # Collect them now so they are part of the initial build.
+        def _prescan_voc_forms(v):
+            from .parser.ast_nodes import (FormNode as _F, AtomNode as _A,
+                                           StringNode as _S, TableNode as _T)
+            if isinstance(v, _T):
+                for el in v.values:
+                    _prescan_voc_forms(el)
+            elif isinstance(v, _F):
+                if (isinstance(v.operator, _A)
+                        and v.operator.value.upper() == 'VOC'
+                        and v.operands):
+                    wn = v.operands[0]
+                    w = wn.value.lower() if isinstance(wn, (_S, _A)) else None
+                    if w:
+                        pos = None
+                        if len(v.operands) >= 2 and isinstance(v.operands[1], _A):
+                            pos = v.operands[1].value.upper()
+                        if not hasattr(codegen, '_voc_words'):
+                            codegen._voc_words = {}
+                        codegen._voc_words.setdefault(w, pos)
+                for o in v.operands:
+                    _prescan_voc_forms(o)
+            elif isinstance(v, (list, tuple)):
+                for el in v:
+                    _prescan_voc_forms(el)
+        for _pv_obj in program.objects + program.rooms:
+            for _pv in _pv_obj.properties.values():
+                _prescan_voc_forms(_pv)
+
         # Add VOC words with their part-of-speech to dictionary
         voc_words = codegen.get_voc_words()
         for word, pos_type in voc_words.items():
             # Map VOC part-of-speech to dictionary word type
-            if pos_type == 'ADJ':
+            if pos_type in ('ADJ', 'ADJECTIVE'):
                 # Adjective - set adjective flags
                 dictionary.add_word(word, 'adjective')
             elif pos_type == 'VERB':
@@ -4348,9 +4401,14 @@ class ZILCompiler:
                         self.log(f"  Warning: Too many flags, ignoring {flag}")
             return attr_mask
 
-        # Build property mapping from PROPDEF declarations
+        # Build property mapping from PROPDEF declarations.
+        # DESC is a PSEUDO-property: its string is the property-table header
+        # short name and is NEVER emitted as a numbered property block, so it
+        # gets pseudo-number 0 (build_property_table reads key 0 for the
+        # header and excludes it from the numbered list). Slot 1 is thereby
+        # reclaimable as a spill slot -- see alloc_spill_prop_num below.
         prop_map = {
-            'DESC': 1,    # Standard property always #1
+            'DESC': 0,    # Pseudo: short-name header only
             'LDESC': 2,   # Standard property always #2
         }
         next_prop_num = 3
@@ -4386,6 +4444,30 @@ class ZILCompiler:
                 prop_map[propdef.name] = next_prop_num
                 next_prop_num += 1
                 self.log(f"  PROPDEF {propdef.name} -> property #{prop_map[propdef.name]}")
+
+        # Auto-assignment for properties first seen on objects. Sequential
+        # numbers must stop BELOW low_direction (a number == low_direction is
+        # the lowest direction property: hollywood's 20th property CONTFCN
+        # landed on P?OUT, so GETP P?CONTFCN fetched the OUT exit byte and
+        # PERFORM APPLYed a garbage address). When the range is exhausted,
+        # spill ONE property into slot 1, which is free because DESC is
+        # header-only. MUST mirror _build_symbol_tables' assignment exactly.
+        _slot1_spill = {'free': True}
+
+        def alloc_spill_prop_num(key):
+            nonlocal next_prop_num
+            if next_prop_num < low_direction:
+                num = next_prop_num
+                next_prop_num += 1
+                return num
+            if _slot1_spill['free']:
+                _slot1_spill['free'] = False
+                self.log(f"  Property {key} spilled to reclaimed slot 1")
+                return 1
+            raise ValueError(
+                f"ZIL0404: too many properties defined "
+                f"(max {low_direction - 1} in V{self.version})"
+            )
 
         # Track dictionary word fixups for object properties
         # Each entry is (word, property_offset) - to be resolved during assembly
@@ -4647,10 +4729,8 @@ class ZILCompiler:
                             if not hasattr(codegen, '_voc_words'):
                                 codegen._voc_words = {}
                             codegen._voc_words[word_lower] = pos_type
-                            # Use codegen's vocab placeholder system
-                            placeholder_idx = codegen._next_vocab_placeholder_index
-                            codegen._vocab_placeholders[placeholder_idx] = word_lower
-                            codegen._next_vocab_placeholder_index += 1
+                            # Use codegen's vocab placeholder system (deduped by word)
+                            placeholder_idx = codegen._intern_vocab_placeholder(word_lower)
                             # Store placeholder value (will be resolved to dict address)
                             placeholder_val = 0xFB00 | placeholder_idx
                             result.extend([(placeholder_val >> 8) & 0xFF,
@@ -4968,8 +5048,7 @@ class ZILCompiler:
                     # against the word, PUTP the routine into PSEUDO-OBJECT.
                     # V3 property cap (8 bytes) allows two pairs.
                     if key not in prop_map:
-                        prop_map[key] = next_prop_num
-                        next_prop_num += 1
+                        prop_map[key] = alloc_spill_prop_num(key)
                     prop_num = prop_map[key]
                     from .parser.ast_nodes import StringNode as _SN3, AtomNode as _AN3
                     items = list(value) if isinstance(value, (list, tuple)) else [value]
@@ -5005,8 +5084,7 @@ class ZILCompiler:
                     # local-global was out of scope -> "open window" gave a bogus
                     # "[Which window do you mean, the sand?]".
                     if 'GLOBAL' not in prop_map:
-                        prop_map['GLOBAL'] = next_prop_num
-                        next_prop_num += 1
+                        prop_map['GLOBAL'] = alloc_spill_prop_num('GLOBAL')
                     prop_num = prop_map['GLOBAL']
                     nums = bytearray()
                     for item in (value if isinstance(value, list) else [value]):
@@ -5108,7 +5186,7 @@ class ZILCompiler:
                     # Extract value from AST node
                     elif hasattr(value, 'value'):
                         from .parser.ast_nodes import StringNode as _SN
-                        if isinstance(value, _SN) and prop_num != 1:
+                        if isinstance(value, _SN) and prop_num != 0:
                             # A string-valued property (LDESC/FDESC/TEXT...) holds
                             # the PACKED ADDRESS of the string -- game code does
                             # <TELL <GETP obj P?LDESC>> (print_paddr). Storing the
@@ -5126,9 +5204,8 @@ class ZILCompiler:
                 elif key not in ['FLAGS', 'IN', 'LOC']:
                     # Unknown property, assign next number
                     if key not in prop_map:
-                        prop_map[key] = next_prop_num
-                        self.log(f"  Auto-assigned {key} -> property #{next_prop_num}")
-                        next_prop_num += 1
+                        prop_map[key] = alloc_spill_prop_num(key)
+                        self.log(f"  Auto-assigned {key} -> property #{prop_map[key]}")
                     prop_num = prop_map[key]
                     # Check for TABLE/ITABLE/LTABLE/PTABLE FormNode - compile the table
                     if self._is_table_form(value):
@@ -5148,7 +5225,7 @@ class ZILCompiler:
                             else (0xF900 | (table_idx - 0x100))
                     elif hasattr(value, 'value'):
                         from .parser.ast_nodes import StringNode as _SN
-                        if isinstance(value, _SN) and prop_num != 1:
+                        if isinstance(value, _SN) and prop_num != 0:
                             # String property -> packed-address marker (see above).
                             w = _register_prop_string(value.value)
                             props[prop_num] = bytes([(w >> 8) & 0xFF, w & 0xFF])

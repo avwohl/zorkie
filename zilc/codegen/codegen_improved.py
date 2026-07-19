@@ -518,6 +518,13 @@ class ImprovedCodeGenerator:
         # Placeholders are encoded as 0xFB + index (high byte) + index (low byte)
         self._vocab_placeholders: Dict[int, str] = {}
         self._next_vocab_placeholder_index = 0
+        # Reverse map word -> placeholder_index so repeats REUSE one index
+        # (see _intern_vocab_placeholder). A vocab marker is a single word
+        # 0xFB00|idx and every scan keeps only its LOW 8 bits, so minting a
+        # fresh index per VOC occurrence let hollywood reach 294 markers and
+        # its 257th (the Closet THINGS <VOC "HOLE" NOUN>) truncated to low
+        # byte 0 -- resolving to whatever word held index 0 ("all").
+        self._vocab_word_to_index: Dict[str, int] = {}
         # Track vocab placeholder positions for resolution (routine_name, offset, placeholder_idx)
         self._vocab_placeholder_positions: List[Tuple[str, int, int]] = []
 
@@ -2367,9 +2374,7 @@ class ImprovedCodeGenerator:
             # Write word/prep pairs - sorted by prep number for consistency
             for word, prep_num in sorted(entries.items(), key=lambda x: x[1]):
                 # Word address placeholder (0xFB00 | index)
-                placeholder_idx = self._next_vocab_placeholder_index
-                self._vocab_placeholders[placeholder_idx] = word.lower()
-                self._next_vocab_placeholder_index += 1
+                placeholder_idx = self._intern_vocab_placeholder(word)
                 placeholder_val = 0xFB00 | placeholder_idx
                 self._table_vocab_indices.add(placeholder_idx & 0xFF)
 
@@ -2515,7 +2520,15 @@ class ImprovedCodeGenerator:
             verbnum_to_block_offset[vnum] = len(blob)
             struct.append(len(lines) & 0xFF)  # byte 0: number of syntax lines
 
-            for line in lines:
+            # ZILCH stored each verb's syntax lines in REVERSE definition
+            # order (verified in the official zork1 CLIMB and hollywood JUMP
+            # tables). SYNTAX-CHECK's GWIM fallback overwrites DRIVE1/DRIVE2
+            # on every candidate line, so the LAST entry scanned wins --
+            # reversal makes that the FIRST-DEFINED line. Emitting in source
+            # order made bare 'dive' (JUMP with 7 lines) pick 'JUMP OFF
+            # OBJECT' instead of 'JUMP OBJECT (FIND RLANDBIT)' and orphan
+            # with "[Whom do you want to dive off?]".
+            for line in reversed(lines):
                 nobj = int(line.get('num_objects', 0) or 0)
                 prep1 = int(line.get('prep1', 0) or 0)
                 prep2 = int(line.get('prep2', 0) or 0)
@@ -2704,9 +2717,7 @@ class ImprovedCodeGenerator:
         # For each long word: word_addr + string
         for word in sorted(long_words):
             # Word address placeholder (0xFB00 | index)
-            placeholder_idx = self._next_vocab_placeholder_index
-            self._vocab_placeholders[placeholder_idx] = word.lower()
-            self._next_vocab_placeholder_index += 1
+            placeholder_idx = self._intern_vocab_placeholder(word)
             placeholder_val = 0xFB00 | placeholder_idx
             self._table_vocab_indices.add(placeholder_idx & 0xFF)
 
@@ -4658,6 +4669,14 @@ class ImprovedCodeGenerator:
                         'PRINTI', 'PRINT', 'PRINTR', 'PRINTC', 'PRINTB', 'PRINTD',
                         'PRINTN', 'PRINTT', 'PRINTU', 'CRLF', 'TELL',
                         'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
+                        # FSET/FCLEAR are truthy void ops in ZILCH, same as in
+                        # the COND-clause void_ops set. Missing here, a routine
+                        # ending in one hit the RET_POPPED fallback and
+                        # returned empty-stack garbage: hollywood's
+                        # ELEVATOR-OPERATOR ends in 4 FCLEARs, so PEG-F's
+                        # action returned FALSE and PERFORM appended the
+                        # default "Pulling ... has no effect."
+                        'FSET', 'FCLEAR',
                         'QUIT', 'RESTART', 'CLEAR', 'SCREEN', 'ERASE', 'COLOR',
                         'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
                         'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE',
@@ -5785,6 +5804,41 @@ class ImprovedCodeGenerator:
                 pattern_idx += 1
                 continue
 
+            # <BYTE ...> / <WORD ...> element FORMS (ZILCH TABLE syntax).
+            # Each form is ONE table element of the forced width; multiple
+            # operands OR together into that single element (hollywood's
+            # HM-TABLE maze map writes <BYTE ,X-W ,X-S ,X-E ,X-N> for a
+            # 4-exit cell; the official binary stores the folded byte 15).
+            # These previously fell through to the generic value path, which
+            # emitted one zero WORD per form -- the maze map became all
+            # zeros at twice the length, so every maze move hit a hedge.
+            force_word = False
+            if (isinstance(val, FormNode)
+                    and isinstance(val.operator, AtomNode)
+                    and val.operator.value.upper() in ('BYTE', 'WORD')
+                    and val.operands):
+                if val.operator.value.upper() == 'BYTE':
+                    folded = 0
+                    for op_node in val.operands:
+                        folded |= self._get_table_value_int(op_node) & 0xFFFF
+                    table_data.append(folded & 0xFF)
+                    i += 1
+                    pattern_idx += 1
+                    continue
+                if len(val.operands) > 1:
+                    folded = 0
+                    for op_node in val.operands:
+                        folded |= self._get_table_value_int(op_node) & 0xFFFF
+                    table_data.extend(struct.pack('>H', folded & 0xFFFF))
+                    i += 1
+                    pattern_idx += 1
+                    continue
+                # Single-operand <WORD x>: unwrap and continue through the
+                # generic word path so marker offsets (strings, routines,
+                # vocab) are still recorded at the exact emitted position.
+                val = val.operands[0]
+                force_word = True
+
             # Determine byte vs word based on pattern or default
             use_byte = default_is_byte
             if pattern:
@@ -5798,6 +5852,8 @@ class ImprovedCodeGenerator:
                 else:
                     # Past pattern length, use REST type if available
                     use_byte = rest_is_byte
+            if force_word:
+                use_byte = False
 
             if not use_byte:
                 # Nested anonymous table element -> positional pointer fixup
@@ -5955,6 +6011,28 @@ class ImprovedCodeGenerator:
         else:
             return 0
 
+    def _intern_vocab_placeholder(self, word: str) -> int:
+        """Allocate (or REUSE) a vocab placeholder index for `word`.
+
+        A vocab reference is emitted as the single word 0xFB00|idx, and every
+        placeholder scan (code/table/globals) recovers the index from just the
+        low byte (idx & 0xFF). Minting a new index per VOC *occurrence* is
+        therefore capped at 256 distinct live markers; hollywood minted 294
+        (11x "then", 8x "all", 2x "hole", ...) and index 256 wrapped to 0.
+        Routine and string-data placeholders already dedup by identity -- do
+        the same here so the count is the number of DISTINCT words (187 for
+        hollywood, comfortably < 256). Same word => same dictionary address,
+        so reuse is always correct.
+        """
+        word = word.lower()
+        idx = self._vocab_word_to_index.get(word)
+        if idx is None:
+            idx = self._next_vocab_placeholder_index
+            self._next_vocab_placeholder_index += 1
+            self._vocab_placeholders[idx] = word
+            self._vocab_word_to_index[word] = idx
+        return idx
+
     def _extract_voc_word(self, form: FormNode) -> Optional[str]:
         """Extract the word string from a VOC form.
 
@@ -6023,10 +6101,8 @@ class ImprovedCodeGenerator:
             self._voc_words = {}  # word -> part-of-speech type
         self._voc_words[word] = pos_type
 
-        # Create vocabulary placeholder
-        placeholder_idx = self._next_vocab_placeholder_index
-        self._vocab_placeholders[placeholder_idx] = word
-        self._next_vocab_placeholder_index += 1
+        # Create vocabulary placeholder (deduped by word)
+        placeholder_idx = self._intern_vocab_placeholder(word)
 
         # Return placeholder value (0xFB00 | idx)
         return 0xFB00 | placeholder_idx
@@ -6805,6 +6881,25 @@ class ImprovedCodeGenerator:
                         f"Unknown token '{op.value}' in TELL. Use ,{op.value} for global "
                         f"references or a quoted string for literals."
                     )
+
+            elif (isinstance(op, FormNode) and self._is_quote_form(op)
+                    and op.operands and isinstance(op.operands[0], AtomNode)
+                    and op.operands[0].value in self.objects):
+                # ZILCH TELL: a QUOTED atom naming an object prints the
+                # object's short description (PRINT_OBJ), like D ,obj.
+                # hollywood's <TELL "A " 'BUCKET " is hanging..."> otherwise
+                # fell into the generic form path, which print_paddr'd the
+                # object NUMBER and sprayed z-garbage into the closet
+                # description.
+                onum = self.objects[op.operands[0].value]
+                if 0 <= onum <= 255:
+                    code.append(0x9A)          # PRINT_OBJ, small constant
+                    code.append(onum & 0xFF)
+                else:
+                    code.append(0x8A)          # PRINT_OBJ, large constant
+                    code.append((onum >> 8) & 0xFF)
+                    code.append(onum & 0xFF)
+                i += 1
 
             elif isinstance(op, FormNode):
                 # Form (likely GVAL/LVAL or similar) - generate and print result
@@ -8226,9 +8321,7 @@ class ImprovedCodeGenerator:
                 # Process backslash escapes and German language escapes if compiler available
                 if self.compiler and hasattr(self.compiler, '_unescape_vocab_word'):
                     word = self.compiler._unescape_vocab_word(word)
-                placeholder_idx = self._next_vocab_placeholder_index
-                self._vocab_placeholders[placeholder_idx] = word
-                self._next_vocab_placeholder_index += 1
+                placeholder_idx = self._intern_vocab_placeholder(word)
                 # Track position for resolution (will be filled in during code generation)
                 # Return large constant placeholder (0xFB00 | index)
                 return (0, 0xFB00 | placeholder_idx)
@@ -8398,9 +8491,7 @@ class ImprovedCodeGenerator:
                 # Process backslash escapes and German language escapes if compiler available
                 if self.compiler and hasattr(self.compiler, '_unescape_vocab_word'):
                     word = self.compiler._unescape_vocab_word(word)
-                placeholder_idx = self._next_vocab_placeholder_index
-                self._vocab_placeholders[placeholder_idx] = word
-                self._next_vocab_placeholder_index += 1
+                placeholder_idx = self._intern_vocab_placeholder(word)
                 # Return large constant placeholder (0xFB00 | index)
                 return (0, 0xFB00 | placeholder_idx)
             elif node.name in self.globals:
@@ -8516,9 +8607,7 @@ class ImprovedCodeGenerator:
                 else:
                     # Word names like COMMA -> "comma"
                     word = name_part.lower()
-                placeholder_idx = self._next_vocab_placeholder_index
-                self._vocab_placeholders[placeholder_idx] = word
-                self._next_vocab_placeholder_index += 1
+                placeholder_idx = self._intern_vocab_placeholder(word)
                 # Return large constant placeholder (0xFB00 | index)
                 return (0, 0xFB00 | placeholder_idx)
             # Unknown atom - warn and default to 0

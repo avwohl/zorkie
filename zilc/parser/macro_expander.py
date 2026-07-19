@@ -1626,6 +1626,15 @@ class MDLEvaluator:
             return len(val) > 0
         if isinstance(val, AtomNode):
             return val.value.upper() not in ('FALSE', '<>')
+        if isinstance(val, FormNode):
+            # A bare <> (or ()) literal is MDL FALSE. hollywood's PSEUDO
+            # tuples use <> for "no adjective": <COND (<NTH .OBJ 1> ...)>
+            # must NOT take the clause, else SPNAME of FALSE fabricates an
+            # empty-string VOC entry instead of a 0 element.
+            if (isinstance(val.operator, AtomNode)
+                    and val.operator.value in ('<>', '()')
+                    and not val.operands):
+                return False
         return True
 
 
@@ -2243,6 +2252,39 @@ class MacroExpander:
             if has_function:
                 # Evaluate with MDL evaluator
                 result = self.mdl_evaluator.evaluate(node, bindings)
+                # MAPF's COLLECTOR decides the result shape. A table-builder
+                # collector (<MAPF ,PLTABLE ...>) yields a TABLE of the
+                # collected elements: hollywood's <DEFINE PSEUDO ...> builds
+                # each room's P?THINGS pseudo-object table that way. Dropping
+                # the collector wrapped the elements in <PROG ()>, which is
+                # not encodable as a property value, so the THINGS property
+                # silently vanished and no pseudo ("hole", "cellar", ...)
+                # was ever in scope. FALSE elements become 0 words (the
+                # classic parser compares them against P-ADJN).
+                coll = node.operands[0] if node.operands else None
+                coll_name = None
+                if isinstance(coll, GlobalVarNode):
+                    coll_name = coll.name.upper()
+                elif (isinstance(coll, FormNode)
+                      and isinstance(coll.operator, AtomNode)
+                      and coll.operator.value.upper() == 'GVAL'
+                      and coll.operands
+                      and isinstance(coll.operands[0], AtomNode)):
+                    coll_name = coll.operands[0].value.upper()
+                table_kinds = {
+                    'TABLE': ('TABLE', []), 'PTABLE': ('TABLE', ['PURE']),
+                    'LTABLE': ('LTABLE', []), 'PLTABLE': ('LTABLE', ['PURE']),
+                }
+                if coll_name in table_kinds and isinstance(result, list):
+                    ttype, tflags = table_kinds[coll_name]
+                    vals = []
+                    for item in result:
+                        if item is None or item is False:
+                            vals.append(NumberNode(0, node.line, node.column))
+                        else:
+                            vals.append(self._convert_to_ast(item))
+                    return TableNode(ttype, list(tflags), None, vals,
+                                     node.line, node.column)
                 return self._convert_to_ast(result)
 
         # Check for ROUTINE that creates a routine dynamically

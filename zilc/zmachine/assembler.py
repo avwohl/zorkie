@@ -1500,6 +1500,16 @@ class ZAssembler:
             if static_base_precalc % 2 != 0:
                 static_base_precalc += 1
 
+        # Publish the impure/pure split NOW: _table_data_addr consults these
+        # attrs, and the property-table 0xFD00 placeholder pass runs BEFORE
+        # the later (re)assignment near the table-emission code. With an ODD
+        # impure region the pure tables sit one alignment byte later than
+        # table_base + offset, so every property value pointing at a pure
+        # table (hollywood's THINGS pseudo tables) was one byte short and
+        # the parser walked garbage as a pseudo table.
+        self._impure_tables_size = impure_tables_size
+        self._pure_table_base = static_base_precalc
+
         # Pre-calculate dictionary address for VOCAB global resolution
         # Dictionary comes after: pure tables
         dict_addr_precalc = static_base_precalc

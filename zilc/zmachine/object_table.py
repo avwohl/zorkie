@@ -127,10 +127,13 @@ class ObjectTable:
         """
         prop_table = bytearray()
 
-        # Encode object description (from DESC property #1)
-        # The property table header contains the short description shown in listings
+        # Encode object description (from the DESC pseudo-property, key 0)
+        # The property table header contains the short description shown in
+        # listings. DESC never occupies a numbered property slot, so slot 1
+        # is a real, assignable property number (the compiler spills into it
+        # when a game's property count reaches LOW-DIRECTION).
         properties = obj.get('properties', {})
-        obj_desc = properties.get(1, '')  # Property #1 is DESC
+        obj_desc = properties.get(0, '')  # Pseudo-key 0 is DESC
 
         # If DESC is not a string (e.g., it's an AST node), try to extract value
         if hasattr(obj_desc, 'value'):
@@ -155,15 +158,15 @@ class ObjectTable:
 
         # Build property list from obj['properties']
         # Properties must be in descending numerical order.
-        # Property #1 (DESC) is the object short name and lives ONLY in the
+        # Pseudo-key 0 (DESC) is the object short name and lives ONLY in the
         # property-table header above; it must NOT also be emitted as a numbered
         # property block (that would duplicate the short name and make
-        # get_prop(obj, 1) return name bytes instead of the property default).
+        # get_prop return name bytes instead of the property default).
         properties = obj.get('properties', {})
 
-        # Sort properties by number (descending), excluding #1 (DESC / short name)
+        # Sort properties by number (descending), excluding key 0 (DESC / short name)
         sorted_props = sorted(
-            (item for item in properties.items() if item[0] != 1),
+            (item for item in properties.items() if item[0] != 0),
             key=lambda x: x[0], reverse=True,
         )
 
