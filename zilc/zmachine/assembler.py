@@ -75,6 +75,21 @@ class ZAssembler:
         """Calculate story file checksum (sum of all bytes except header)."""
         return sum(data[0x40:]) & 0xFFFF
 
+    def _table_data_addr(self, table_base_addr: int, offset: int) -> int:
+        """Real address of the byte at `offset` in the sorted table data.
+
+        Table data is split into an impure (dynamic-memory) region and a pure
+        (static-memory) region, and build_story_file pads to a word boundary
+        between them, so pure tables do NOT live at table_base_addr + offset.
+        Mirrors _resolve_table_placeholders_split, which is what makes the
+        table pointers stored in GLOBALS correct.
+        """
+        impure = getattr(self, '_impure_tables_size', None)
+        pure_base = getattr(self, '_pure_table_base', None)
+        if impure is not None and pure_base is not None and offset >= impure:
+            return pure_base + (offset - impure)
+        return table_base_addr + offset
+
     def _resolve_table_placeholders(self, data: bytes, table_base_addr: int,
                                        table_offsets: dict,
                                        dict_addr: int = None) -> bytes:
@@ -110,8 +125,10 @@ class ZAssembler:
                 # 0xF800|(idx-256): ext band for table indexes 256..511
                 table_index = (word & 0x00FF) + (0x100 if (word & 0xFF00) == 0xF800 else 0)
                 if table_index in table_offsets:
-                    # Calculate actual table address
-                    actual_addr = table_base_addr + table_offsets[table_index]
+                    # Calculate actual table address (pure tables sit past the
+                    # impure/pure alignment pad -- see _table_data_addr)
+                    actual_addr = self._table_data_addr(
+                        table_base_addr, table_offsets[table_index])
                     # Write back as big-endian
                     result[i] = (actual_addr >> 8) & 0xFF
                     result[i + 1] = actual_addr & 0xFF
@@ -364,10 +381,17 @@ class ZAssembler:
         # PRISTINE input and skip bytes earlier passes already wrote (a resolved
         # marker address from _resolve_string_markers can contain 0xFC).
         protected = patched_positions if patched_positions is not None else set()
+        # STRUCTURAL gate: a string operand marker can only occupy a
+        # large-constant operand slot. Inline print/print_ret z-strings (0xB2 /
+        # 0xB3) are stepped over by the walker, so their bytes -- which may
+        # legally read 0xFC1A -- can never be mistaken for a marker.
+        _allowed, _fallback = self._structural_positions(routines, True)
         i = 0
         while i < len(result) - 1:
             # Check for 0xFC high byte
-            if routines[i] == 0xFC and i not in protected:
+            if (routines[i] == 0xFC and i not in protected
+                    and (_allowed is None
+                         or self._structural_pos_ok(i, _allowed, _fallback))):
                 placeholder_idx = routines[i + 1]
                 # A JUMP (0x8C) offset can contain 0xFC in either byte: as the
                 # HIGH byte of a backward jump (0x8C directly before the match)
@@ -461,7 +485,7 @@ class ZAssembler:
                     continue
             i += step
 
-    def _structural_positions(self, blob):
+    def _structural_positions(self, blob, include_print_paddr=False):
         """(allowed_positions, fallback_ranges) for the routines blob via the
         codegen instruction walker, or (None, None) when structure is
         unavailable. Positions gate the 0xFB scans STRUCTURALLY: only a 2-byte
@@ -490,10 +514,12 @@ class ZAssembler:
                 continue
             chunk = bytes(blob[cs:end])
             try:
-                pos = _walk_large_const_positions(chunk, self.version)
+                pos = _walk_large_const_positions(chunk, self.version,
+                                                  include_print_paddr)
             except _PlaceholderScanDesync:
                 try:
-                    pos = _walk_large_const_positions(chunk.rstrip(b'\x00'), self.version)
+                    pos = _walk_large_const_positions(chunk.rstrip(b'\x00'), self.version,
+                                                      include_print_paddr)
                 except _PlaceholderScanDesync:
                     fallback.append((cs, end))
                     continue
@@ -555,7 +581,8 @@ class ZAssembler:
         fixup_map = {}
         for placeholder_idx, table_index in vword_fixups:
             if table_index in table_offsets:
-                fixup_map[placeholder_idx] = table_base_addr + table_offsets[table_index]
+                fixup_map[placeholder_idx] = self._table_data_addr(
+                    table_base_addr, table_offsets[table_index])
         i = 0
         while i < len(result) - 1:
             if (routines[i] == 0xFB and i not in protected
@@ -666,7 +693,8 @@ class ZAssembler:
         fixup_map = {}
         for placeholder_idx, table_index in vword_fixups:
             if table_index in table_offsets:
-                table_addr = table_base_addr + table_offsets[table_index]
+                table_addr = self._table_data_addr(
+                    table_base_addr, table_offsets[table_index])
                 fixup_map[placeholder_idx] = table_addr
 
         # Scan for 0xFB00 | index patterns (16-bit values). Skip bytes already
@@ -778,7 +806,8 @@ class ZAssembler:
         fixup_map = {}
         for placeholder_idx, table_index in vword_fixups:
             if table_index in table_offsets:
-                table_addr = table_base_addr + table_offsets[table_index]
+                table_addr = self._table_data_addr(
+                    table_base_addr, table_offsets[table_index])
                 fixup_map[placeholder_idx] = table_addr
 
         # Scan for 0xFB00 | index patterns against the PRISTINE input and never
@@ -869,7 +898,8 @@ class ZAssembler:
         fixup_map = {}
         for placeholder_idx, table_index in vword_fixups:
             if table_index in table_offsets:
-                table_addr = table_base_addr + table_offsets[table_index]
+                table_addr = self._table_data_addr(
+                    table_base_addr, table_offsets[table_index])
                 fixup_map[placeholder_idx] = table_addr
 
         # Scan for 0xFB00 | index patterns (16-bit values)
@@ -1335,7 +1365,8 @@ class ZAssembler:
                         table_idx = (word & 0x00FF) + (0x100 if (word & 0xFF00) == 0xF900 else 0)
                         if table_idx in table_offsets:
                             table_offset = table_offsets[table_idx]
-                            actual_addr = tables_base + table_offset
+                            actual_addr = self._table_data_addr(
+                                tables_base, table_offset)
                             result[j] = (actual_addr >> 8) & 0xFF
                             result[j + 1] = actual_addr & 0xFF
                         j += 2
@@ -1548,17 +1579,16 @@ class ZAssembler:
             objects_end = current_addr + len(objects_fixed)
             if objects_end % 2 != 0:
                 objects_end += 1  # Account for padding
-            # Add table_data size
-            dict_addr_calc = objects_end
-            if table_data:
-                dict_addr_calc += len(table_data)
-                if dict_addr_calc % 2 != 0:
-                    dict_addr_calc += 1
-            # Add extension_table size (V5+)
-            if extension_table and self.version >= 5:
-                dict_addr_calc += len(extension_table)
-                if dict_addr_calc % 2 != 0:
-                    dict_addr_calc += 1
+            # The table blob is written in TWO pieces -- impure tables, then
+            # (V5+) alphabet/extension, then pure tables -- with an even
+            # alignment pad after EACH.  Summing len(table_data) with a single
+            # trailing align undercounts by up to 2 bytes whenever a piece has
+            # odd length, and every SYNONYM/ADJECTIVE word address in the
+            # object property tables then points into the middle of a
+            # dictionary entry (hollywood: 3,107 impure + 4,535 pure, both
+            # odd -> 2 bytes low -> the parser could not see ANY object).
+            # dict_addr_precalc above already stages it correctly; reuse it.
+            dict_addr_calc = dict_addr_precalc
 
             # Resolve dictionary word placeholders in property tables BEFORE
             # fixing up property table addresses (since the resolver uses relative offsets)
@@ -1619,6 +1649,10 @@ class ZAssembler:
 
         # Add impure tables in dynamic memory (before static memory)
         table_base_addr = current_addr
+        # Pure tables live after the impure region AND its alignment pad, so
+        # every resolver must switch base at the impure/pure boundary.
+        self._impure_tables_size = impure_tables_size
+        self._pure_table_base = static_base_precalc
         table_data_start = 0  # Track position for later string placeholder resolution
         table_data_len = 0
         impure_story_start = 0  # Story position where impure tables are added
@@ -1668,16 +1702,37 @@ class ZAssembler:
             # patch the word at dst_table+dst_offset with the address of
             # src_table + addend. Positions recorded at encode time -- no
             # scanning, no 8-bit index limit.
+            # Byte positions (within table_data) written by the positional
+            # address fixups.  They hold RESOLVED addresses, so the
+            # byte-stepped 0xFC string scan must not rescan them -- a pointer
+            # whose low byte is 0xFC (cutthroats' VERBS slot 0x35FC) was eaten
+            # as a string marker together with the next slot's high byte.
+            _table_addr_positions = set()
             if table_addr_fixups and table_offsets:
                 table_data = bytearray(table_data)
                 for dst_idx, dst_off, src_idx, addend in table_addr_fixups:
                     if dst_idx not in table_offsets or src_idx not in table_offsets:
                         continue
                     pos = table_offsets[dst_idx] + dst_off
-                    addr = table_base_addr + table_offsets[src_idx] + addend
+                    # The sorted table blob is split across the impure/pure
+                    # boundary with an even-alignment pad (and the V5+
+                    # extension table) in between, so a PURE table's address
+                    # is NOT table_base_addr + offset.  Use the same split
+                    # formula as _resolve_table_placeholders_split; otherwise
+                    # every pure-table pointer is short by the pad whenever
+                    # impure_tables_size is odd (hollywood: 3,107 -> every
+                    # VERBS syntax-entry pointer one byte low -> every verb
+                    # matched the wrong syntax line).
+                    _src_off = table_offsets[src_idx]
+                    if impure_tables_size is not None and _src_off >= impure_tables_size:
+                        addr = static_base_precalc + (_src_off - impure_tables_size) + addend
+                    else:
+                        addr = table_base_addr + _src_off + addend
                     if pos + 1 < len(table_data):
                         table_data[pos] = (addr >> 8) & 0xFF
                         table_data[pos + 1] = addr & 0xFF
+                        _table_addr_positions.add(pos)
+                        _table_addr_positions.add(pos + 1)
                 table_data = bytes(table_data)
                 impure_table_data = table_data[:impure_tables_size]
                 pure_table_data = table_data[impure_tables_size:]
@@ -1829,6 +1884,16 @@ class ZAssembler:
         # Resolve table routine fixups (for ACTIONS table packed addresses)
         # Now that we know high_mem_base, patch table data with routine addresses
         table_routine_patched = set()
+        # Positional table-ADDRESS fixups (VERBS -> syntax blob) are resolved
+        # data as well: protect their bytes from the byte-stepped 0xFC scan.
+        for _tapos in locals().get('_table_addr_positions', ()) or ():
+            if _tapos < impure_tables_size:
+                _saspos = impure_story_start + _tapos
+            else:
+                _saspos = pure_story_start + (_tapos - impure_tables_size)
+            if _saspos + 1 < len(story):
+                table_routine_patched.add(_saspos)
+                table_routine_patched.add(_saspos + 1)
         if table_routine_fixups and table_data:
             for table_offset, routine_offset in table_routine_fixups:
                 # Calculate actual byte address of routine

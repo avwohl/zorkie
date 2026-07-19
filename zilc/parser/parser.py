@@ -571,8 +571,15 @@ class Parser:
                 self.expect(TokenType.RANGLE)
                 return node
 
-            elif op_name == "SYNONYM":
-                # Standalone SYNONYM declaration (not in an object)
+            elif op_name in ("SYNONYM", "VERB-SYNONYM"):
+                # Standalone SYNONYM declaration (not in an object).
+                # VERB-SYNONYM is the ZILCH spelling used by the
+                # hollywood-hijinx-era syntax files (<VERB-SYNONYM PUSH PRESS
+                # THRUST NUDGE RING>) and means exactly the same thing: the
+                # aliases inherit the head word's dictionary data.  It was not
+                # dispatched at all, so it fell through to a generic FormNode
+                # and every alias was simply missing from the vocabulary
+                # ("press" -> "this story doesn't recognize the word").
                 node = self.parse_synonym_declaration(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
@@ -1019,7 +1026,12 @@ class Parser:
                     # a direction exit like (IN TO ROOM) would overwrite an existing
                     # CONTAINER under the same key, preserve the container under the
                     # other alias so the room's parent (from (IN ROOMS)) isn't lost.
-                    if prop_name in location_props and is_direction_exit and prop_name in properties:
+                    # See the standard-syntax site: (IN "msg") is the IN
+                    # direction's NEXIT message and must not consume the
+                    # object's tree location.
+                    if (prop_name in location_props
+                            and (is_direction_exit or is_nexit_string)
+                            and prop_name in properties):
                         other = 'LOC' if prop_name == 'IN' else 'IN'
                         if other not in properties:
                             properties[other] = properties[prop_name]
@@ -1100,7 +1112,13 @@ class Parser:
                 # direction exit like (IN TO ROOM) would overwrite an existing
                 # CONTAINER value under the same key, preserve the container under
                 # the other alias so the room's parent (from (IN ROOMS)) isn't lost.
-                if prop_name in location_props and is_direction_exit and prop_name in properties:
+                # is_nexit_string too: (IN "msg") is the IN DIRECTION's refusal
+                # message, not a new location -- without this the room's
+                # (IN ROOMS) parent was overwritten and the object ended up
+                # parentless (cutthroats WINDING-ROAD-1 printed no room name).
+                if (prop_name in location_props
+                        and (is_direction_exit or is_nexit_string)
+                        and prop_name in properties):
                     other = 'LOC' if prop_name == 'IN' else 'IN'
                     if other not in properties:
                         properties[other] = properties[prop_name]

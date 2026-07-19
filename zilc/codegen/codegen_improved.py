@@ -12,6 +12,18 @@ import sys
 from ..parser.ast_nodes import *
 from ..zmachine.opcodes import OpcodeTable, OperandType
 from ..zmachine.text_encoding import ZTextEncoder, words_to_bytes
+import os as _sz3_os
+_SZ3_LEVERS = set((_sz3_os.environ.get('MP_SZ3_LEVERS') or 'inline,tail,peep').split(','))
+_SZ3_INLINE = 'inline' in _SZ3_LEVERS
+_SZ3_TAIL = 'tail' in _SZ3_LEVERS
+_SZ3_PEEP = (_sz3_os.environ.get('MP_SZ3_PEEP')
+             if _sz3_os.environ.get('MP_SZ3_PEEP') is not None
+             else ('DPQSTJLRNB' if 'peep' in _SZ3_LEVERS else ''))
+_SZ3_RULES = set((_sz3_os.environ.get('MP_SZ3_RULES') or 'R0,R1,R2,R3').split(','))
+_SZ3_R0 = 'R0' in _SZ3_RULES
+_SZ3_R1 = 'R1' in _SZ3_RULES
+_SZ3_R2 = 'R2' in _SZ3_RULES
+_SZ3_R3 = 'R3' in _SZ3_RULES
 
 
 
@@ -27,7 +39,7 @@ _EXT_STORE_OPS = frozenset({0x00, 0x01, 0x02, 0x03, 0x04, 0x09, 0x0A})
 _EXT_BRANCH_OPS = frozenset({0x06, 0x18, 0x1B})
 
 
-def _walk_large_const_positions(code, version):
+def _walk_large_const_positions(code, version, include_print_paddr=False):
     """Walk a V3+ instruction stream; return byte offsets of every 2-byte
     large-constant operand that may legally hold an address placeholder.
     Raises _PlaceholderScanDesync when the stream cannot be decoded.
@@ -85,7 +97,7 @@ def _walk_large_const_positions(code, version):
                     raise _PlaceholderScanDesync()
                 # jump offsets and print_paddr string operands are never
                 # routine placeholders -- don't report them.
-                if opnum not in (0x0C, 0x0D):
+                if opnum != 0x0C and (opnum != 0x0D or include_print_paddr):
                     out.append(i)
                 i += 2
             else:
@@ -826,6 +838,13 @@ class ImprovedCodeGenerator:
 
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
+        self._inline_ok_cache = {}
+        self._str_use_counts = self._count_string_uses(program)
+        # Single-use TELL literals are emitted inline (see _inline_print_ok).
+        try:
+            self._string_use_counts = self._build_string_use_counts(program)
+        except Exception:
+            self._string_use_counts = None
         _demote = set(getattr(self.compiler, '_setg_demote', ()) or ()) if self.compiler else set()
         if _demote:
             # Top-level-SETG pseudo-globals that are CONSTANT-shadowed or never
@@ -904,7 +923,8 @@ class ImprovedCodeGenerator:
         if self._big_globals:
             for _nm in ('_SCRATCH_', '_CMP_SCRATCH_', '_CMP_SCRATCH2_',
                         '_OR_SCRATCH_', '_CALLARG1_', '_CALLARG2_',
-                        '_PUT_SCRATCH1_', '_PUT_SCRATCH2_', '_MFROB_SCRATCH_'):
+                        '_PUT_SCRATCH1_', '_PUT_SCRATCH2_', '_MFROB_SCRATCH_',
+                        '_2OPS_SCRATCH_'):
                 self._alloc_top_global(_nm, initial=0)
             _c_names = {getattr(_c, 'name', None) for _c in program.constants}
             if 'VOCAB' not in _c_names:
@@ -1462,6 +1482,7 @@ class ImprovedCodeGenerator:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
             self._encode_string_marker_offsets = []
             self._encode_routine_marker_offsets = []
+            self._encode_nested_table_ptr_offsets = []
             self._emitted_nested_table_ptr = False
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
@@ -1469,6 +1490,11 @@ class ImprovedCodeGenerator:
                 self._tables_with_nested_ptrs.add(f"_GLOBAL_{global_name}")
             _str_marker_offs = list(self._encode_string_marker_offsets)
             _rtn_marker_offs = list(self._encode_routine_marker_offsets)
+            # Nested-table pointers get POSITIONAL fixups, like _add_table does.
+            # Only the name-keyed legacy set was recorded here, and its blind
+            # 0xFF00 rescan resolves pure children with the impure base
+            # formula; the positional path is exact.
+            _nst_marker_offs = list(self._encode_nested_table_ptr_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1482,6 +1508,7 @@ class ImprovedCodeGenerator:
             table_data.extend(encoded_data)
             _pending_marker_offs = [_prefix + o for o in _str_marker_offs]
             _pending_rtn_offs = [_prefix + o for o in _rtn_marker_offs]
+            _pending_nst_offs = [(_prefix + o, c) for o, c in _nst_marker_offs]
 
         # Store the table
         table_idx = len(self.tables)
@@ -1493,6 +1520,8 @@ class ImprovedCodeGenerator:
             self._table_string_fixups.append((table_idx, _o))
         for _o in locals().get('_pending_rtn_offs') or []:
             self._table_routine_marker_offsets.append((table_idx, _o))
+        for _o, _child in locals().get('_pending_nst_offs') or []:
+            self.table_addr_fixups.append((table_idx, _o, _child, 0))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = self._table_marker(table_idx); self.__dict__.setdefault('_tbl_marker_globals', set()).add(global_name)
@@ -1680,6 +1709,7 @@ class ImprovedCodeGenerator:
             # Encode table values using helper that handles #BYTE/#WORD prefixes
             self._encode_string_marker_offsets = []
             self._encode_routine_marker_offsets = []
+            self._encode_nested_table_ptr_offsets = []
             self._emitted_nested_table_ptr = False
             encoded_data = self._encode_table_values(values, default_is_byte=is_byte,
                                                      is_string=is_string, pattern=element_pattern)
@@ -1687,6 +1717,11 @@ class ImprovedCodeGenerator:
                 self._tables_with_nested_ptrs.add(f"_GLOBAL_{global_name}")
             _str_marker_offs = list(self._encode_string_marker_offsets)
             _rtn_marker_offs = list(self._encode_routine_marker_offsets)
+            # Nested-table pointers get POSITIONAL fixups, like _add_table does.
+            # Only the name-keyed legacy set was recorded here, and its blind
+            # 0xFF00 rescan resolves pure children with the impure base
+            # formula; the positional path is exact.
+            _nst_marker_offs = list(self._encode_nested_table_ptr_offsets)
             # For TABLE with LENGTH flag, add a byte length prefix
             if is_length and table_type == 'TABLE':
                 data_len = len(encoded_data)
@@ -1700,6 +1735,7 @@ class ImprovedCodeGenerator:
             table_data.extend(encoded_data)
             _pending_marker_offs = [_prefix + o for o in _str_marker_offs]
             _pending_rtn_offs = [_prefix + o for o in _rtn_marker_offs]
+            _pending_nst_offs = [(_prefix + o, c) for o, c in _nst_marker_offs]
 
         # Legacy padding for ITABLE - shouldn't be needed with new logic
         if False and initial_size and table_type == 'ITABLE':
@@ -1720,6 +1756,8 @@ class ImprovedCodeGenerator:
             self._table_string_fixups.append((table_idx, _o))
         for _o in locals().get('_pending_rtn_offs') or []:
             self._table_routine_marker_offsets.append((table_idx, _o))
+        for _o, _child in locals().get('_pending_nst_offs') or []:
+            self.table_addr_fixups.append((table_idx, _o, _child, 0))
 
         # Set placeholder for table address (will be resolved by assembler)
         self.global_values[global_name] = self._table_marker(table_idx); self.__dict__.setdefault('_tbl_marker_globals', set()).add(global_name)
@@ -3242,6 +3280,17 @@ class ImprovedCodeGenerator:
         if isinstance(stmt, CondNode):
             return self.generate_cond(stmt, discard=True)
         if (isinstance(stmt, FormNode) and isinstance(stmt.operator, AtomNode)
+                and stmt.operator.value.upper() in ('PROG', 'BIND')
+                and not self._prog_contains_return(stmt)):
+            # A PROG/BIND in statement position: suppress the default TRUE push
+            # (classic TELL macros expand to <PROG () <PRINTI ...>>).
+            _saved = getattr(self, '_discard_prog_ops', None)
+            self._discard_prog_ops = id(stmt.operands)
+            try:
+                return self.generate_statement(stmt)
+            finally:
+                self._discard_prog_ops = _saved
+        if (isinstance(stmt, FormNode) and isinstance(stmt.operator, AtomNode)
                 and stmt.operator.value.upper() in ('SET', 'SETG')
                 and len(stmt.operands) == 2
                 and not self._set_is_special(stmt.operands, stmt.operator.value.upper() == 'SETG')):
@@ -3256,6 +3305,909 @@ class ImprovedCodeGenerator:
                 del b[-4:]                       # PUSH large const
             return bytes(b)
         return self.generate_statement(stmt)
+
+    def _build_string_use_counts(self, program):
+        """Count every StringNode occurrence in the program AST.
+
+        A literal that occurs exactly once can be emitted INLINE (0xB2) instead
+        of print_paddr + a string-table entry, saving 2 bytes.  Over-counting is
+        always safe (it just declines the optimisation), so shared/cyclic nodes
+        are visited once.
+        """
+        from collections import Counter as _Counter
+        counts = _Counter()
+        seen = set()
+        stack = [program]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple, set)):
+                stack.extend(n)
+                continue
+            if isinstance(n, dict):
+                stack.extend(n.values())
+                continue
+            d = getattr(n, '__dict__', None)
+            if d is None:
+                continue
+            if id(n) in seen:
+                continue
+            seen.add(id(n))
+            if type(n).__name__ == 'StringNode':
+                v = getattr(n, 'value', None)
+                if isinstance(v, str):
+                    counts[v] += 1
+            stack.extend(d.values())
+        return counts
+
+    def _inline_print_ok(self, text):
+        """True when this TELL literal should be emitted inline (0xB2)."""
+        if not _SZ3_INLINE or self.version > 4:
+            return False
+        counts = getattr(self, '_string_use_counts', None)
+        if not counts:
+            return False
+        if counts.get(text, 99) != 1:
+            return False
+        # A string also reachable as data (property/table value) is shared
+        # through the string table; never inline those.
+        if text in getattr(self, '_string_to_placeholder', {}) or {}:
+            return False
+        return True
+
+    def _tail_decode(self, code, start):
+        """Decode a routine body; return (instruction starts, branch targets).
+
+        Returns None whenever the stream cannot be decoded cleanly to exactly
+        len(code) -- the tail peephole then does nothing.
+        """
+        v = self.version
+        n = len(code)
+        i = start
+        starts = []
+        targets = set()
+        while i < n:
+            starts.append(i)
+            op = code[i]
+            if op == 0xBE:
+                return None
+            if op < 0x80:                      # long 2OP
+                opnum = op & 0x1F
+                if opnum == 0:
+                    return None
+                i += 3
+                store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
+                branch = opnum in _2OP_BRANCH_OPS
+            elif op < 0xB0:                    # short 1OP
+                opnum = op & 0x0F
+                t = (op >> 4) & 3
+                i += 1
+                if t == 0:
+                    if i + 1 >= n:
+                        return None
+                    if opnum == 0x0C:          # jump, large-constant offset
+                        off = (code[i] << 8) | code[i + 1]
+                        if off >= 0x8000:
+                            off -= 0x10000
+                        targets.add(i + off)
+                    i += 2
+                else:
+                    if i >= n:
+                        return None
+                    if t == 1 and opnum == 0x0C:   # jump, small-constant offset
+                        targets.add(i + 1 + code[i] - 2)
+                    i += 1
+                store = opnum in (0x01, 0x02, 0x03, 0x04, 0x0E) \
+                    or (opnum == 0x08 and v >= 4) \
+                    or (opnum == 0x0F and v <= 4)
+                branch = opnum in _1OP_BRANCH_OPS
+            elif op < 0xC0:                    # short 0OP
+                opnum = op & 0x0F
+                i += 1
+                if opnum in (0x02, 0x03):      # print / print_ret inline string
+                    while True:
+                        if i + 1 >= n:
+                            return None
+                        w = (code[i] << 8) | code[i + 1]
+                        i += 2
+                        if w & 0x8000:
+                            break
+                store = (opnum in (0x05, 0x06) and v == 4)
+                branch = (opnum in (0x05, 0x06) and v <= 3) or opnum in (0x0D, 0x0F)
+            else:                              # variable form
+                opnum = op & 0x1F
+                var_of_2op = op < 0xE0
+                i += 1
+                ntypes = 2 if (not var_of_2op and v >= 4 and opnum in (0x0C, 0x1A)) else 1
+                if i + ntypes > n:
+                    return None
+                tbs = code[i:i + ntypes]
+                i += ntypes
+                done = False
+                for tb in tbs:
+                    for sh in (6, 4, 2, 0):
+                        t = (tb >> sh) & 3
+                        if t == 3:
+                            done = True
+                            break
+                        i += 2 if t == 0 else 1
+                    if done:
+                        break
+                if var_of_2op:
+                    store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
+                    branch = opnum in _2OP_BRANCH_OPS
+                else:
+                    store = opnum in (0x00, 0x07) \
+                        or (v >= 4 and opnum in (0x0C, 0x16, 0x17)) \
+                        or (v >= 5 and opnum in (0x04, 0x18))
+                    branch = (v >= 4 and opnum == 0x17) or (v >= 5 and opnum == 0x1F)
+            if store:
+                i += 1
+            if branch:
+                if i >= n:
+                    return None
+                b = code[i]
+                i += 1
+                if b & 0x40:
+                    off = b & 0x3F
+                else:
+                    if i >= n:
+                        return None
+                    off = ((b & 0x3F) << 8) | code[i]
+                    i += 1
+                    if off >= 0x2000:
+                        off -= 0x4000
+                if off not in (0, 1):
+                    targets.add(i + off - 2)
+            if i > n:
+                return None
+        return starts, targets
+
+    def _tail_peephole(self, routine_code, body_start):
+        """Shrink the LAST instructions of a routine (ZILCH return idioms).
+
+        Only ever truncates the end of the routine, and only when no in-routine
+        branch/jump targets the bytes being removed -- so no offset anywhere
+        moves and no recorded placeholder position goes stale.
+        """
+        if not _SZ3_TAIL or self.version > 4:
+            return routine_code
+        for _ in range(8):
+            n = len(routine_code)
+            if n <= body_start + 1:
+                return routine_code
+            dec = self._tail_decode(routine_code, body_start)
+            if not dec:
+                return routine_code
+            starts, targets = dec
+            if not starts:
+                return routine_code
+            last = starts[-1]
+            prev = starts[-2] if len(starts) >= 2 else None
+            prev2 = starts[-3] if len(starts) >= 3 else None
+            b = routine_code
+
+            # R3: inline print + new_line + return-true  ->  print_ret
+            if _SZ3_R3 and (prev2 is not None and b[prev2] == 0xB2 and prev is not None
+                    and b[prev] == 0xBB and prev not in targets
+                    and last not in targets
+                    and (b[last] == 0xB0 and last + 1 == n
+                         or b[last] == 0x9B and last + 2 == n and b[last + 1] == 1)):
+                b[prev2] = 0xB3
+                del b[prev:]
+                continue
+
+            # R1: push #const + ret_popped  ->  ret #const
+            if _SZ3_R1 and (b[last] == 0xB8 and last + 1 == n and last not in targets
+                    and prev is not None and b[prev] == 0xE8):
+                val = None
+                if b[prev + 1] == 0x7F and prev + 3 == last:
+                    val = b[prev + 2]
+                elif b[prev + 1] == 0x3F and prev + 4 == last:
+                    val = (b[prev + 2] << 8) | b[prev + 3]
+                if val is not None:
+                    if val == 1:
+                        rep = bytes([0xB0])
+                    elif val == 0:
+                        rep = bytes([0xB1])
+                    elif val <= 255:
+                        rep = bytes([0x9B, val])
+                    else:
+                        rep = bytes([0x8B, (val >> 8) & 0xFF, val & 0xFF])
+                    if len(rep) < n - prev:
+                        del b[prev:]
+                        b.extend(rep)
+                        continue
+
+            # R2: add #0,x -> sp  +  ret_popped  ->  ret x
+            if _SZ3_R2 and (b[last] == 0xB8 and last + 1 == n and last not in targets
+                    and prev is not None and prev + 4 == last
+                    and b[prev] in (0x14, 0x34) and b[prev + 1] == 0x00
+                    and b[prev + 3] == 0x00):
+                x = b[prev + 2]
+                if b[prev] == 0x14:
+                    rep = bytes([0xB1]) if x == 0 else (
+                        bytes([0xB0]) if x == 1 else bytes([0x9B, x]))
+                else:
+                    rep = bytes([0xAB, x])
+                if len(rep) < n - prev:
+                    del b[prev:]
+                    b.extend(rep)
+                    continue
+
+            # R0: ret #1 -> rtrue, ret #0 -> rfalse
+            if _SZ3_R0 and b[last] == 0x9B and last + 2 == n and b[last + 1] in (0, 1):
+                rep = 0xB1 if b[last + 1] == 0 else 0xB0
+                del b[last:]
+                b.append(rep)
+                continue
+            return routine_code
+        return routine_code
+
+    def _peep_decode(self, code, start):
+        """Full structural decode of one routine body.
+
+        Returns a list of instruction records, or None if the stream cannot be
+        decoded exactly to len(code) (the optimiser then does nothing).
+        Each record: a/n (byte range), op, opnum, form, store_pos, branch_pos,
+        branch_len, branch_off, branch_on, jump_pos, jump_len, jump_off,
+        reads_stack, writes_stack, is_term, targets.
+        """
+        v = self.version
+        n = len(code)
+        i = start
+        out = []
+        while i < n:
+            a = i
+            op = code[i]
+            rec = {'a': a, 'op': op, 'store_pos': None, 'branch_pos': None,
+                   'jump_pos': None, 'reads_stack': 0, 'writes_stack': False,
+                   'is_term': False, 'branch_len': 0, 'jump_len': 0,
+                   'stack_indirect': False, 'stack_ops': []}
+            if op == 0xBE:
+                return None
+            if op < 0x80:                       # long 2OP
+                opnum = op & 0x1F
+                if opnum == 0 or i + 2 >= n:
+                    return None
+                if (op & 0x40) and code[i + 1] == 0:
+                    rec['reads_stack'] += 1
+                    rec['stack_ops'].append(i + 1)
+                if (op & 0x20) and code[i + 2] == 0:
+                    rec['reads_stack'] += 1
+                    rec['stack_ops'].append(i + 2)
+                # indirect variable-number operand naming the stack
+                if opnum in (0x04, 0x05, 0x0D) and not (op & 0x40) and code[i + 1] == 0:
+                    rec['stack_indirect'] = True
+                i += 3
+                store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
+                branch = opnum in _2OP_BRANCH_OPS
+            elif op < 0xB0:                     # short 1OP
+                opnum = op & 0x0F
+                t = (op >> 4) & 3
+                i += 1
+                if t == 0:
+                    if i + 1 >= n:
+                        return None
+                    if opnum == 0x0C:
+                        rec['jump_pos'] = i
+                        rec['jump_len'] = 2
+                        o = (code[i] << 8) | code[i + 1]
+                        rec['jump_off'] = o - 0x10000 if o >= 0x8000 else o
+                    i += 2
+                else:
+                    if i >= n:
+                        return None
+                    if t == 2 and code[i] == 0:
+                        rec['reads_stack'] += 1
+                        rec['stack_ops'].append(i)
+                    if t == 1 and opnum in (0x05, 0x06, 0x0E) and code[i] == 0:
+                        rec['stack_indirect'] = True
+                    if t == 1 and opnum == 0x0C:
+                        rec['jump_pos'] = i
+                        rec['jump_len'] = 1
+                        rec['jump_off'] = code[i]
+                    i += 1
+                store = opnum in (0x01, 0x02, 0x03, 0x04, 0x0E)                     or (opnum == 0x08 and v >= 4) or (opnum == 0x0F and v <= 4)
+                branch = opnum in _1OP_BRANCH_OPS
+                if opnum in (0x0B, 0x0C):
+                    rec['is_term'] = True
+            elif op < 0xC0:                     # short 0OP
+                opnum = op & 0x0F
+                i += 1
+                if opnum in (0x02, 0x03):
+                    while True:
+                        if i + 1 >= n:
+                            return None
+                        w = (code[i] << 8) | code[i + 1]
+                        i += 2
+                        if w & 0x8000:
+                            break
+                store = (opnum in (0x05, 0x06) and v == 4)
+                branch = (opnum in (0x05, 0x06) and v <= 3) or opnum in (0x0D, 0x0F)
+                if opnum in (0x00, 0x01, 0x03, 0x07, 0x08, 0x0A):
+                    rec['is_term'] = True
+                if opnum in (0x08, 0x09):       # ret_popped / pop
+                    rec['reads_stack'] += 1
+            else:                               # variable form
+                opnum = op & 0x1F
+                var_of_2op = op < 0xE0
+                i += 1
+                ntypes = 2 if (not var_of_2op and v >= 4 and opnum in (0x0C, 0x1A)) else 1
+                if i + ntypes > n:
+                    return None
+                tbs = code[i:i + ntypes]
+                i += ntypes
+                done = False
+                for tb in tbs:
+                    for sh in (6, 4, 2, 0):
+                        t = (tb >> sh) & 3
+                        if t == 3:
+                            done = True
+                            break
+                        if t == 0:
+                            i += 2
+                        else:
+                            if i >= n:
+                                return None
+                            if t == 2 and code[i] == 0:
+                                rec['reads_stack'] += 1
+                                rec['stack_ops'].append(i)
+                            if (t == 1 and code[i] == 0 and not var_of_2op
+                                    and opnum == 0x09):
+                                rec['stack_indirect'] = True
+                            if (t == 1 and code[i] == 0 and var_of_2op
+                                    and opnum in (0x04, 0x05, 0x0D)):
+                                rec['stack_indirect'] = True
+                            i += 1
+                    if done:
+                        break
+                if not var_of_2op and opnum == 0x09:   # pull pops the stack
+                    rec['reads_stack'] += 1
+                if var_of_2op:
+                    store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
+                    branch = opnum in _2OP_BRANCH_OPS
+                else:
+                    store = opnum in (0x00, 0x07)                         or (v >= 4 and opnum in (0x0C, 0x16, 0x17))                         or (v >= 5 and opnum in (0x04, 0x18))
+                    branch = (v >= 4 and opnum == 0x17) or (v >= 5 and opnum == 0x1F)
+            if store:
+                if i >= n:
+                    return None
+                rec['store_pos'] = i
+                rec['writes_stack'] = (code[i] == 0)
+                i += 1
+            if branch:
+                if i >= n:
+                    return None
+                b = code[i]
+                rec['branch_pos'] = i
+                rec['branch_on'] = bool(b & 0x80)
+                i += 1
+                if b & 0x40:
+                    rec['branch_len'] = 1
+                    rec['branch_off'] = b & 0x3F
+                else:
+                    if i >= n:
+                        return None
+                    o = ((b & 0x3F) << 8) | code[i]
+                    i += 1
+                    rec['branch_len'] = 2
+                    rec['branch_off'] = o - 0x4000 if o >= 0x2000 else o
+            if i > n:
+                return None
+            rec['n'] = i
+            rec['opnum'] = opnum
+            out.append(rec)
+        return out
+
+    def _peep_targets(self, instrs):
+        """Address -> True for every in-routine branch/jump target."""
+        tg = set()
+        for r in instrs:
+            if r['branch_pos'] is not None and r['branch_off'] not in (0, 1):
+                tg.add(r['n'] + r['branch_off'] - 2)
+            if r['jump_pos'] is not None:
+                tg.add(r['jump_pos'] + r['jump_len'] + r['jump_off'] - 2)
+        return tg
+
+    def _peep_stack_dead(self, instrs, idx, byidx):
+        """True when the value pushed by instrs[idx] is never popped.
+
+        Forward walk over the CFG from the push, tracking the depth of the
+        pushed slot.  Any read of variable 0 while the slot is on top consumes
+        it (-> live).  A frame exit discards it (-> dead on that path).  Any
+        ambiguity (merge with a different depth, indirect stack use, budget
+        exhausted) answers "live", i.e. keep the push.
+        """
+        n = len(instrs)
+        seen = {}
+        work = [(idx + 1, 0)]
+        budget = 400
+        while work:
+            budget -= 1
+            if budget < 0:
+                return False
+            j, d = work.pop()
+            if j >= n:
+                return False
+            prev = seen.get(j)
+            if prev is not None:
+                if prev != d:
+                    return False
+                continue
+            seen[j] = d
+            r = instrs[j]
+            op = r['op']
+            if r['stack_indirect']:
+                return False
+            for _ in range(r['reads_stack']):
+                if d == 0:
+                    return False
+                d -= 1
+            if r['writes_stack']:
+                d += 1
+            opnum = r['opnum']
+            if 0xB0 <= op < 0xC0 and opnum in (0x00, 0x01, 0x07, 0x08, 0x0A, 0x03):
+                continue                      # frame exit / restart
+            if 0x80 <= op < 0xB0 and opnum == 0x0B:
+                continue                      # ret
+            nxt = []
+            if r['jump_pos'] is not None:
+                t = r['jump_pos'] + r['jump_len'] + r['jump_off'] - 2
+                k = byidx.get(t)
+                if k is None:
+                    return False
+                nxt.append(k)
+            else:
+                nxt.append(j + 1)
+                if r['branch_pos'] is not None and r['branch_off'] not in (0, 1):
+                    t = r['n'] + r['branch_off'] - 2
+                    k = byidx.get(t)
+                    if k is None:
+                        return False
+                    nxt.append(k)
+            for k in nxt:
+                work.append((k, d))
+        return True
+
+    def _routine_peephole(self, routine_code, body_start):
+        """Routine-local size peephole with full offset repair.
+
+        Rules (all pure size, ZILCH idioms):
+          D  drop unreachable instructions after an unconditional transfer
+          P  drop `push #c` whose value is provably never popped
+          Q  `push #c` + `ret_popped`   ->  `ret #c` / rtrue / rfalse
+          S  `<op> ... -> sp` + `pull v` ->  `<op> ... -> v`
+          T  `add v,#1 -> v` / `sub v,#1 -> v` -> `inc v` / `dec v`
+        After deleting, every branch/jump offset is recomputed in its ORIGINAL
+        encoding width (deletions only shrink offsets, so a width never has to
+        grow); anything that no longer fits aborts the pass.  Recorded
+        placeholder positions are remapped through the same old->new map.
+        """
+        if not _SZ3_PEEP or self.version > 4:
+            return routine_code
+        for _round in range(4):
+            code = routine_code
+            instrs = self._peep_decode(code, body_start)
+            if not instrs:
+                return routine_code
+            byidx = {r['a']: k for k, r in enumerate(instrs)}
+            tg = self._peep_targets(instrs)
+            for t in tg:
+                if t not in byidx and t != len(code):
+                    return routine_code       # target inside an instruction
+            nins = len(instrs)
+            drop = [False] * nins
+            repl = {}
+            # replacements that keep the instruction's byte layout (only a
+            # store byte changes) -- their recorded placeholder positions are
+            # still valid and MUST be remapped, not dropped.
+            repl_same = set()
+
+            # --- D: unreachable tail of a straight-line run -----------------
+            if 'D' in _SZ3_PEEP:
+                reach = True
+                for k, r in enumerate(instrs):
+                    if r['a'] in tg:
+                        reach = True
+                    if not reach:
+                        drop[k] = True
+                    if r['is_term']:
+                        reach = False
+
+            for k, r in enumerate(instrs):
+                if drop[k] or k in repl:
+                    continue
+                nx = instrs[k + 1] if k + 1 < nins else None
+                # --- J: a JUMP whose target is a return instruction becomes
+                # that return (ZILCH never jumps to a return).  This also feeds
+                # rule Q on the next round: `push #c ; jump ->ret_popped`
+                # collapses all the way to `ret #c`.
+                if 'J' in _SZ3_PEEP and r['jump_pos'] is not None:
+                    ta = r['jump_pos'] + r['jump_len'] + r['jump_off'] - 2
+                    tk = byidx.get(ta)
+                    if tk is not None and not drop[tk] and tk not in repl:
+                        t = instrs[tk]
+                        tlen = t['n'] - t['a']
+                        isret = (t['op'] in (0xB0, 0xB1, 0xB8, 0xBA)
+                                 or (0x80 <= t['op'] < 0xB0 and t['opnum'] == 0x0B))
+                        if isret and tlen < (r['n'] - r['a']):
+                            repl[k] = bytes(code[t['a']:t['n']])
+                            continue
+                # A "constant push" is either a real PUSH #c or the older
+                # `add #0,x -> sp` push idiom that some generators still emit.
+                pushkind = None
+                if (r['op'] == 0xE8 and r['store_pos'] is None
+                        and (r['n'] - r['a']) in (3, 4)
+                        and code[r['a'] + 1] in (0x7F, 0x3F)):
+                    pushkind = 'C'
+                    val = (code[r['a'] + 2] if code[r['a'] + 1] == 0x7F
+                           else (code[r['a'] + 2] << 8) | code[r['a'] + 3])
+                elif ((r['n'] - r['a']) == 4 and r['op'] in (0x14, 0x34)
+                      and code[r['a'] + 1] == 0x00 and code[r['a'] + 3] == 0x00
+                      and r['branch_pos'] is None):
+                    pushkind = 'C' if r['op'] == 0x14 else 'V'
+                    val = code[r['a'] + 2]
+                if pushkind:
+                    # --- Q: push #c ; ret_popped -> ret #c -------------------
+                    if ('Q' in _SZ3_PEEP and nx is not None and nx['op'] == 0xB8
+                            and not drop[k + 1] and nx['a'] not in tg):
+                        if pushkind == 'V':
+                            rb = bytes([0xAB, val])
+                        elif val == 1:
+                            rb = bytes([0xB0])
+                        elif val == 0:
+                            rb = bytes([0xB1])
+                        elif val <= 255:
+                            rb = bytes([0x9B, val])
+                        else:
+                            rb = bytes([0x8B, (val >> 8) & 0xFF, val & 0xFF])
+                        if len(rb) < (r['n'] - r['a']) + 1:
+                            drop[k] = True
+                            repl[k + 1] = rb
+                            continue
+                    # --- P: provably-dead push ------------------------------
+                    if ('P' in _SZ3_PEEP
+                            and self._peep_stack_dead(instrs, k, byidx)):
+                        drop[k] = True
+                        continue
+                # --- R: inline print + new_line + return-true -> print_ret ---
+                # (ZILCH's PRINTR idiom; only reachable once [inline] is on)
+                if ('R' in _SZ3_PEEP and r['op'] == 0xB2 and nx is not None
+                        and nx['op'] == 0xBB and not drop[k + 1]
+                        and nx['a'] not in tg and k + 2 < nins):
+                    n2 = instrs[k + 2]
+                    if (not drop[k + 2] and n2['a'] not in tg
+                            and (n2['op'] == 0xB0
+                                 or (n2['op'] == 0x9B and (n2['n'] - n2['a']) == 2
+                                     and code[n2['a'] + 1] == 1))):
+                        nb = bytearray(code[r['a']:r['n']])
+                        nb[0] = 0xB3
+                        repl[k] = bytes(nb)
+                        repl_same.add(k)
+                        drop[k + 1] = True
+                        drop[k + 2] = True
+                        continue
+
+                # --- L: `load #v -> sp` feeding a single stack operand ------
+                if ('L' in _SZ3_PEEP and r['op'] == 0x9E
+                        and (r['n'] - r['a']) == 3 and code[r['a'] + 1] != 0
+                        and r['store_pos'] == r['a'] + 2 and r['writes_stack']
+                        and nx is not None and not drop[k + 1]
+                        and nx['a'] not in tg and k + 1 not in repl
+                        and nx['reads_stack'] == 1 and not nx['stack_indirect']
+                        and len(nx['stack_ops']) == 1):
+                    nb = bytearray(code[nx['a']:nx['n']])
+                    nb[nx['stack_ops'][0] - nx['a']] = code[r['a'] + 1]
+                    repl[k + 1] = bytes(nb)
+                    repl_same.add(k + 1)
+                    drop[k] = True
+                    continue
+
+                # --- S: store-to-stack + pull v -> store straight to v ------
+                if ('S' in _SZ3_PEEP and r['store_pos'] is not None
+                        and r['writes_stack'] and r['branch_pos'] is None
+                        and not r['stack_indirect'] and nx is not None
+                        and not drop[k + 1] and nx['a'] not in tg
+                        and nx['op'] == 0xE9 and (nx['n'] - nx['a']) == 3
+                        and code[nx['a'] + 1] == 0x7F and code[nx['a'] + 2] != 0
+                        and r['op'] != 0xE8):
+                    nb = bytearray(code[r['a']:r['n']])
+                    nb[r['store_pos'] - r['a']] = code[nx['a'] + 2]
+                    # --- T: add/sub v,#1 -> v  becomes inc/dec v ------------
+                    tv = code[nx['a'] + 2]
+                    if ('T' in _SZ3_PEEP and (r['n'] - r['a']) == 4
+                            and r['op'] in (0x54, 0x55) and code[r['a'] + 1] == tv
+                            and code[r['a'] + 2] == 1):
+                        nb = bytes([0x95 if r['op'] == 0x54 else 0x96, tv])
+                    repl[k] = bytes(nb)
+                    if len(nb) == (r['n'] - r['a']):
+                        repl_same.add(k)
+                    drop[k + 1] = True
+                    continue
+
+            # --- N: re-narrow branch/jump encodings that now fit -----------
+            # Deletions only ever SHRINK offsets, so a 2-byte branch whose
+            # offset already fits the 1-byte form (and a large-constant JUMP
+            # whose offset fits the small-constant form) can be re-encoded one
+            # byte shorter.  Skipped in round 0 so an infeasible narrowing can
+            # never discard the round that carries the other rules' gains.
+            # --- A: thread a branch/jump whose target is an unconditional
+            # JUMP straight through to that jump's own target; the jump then
+            # usually becomes unreachable and rule D removes it.
+            retarget = {}
+            if 'A' in _SZ3_PEEP and _round > 0:
+                def _final(addr, depth=0):
+                    tk = byidx.get(addr)
+                    while (depth < 8 and tk is not None and not drop[tk]
+                           and tk not in repl
+                           and instrs[tk]['jump_pos'] is not None
+                           and instrs[tk]['op'] in (0x8C, 0x9C)):
+                        j = instrs[tk]
+                        addr2 = j['jump_pos'] + j['jump_len'] + j['jump_off'] - 2
+                        if addr2 == addr:
+                            break
+                        addr = addr2
+                        tk = byidx.get(addr)
+                        depth += 1
+                    return addr
+                for k, r in enumerate(instrs):
+                    if drop[k] or k in repl:
+                        continue
+                    if r['branch_pos'] is not None and r['branch_off'] not in (0, 1):
+                        t0 = r['n'] + r['branch_off'] - 2
+                        t1 = _final(t0)
+                        if t1 != t0 and (t1 in byidx or t1 == len(code)):
+                            retarget[('b', k)] = t1
+                    if r['jump_pos'] is not None:
+                        t0 = r['jump_pos'] + r['jump_len'] + r['jump_off'] - 2
+                        t1 = _final(t0)
+                        if t1 != t0 and (t1 in byidx or t1 == len(code)):
+                            retarget[('j', k)] = t1
+
+            # --- B: branch straight to RTRUE/RFALSE via the reserved branch
+            # offsets 1/0.  Always encodable in the 1-byte branch form, so a
+            # 2-byte branch to a return shrinks by a byte and the return itself
+            # often becomes unreachable (rule D then drops it).
+            force_br = {}
+            if 'B' in _SZ3_PEEP:
+                for k, r in enumerate(instrs):
+                    if (drop[k] or k in repl or r['branch_pos'] is None
+                            or r['branch_off'] in (0, 1)
+                            or r['branch_pos'] + r['branch_len'] != r['n']):
+                        continue
+                    tk = byidx.get(r['n'] + r['branch_off'] - 2)
+                    if tk is None or drop[tk] or tk in repl:
+                        continue
+                    top = instrs[tk]['op']
+                    if top == 0xB0 and (instrs[tk]['n'] - instrs[tk]['a']) == 1:
+                        force_br[k] = 1
+                    elif top == 0xB1 and (instrs[tk]['n'] - instrs[tk]['a']) == 1:
+                        force_br[k] = 0
+
+            narrow_b = set()
+            narrow_j = set()
+            if 'N' in _SZ3_PEEP and _round > 0:
+                for k, r in enumerate(instrs):
+                    if drop[k] or k in repl or k in force_br:
+                        continue
+                    if (r['branch_pos'] is not None and r['branch_len'] == 2
+                            and 2 <= r['branch_off'] <= 63
+                            and r['branch_pos'] + 2 == r['n']):
+                        bb = (0x80 if r['branch_on'] else 0) | 0x40 | r['branch_off']
+                        if bb < 0xF0:
+                            narrow_b.add(k)
+                    elif (r['jump_pos'] is not None and r['jump_len'] == 2
+                          and 2 <= r['jump_off'] <= 0xEF
+                          and r['jump_pos'] + 2 == r['n']
+                          and r['jump_pos'] == r['a'] + 1):
+                        narrow_j.add(k)
+
+            if (not any(drop) and not repl and not narrow_b and not narrow_j
+                    and not force_br and not retarget):
+                return routine_code
+
+            # --- rebuild -------------------------------------------------------
+            new_len = [0] * nins
+            for k, r in enumerate(instrs):
+                if drop[k]:
+                    new_len[k] = 0
+                elif k in repl:
+                    new_len[k] = len(repl[k])
+                elif k in narrow_b or k in narrow_j:
+                    new_len[k] = (r['n'] - r['a']) - 1
+                elif k in force_br:
+                    new_len[k] = (r['n'] - r['a']) - (r['branch_len'] - 1)
+                else:
+                    new_len[k] = r['n'] - r['a']
+            newaddr = [0] * (nins + 1)
+            pos = body_start
+            for k in range(nins):
+                newaddr[k] = pos
+                pos += new_len[k]
+            newaddr[nins] = pos
+            end_new = pos
+
+            def surviving(k):
+                while k < nins and drop[k]:
+                    k += 1
+                return k
+
+            def new_target(addr):
+                if addr == len(code):
+                    return end_new
+                k = byidx.get(addr)
+                if k is None:
+                    return None
+                k = surviving(k)
+                return newaddr[k] if k <= nins else None
+
+            pieces = []
+            ok = True
+            for k, r in enumerate(instrs):
+                if drop[k]:
+                    continue
+                if k in repl and k not in repl_same:
+                    pieces.append(bytearray(repl[k]))
+                    continue
+                # layout-preserving rewrites still need their branch/jump
+                # offsets repaired below, so they take the normal path
+                nb = bytearray(repl[k] if k in repl_same else code[r['a']:r['n']])
+                base = newaddr[k]
+                if k in force_br:
+                    bp = r['branch_pos'] - r['a']
+                    bb = (0x80 if r['branch_on'] else 0) | 0x40 | force_br[k]
+                    del nb[bp:]
+                    nb.append(bb)
+                    pieces.append(nb)
+                    continue
+                if k in narrow_j:
+                    t = new_target(r['jump_pos'] + r['jump_len'] + r['jump_off'] - 2)
+                    off = None if t is None else t - (base + 2) + 2
+                    if off is None or not (2 <= off <= 0xEF):
+                        ok = False
+                        break
+                    pieces.append(bytearray([0x9C, off]))
+                    continue
+                if k in narrow_b:
+                    t = new_target(r['n'] + r['branch_off'] - 2)
+                    bp = r['branch_pos'] - r['a']
+                    off = None if t is None else t - (base + bp + 1) + 2
+                    if off is None or not (2 <= off <= 63):
+                        ok = False
+                        break
+                    bb = (0x80 if r['branch_on'] else 0) | 0x40 | off
+                    if bb >= 0xF0:
+                        ok = False
+                        break
+                    del nb[bp:]
+                    nb.append(bb)
+                    pieces.append(nb)
+                    continue
+                if r['branch_pos'] is not None and r['branch_off'] not in (0, 1):
+                    t = new_target(retarget.get(('b', k), r['n'] + r['branch_off'] - 2))
+                    if t is None:
+                        ok = False
+                        break
+                    after = base + (r['n'] - r['a'])
+                    off = t - after + 2
+                    bp = r['branch_pos'] - r['a']
+                    if r['branch_len'] == 1:
+                        if not (2 <= off <= 63):
+                            ok = False
+                            break
+                        bb = (0x80 if r['branch_on'] else 0) | 0x40 | off
+                        if bb >= 0xF0:
+                            ok = False
+                            break
+                        nb[bp] = bb
+                    else:
+                        if not (-8192 <= off <= 8191) or off in (0, 1):
+                            ok = False
+                            break
+                        u = off & 0x3FFF
+                        nb[bp] = (0x80 if r['branch_on'] else 0) | ((u >> 8) & 0x3F)
+                        nb[bp + 1] = u & 0xFF
+                if r['jump_pos'] is not None:
+                    t = new_target(retarget.get(('j', k),
+                                                r['jump_pos'] + r['jump_len']
+                                                + r['jump_off'] - 2))
+                    if t is None:
+                        ok = False
+                        break
+                    after = base + (r['jump_pos'] - r['a']) + r['jump_len']
+                    off = t - after + 2
+                    jp = r['jump_pos'] - r['a']
+                    if r['jump_len'] == 1:
+                        if not (2 <= off <= 0xEF):
+                            ok = False
+                            break
+                        nb[jp] = off
+                    else:
+                        u = off & 0xFFFF
+                        nb[jp] = (u >> 8) & 0xFF
+                        nb[jp + 1] = u & 0xFF
+                pieces.append(nb)
+            if not ok:
+                return routine_code
+
+            newcode = bytearray(code[:body_start])
+            for p in pieces:
+                newcode.extend(p)
+            if len(newcode) != end_new:
+                return routine_code
+
+            # --- remap recorded placeholder positions --------------------------
+            posmap = {}
+            for k, r in enumerate(instrs):
+                if drop[k] or (k in repl and k not in repl_same) or k in narrow_j:
+                    continue
+                lim = ((r['branch_pos'] - r['a'])
+                       if (k in narrow_b or k in force_br) else (r['n'] - r['a']))
+                for off in range(lim):
+                    posmap[r['a'] + off] = newaddr[k] + off
+
+            def remap(lst):
+                res = []
+                for rel, idx in lst:
+                    if rel < body_start:
+                        res.append((rel, idx))
+                    elif rel in posmap:
+                        res.append((posmap[rel], idx))
+                return res
+
+            self._pending_placeholders = remap(self._pending_placeholders)
+            self._pending_tell_positions = remap(self._pending_tell_positions)
+            routine_code = newcode
+        return routine_code
+    def _inline_string_ok(self, text):
+        """Is this literal cheaper inline (PRINT + z-text) than in the table?
+
+        table:  len + pad  +  3 bytes per use (PRINT_PADDR)
+        inline: (1 + len) bytes per use, and no alignment padding at all
+        """
+        if self.version < 3:
+            return False
+        counts = getattr(self, '_str_use_counts', None)
+        if counts is None:
+            return False
+        u = counts.get(text, 99)
+        if u <= 0:
+            return False
+        cache = self._inline_ok_cache
+        key = (text, u)
+        if key in cache:
+            return cache[key]
+        try:
+            n = len(words_to_bytes(self.encoder.encode_string(text)))
+        except Exception:
+            cache[key] = False
+            return False
+        align = 8 if self.version >= 8 else (4 if self.version >= 4 else 2)
+        pad = (-n) % align
+        ok = (1 + n) * u <= n + pad + 3 * u
+        cache[key] = ok
+        return ok
+
+    def _count_string_uses(self, program):
+        """Count every literal-string occurrence in the program AST."""
+        counts = {}
+        seen = set()
+        stack = [program]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (list, tuple)):
+                stack.extend(node)
+                continue
+            if not hasattr(node, '__dict__') or id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, StringNode):
+                counts[node.value] = counts.get(node.value, 0) + 1
+                continue
+            for v in vars(node).values():
+                if isinstance(v, (list, tuple)) or hasattr(v, '__dict__'):
+                    stack.append(v)
+        return counts
 
     def generate_routine(self, routine: RoutineNode) -> bytes:
         """Generate bytecode for a routine."""
@@ -3798,6 +4750,16 @@ class ImprovedCodeGenerator:
                         routine_code[i+2] = again_offset_unsigned & 0xFF
                     i += 1
 
+        # ZILCH-style routine-tail return idioms (PRINTR / RET-of-pushed-const).
+        # Runs after every in-routine placeholder patch, only truncates the end,
+        # and only when nothing branches into the removed bytes.
+        try:
+            _body0 = 1 + (2 * routine_code[0] if self.version <= 4 else 0)
+            routine_code = self._routine_peephole(routine_code, _body0)
+            routine_code = self._tail_peephole(routine_code, _body0)
+        except Exception:
+            pass
+
         # Store routine address for later reference
         self.routines[routine.name] = routine_start
 
@@ -3843,6 +4805,34 @@ class ImprovedCodeGenerator:
             pass
 
         return False
+
+    def _action_is_print_crlf(self, action) -> bool:
+        """<TELL "text" CR> / <PROG () ... <PRINTI "text"> <CRLF>>?"""
+        if not (isinstance(action, FormNode) and isinstance(action.operator, AtomNode)):
+            return False
+        _op = action.operator.value.upper()
+        if _op in ('PROG', 'BIND'):
+            return self._prog_tail_is_print_crlf(action)
+        if _op in ('TELL', 'PRINTI', 'PRINT'):
+            ops = action.operands
+            return (len(ops) >= 2 and isinstance(ops[-1], AtomNode)
+                    and ops[-1].value.upper() in ('CR', 'CRLF')
+                    and isinstance(ops[-2], StringNode))
+        return False
+
+    def _prog_tail_is_print_crlf(self, form) -> bool:
+        body = [s for s in form.operands[1:]] if len(form.operands) >= 3 else []
+        if len(body) < 2:
+            return False
+        last, prev = body[-1], body[-2]
+        if not (isinstance(last, FormNode) and isinstance(last.operator, AtomNode)
+                and last.operator.value.upper() in ('CRLF', 'CR')
+                and not last.operands):
+            return False
+        return (isinstance(prev, FormNode) and isinstance(prev.operator, AtomNode)
+                and prev.operator.value.upper() in ('PRINTI', 'TELL', 'PRINT')
+                and len(prev.operands) == 1
+                and isinstance(prev.operands[0], StringNode))
 
     def _prog_contains_return(self, form: FormNode) -> bool:
         """Check if a PROG/BIND/REPEAT form contains a RETURN anywhere in its body.
@@ -4753,6 +5743,29 @@ class ImprovedCodeGenerator:
                 # Nested anonymous table element -> positional pointer fixup
                 # recorded at emission (depth>=2 tables like zork1's
                 # HERO-MELEE middle LTABLEs previously kept raw 0xFFxx words).
+                # A nested table written as a FORM rather than a TableNode.
+                # The parser only turns TABLE/ITABLE/LTABLE/PLTABLE into
+                # TableNodes; PTABLE (and any table form reached through a
+                # generic expression slot) arrives as a FormNode, and the
+                # generic value path below evaluated it to 0.  hollywood
+                # hijinx's <GLOBAL UNKNOWN-MSGS <LTABLE 0 <PTABLE "..." "...">
+                # ...>> therefore held four NULL pointers, and every
+                # unknown-word / orphan message printed a Z-string decoded
+                # from address 0 (pages of abbreviation garbage).
+                if (isinstance(val, FormNode)
+                        and isinstance(getattr(val, 'operator', None), AtomNode)
+                        and val.operator.value.upper() in (
+                            'TABLE', 'PTABLE', 'LTABLE', 'PLTABLE', 'ITABLE')):
+                    _ntt = val.operator.value.upper()
+                    _nflags = ['PURE'] if _ntt in ('PTABLE', 'PLTABLE') else []
+                    _ntype = {'PTABLE': 'TABLE', 'PLTABLE': 'LTABLE'}.get(_ntt, _ntt)
+                    _nvals = list(val.operands)
+                    _nsize = None
+                    if _ntype == 'ITABLE' and _nvals and isinstance(_nvals[0], NumberNode):
+                        _nsize = _nvals[0].value
+                        _nvals = _nvals[1:]
+                    val = TableNode(_ntype, _nflags, _nsize, _nvals,
+                                    getattr(val, 'line', 0), getattr(val, 'column', 0))
                 if isinstance(val, TableNode):
                     child_idx = self._add_table(val)
                     self._emitted_nested_table_ptr = True
@@ -5521,6 +6534,14 @@ class ImprovedCodeGenerator:
         # Multiple gen_tell calls within one statement (e.g., COND branches) accumulate.
         code = bytearray()
         i = 0
+        _tail_fuse_idx = -1
+        if (getattr(self, '_tail_hint_ops', None) == id(operands)
+                and len(operands) >= 2
+                and isinstance(operands[-1], AtomNode)
+                and operands[-1].value.upper() in ('CR', 'CRLF')
+                and isinstance(operands[-2], StringNode)
+                and self._inline_string_ok(operands[-2].value)):
+            _tail_fuse_idx = len(operands) - 2
 
         while i < len(operands):
             op = operands[i]
@@ -5529,7 +6550,14 @@ class ImprovedCodeGenerator:
                 # Check for unprintable characters (ZIL0410)
                 self._check_unprintable_chars(op.value)
                 # Print literal string
-                if self.string_table is not None:
+                if self.string_table is not None and self._inline_print_ok(op.value):
+                    # Used exactly once program-wide: an INLINE print (0OP:2)
+                    # costs 1 byte + the z-string, vs 3 bytes of print_paddr
+                    # plus the same z-string in the (word-aligned) string
+                    # table.  This is ZILCH's PRINTI idiom.
+                    code.append(0xB2)
+                    code.extend(words_to_bytes(self.encoder.encode_string(op.value)))
+                elif self.string_table is not None:
                     self.string_table.add_string(op.value)
                     # Use fixed 3-byte placeholder format (same size as final output)
                     # This ensures JUMP/branch offsets are correct
@@ -5562,6 +6590,43 @@ class ImprovedCodeGenerator:
                 if atom_name == 'CR' or atom_name == 'CRLF':
                     # Print newline
                     code.append(0xBB)  # NEW_LINE opcode
+                    i += 1
+
+                elif self._is_tell_token(atom_name, operands[i + 1] if i + 1 < len(operands) else None):
+                    # Custom TELL token from TELL-TOKENS -- checked BEFORE
+                    # the built-in D/T/N/C/P/B/A interpretations so that a
+                    # game that declares its own <TELL-TOKENS D * <DPRINT .X>
+                    # A * <APRINT .X> ...> gets ITS routines.  hollywood
+                    # hijinx declares exactly that; the builtin 'A' meaning
+                    # (print_addr of a byte address) shadowed <APRINT .X>
+                    # and printed raw memory as text for every
+                    # <TELL A .F> -- inventory, "you see a X here", etc.
+                    # Peek at next arg for type-based dispatch
+                    next_arg = operands[i + 1] if i + 1 < len(operands) else None
+                    token_def = self._get_tell_token(atom_name, next_arg)
+                    # Consume the required number of arguments
+                    args = []
+                    for _ in range(token_def.arg_count):
+                        i += 1
+                        if i >= len(operands):
+                            raise ValueError(
+                                f"TELL token '{atom_name}' requires {token_def.arg_count} "
+                                f"argument(s), but not enough operands provided"
+                            )
+                        args.append(operands[i])
+                    # Expand the token with substituted arguments
+                    expanded = self._expand_tell_token(token_def.expansion, args)
+                    # Generate code for the expanded form(s)
+                    # Handle SpliceResultNode - generate code for each item
+                    from ..parser.ast_nodes import SpliceResultNode
+                    if isinstance(expanded, SpliceResultNode):
+                        for item in expanded.items:
+                            if isinstance(item, FormNode):
+                                token_code = self.generate_form(item)
+                                code.extend(token_code)
+                    elif isinstance(expanded, FormNode):
+                        token_code = self.generate_form(expanded)
+                        code.extend(token_code)
                     i += 1
 
                 elif atom_name == 'D' and i + 1 < len(operands):
@@ -6765,9 +7830,39 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
         if isinstance(operands[0], AtomNode):
-            var_num = self.globals.get(operands[0].value)
+            _name = operands[0].value
+            var_num = self.globals.get(_name)
             if var_num is None:
-                return b''
+                # ,NAME where NAME is an OBJECT / constant / routine / local is
+                # a VALUE, not a global read.  Returning b'' emitted no code at
+                # all while every caller assumes a stack value -- the compare
+                # then popped stale garbage (witness DOBJ?/IOBJ? macros expand
+                # to <EQUAL? ,PRSO <GVAL MONICA>>).  Materialize the value.
+                _val = None
+                if _name in getattr(self, 'objects', {}):
+                    _val = self.objects[_name]
+                elif _name in getattr(self, 'constants', {}):
+                    _val = self.constants[_name]
+                elif _name in getattr(self, '_routine_names', ()):
+                    _val = self._get_routine_placeholder(_name)
+                elif _name in getattr(self, 'locals', {}):
+                    # ZIL quirk: ,X naming a local reads the local.
+                    code.append(0xE8)          # VAR:0x08 PUSH
+                    code.append(0xBF)          # variable, omit, omit, omit
+                    code.append(self.locals[_name] & 0xFF)
+                    return bytes(code)
+                if _val is None:
+                    return b''
+                _val &= 0xFFFF
+                code.append(0xE8)              # VAR:0x08 PUSH
+                if _val <= 255:
+                    code.append(0x7F)          # small constant
+                    code.append(_val)
+                else:
+                    code.append(0x3F)          # large constant
+                    code.append((_val >> 8) & 0xFF)
+                    code.append(_val & 0xFF)
+                return bytes(code)
         else:
             return b''
 
@@ -6989,10 +8084,11 @@ class ImprovedCodeGenerator:
                      or is_funny_global_node(op1_node))
                 and (isinstance(op2_node, (FormNode, CondNode))
                      or is_funny_global_node(op2_node))):
-            if '_2OPS_SCRATCH_' not in self.globals:
-                self.globals['_2OPS_SCRATCH_'] = self.next_global
-                self.next_global += 1
-            _scr = self.globals['_2OPS_SCRATCH_']
+            # Must go through _alloc_top_global: a raw next_global grab
+            # collided with SOFT-GLOBALS' top-down slot on enchanter (both got
+            # 0xF1) and build_globals_data then zeroed the soft-globals table
+            # pointer, breaking every FUNNY global in the game.
+            _scr = self._alloc_top_global('_2OPS_SCRATCH_', initial=0)
             code.append(0xE9)  # PULL (VAR:0x09)
             code.append(0x7F)  # small-const operand = variable number
             code.append(_scr & 0xFF)
@@ -7177,6 +8273,17 @@ class ImprovedCodeGenerator:
         elif isinstance(node, TableNode):
             table_id = self._add_table(node)
             return (0, table_id)  # Table addresses are typically large
+        elif isinstance(node, StringNode):
+            # A string literal operand is its PACKED ADDRESS.  Without this the
+            # catch-all below returned the small constant 0 and every
+            # <PUTP obj ,P?SDESC "text"> stored a null string (cutthroats'
+            # RED-BOAR-INN-F: "There is a  here." instead of "A desk clerk
+            # sits behind the counter.").  _get_operand_type_and_value
+            # allocates the 0xFC00|idx placeholder the assembler resolves.
+            _st, _sv = self._get_operand_type_and_value(node)
+            # 2OP encoding: 0=const, 1=var. VAR encoding: 0=large, 1=small,
+            # 2=var. A packed string address is always a large constant.
+            return (0, _sv) if _st == 0 else (2, _sv)
         elif isinstance(node, AtomNode):
             if node.value in self.constants:
                 const_val = self.constants[node.value]
@@ -7192,6 +8299,14 @@ class ImprovedCodeGenerator:
                     return (0, obj_num)
             elif node.value in self.globals:
                 return (2, self.globals[node.value])
+            elif (hasattr(self, '_routine_names')
+                  and node.value in self._routine_names):
+                # A bare ROUTINE NAME is its packed address (the 2OP resolver
+                # already does this).  Without it <PUTP ,SAFE ,P?ACTION SAFE-F>
+                # stored 0 and the object lost its action routine entirely
+                # (cutthroats: "drill safe with drill" -> "You can't drill
+                # that!", the whole shipwreck-safe sequence unreachable).
+                return (0, self._get_routine_placeholder(node.value))
             else:
                 return (1, 0)  # Unknown, default to small constant 0
         else:
@@ -13279,7 +14394,10 @@ class ImprovedCodeGenerator:
                 else:
                     body_produces_value = True
 
-            if not body_produces_value:
+            if not body_produces_value and getattr(
+                    self, '_discard_prog_ops', None) == id(operands):
+                pass          # value provably discarded: skip the default push
+            elif not body_produces_value:
                 # Body doesn't produce a value, push TRUE (1) as default return
                 code.append(0xE8)  # PUSH #1 (3 bytes vs 4 for the ADD 0 idiom)
                 code.append(0x7F)  # 01 11 11 11: small const, rest omitted
@@ -17116,7 +18234,19 @@ class ImprovedCodeGenerator:
                 elif discard or not is_last_action:
                     action_code = self._gen_discard_stmt(action)
                 else:
-                    action_code = self.generate_statement(action)
+                    self._tail_terminal = False
+                    # The "<TELL ... CR>" -> PRINT_RET fusion may only fire for
+                    # THIS action's own operand list (never for a TELL nested
+                    # deeper inside it, whose successors would become dead code).
+                    self._tail_hint_ops = None
+                    if (tail and value_context and isinstance(action, FormNode)
+                            and isinstance(action.operator, AtomNode)
+                            and action.operator.value.upper() in ('TELL', 'PRINTI')):
+                        self._tail_hint_ops = id(action.operands)
+                    try:
+                        action_code = self.generate_statement(action)
+                    finally:
+                        self._tail_hint_ops = None
 
                 # Adjust any new placeholder offsets to be relative to COND start
                 # The action's code will be placed at actions_start_offset + len(actions_code)
@@ -17236,6 +18366,8 @@ class ImprovedCodeGenerator:
                             # CLOCKER daemons depended on it).
                             if discard:
                                 pass
+                            elif getattr(self, '_tail_terminal', False):
+                                pass       # PRINT_RET already returned true
                             elif value_context and tail:
                                 actions_code.append(0xB0)  # RTRUE
                             elif value_context:
@@ -17255,6 +18387,17 @@ class ImprovedCodeGenerator:
                     actions_code.append(0xB0)  # RTRUE
                 else:
                     actions_code.extend([0xE8, 0x7F, 0x01])  # PUSH 1
+            _lip = getattr(self, '_last_inline_print', None)
+            if (_lip and len(actions) >= 2
+                    and isinstance(actions[-1], FormNode)
+                    and isinstance(actions[-1].operator, AtomNode)
+                    and actions[-1].operator.value.upper() == 'RTRUE'
+                    and not actions[-1].operands
+                    and self._action_is_print_crlf(actions[-2])):
+                _sig = bytes([0xB2]) + _lip + bytes([0xBB, 0xB0])
+                if bytes(actions_code[-len(_sig):]) == _sig:
+                    del actions_code[-2:]                    # NEW_LINE + RTRUE
+                    actions_code[-len(_lip) - 1] = 0xB3      # PRINT -> PRINT_RET
             if tail:
                 # tail mode: every clause must END in a return instruction
                 _last_a = actions[-1] if actions else None
@@ -17294,6 +18437,30 @@ class ImprovedCodeGenerator:
                         _converted = True
                     elif len(action_code) > 0 and actions_code[-1:] == bytearray([0xB0]):
                         _converted = True  # void-op branch emitted RTRUE in tail mode
+                    elif (_opn in ('PROG', 'BIND') and len(_p3) == 3
+                          and _p3[0] == 0xE8 and _p3[1] == 0x7F
+                          and not self._prog_contains_return(_last_a)):
+                        # tail clause ending in a PROG's default value push:
+                        # PUSH #c + RET_POPPED (4 bytes) -> RTRUE/RFALSE/RET c
+                        _v = _p3[2]
+                        del actions_code[-3:]
+                        _fused = False
+                        _lip = getattr(self, '_last_inline_print', None)
+                        _ptxt = getattr(self, '_last_inline_print_text', None)
+                        if (False and _v == 1 and _lip
+                                and self._prog_tail_is_print_crlf(_last_a)
+                                and _last_a.operands[-2].operands[0].value == _ptxt):
+                            # ... PRINT "text" ; NEW_LINE ; (push) ; RET_POPPED
+                            #  -> PRINT_RET "text"     (classic ZILCH PRINTR)
+                            _sig = bytes([0xB2]) + _lip + bytes([0xBB])
+                            if bytes(actions_code[-len(_sig):]) == _sig:
+                                del actions_code[-1:]              # NEW_LINE
+                                actions_code[-len(_lip) - 1] = 0xB3  # -> PRINT_RET
+                                _fused = True
+                        if not _fused:
+                            actions_code.extend([0xB1] if _v == 0 else
+                                                ([0xB0] if _v == 1 else [0x9B, _v]))
+                        _converted = True
                 elif isinstance(_last_a, CondNode) and value_context:
                     _converted = True      # nested tail COND returns on every path
                 if not _converted:

@@ -1470,9 +1470,67 @@ class ZILCompiler:
         pos = 0
 
         while pos < len(body):
-            # Skip whitespace
-            while pos < len(body) and body[pos] in ' \t\n\r':
+            # Skip whitespace AND ;-commented clauses.  A compile-time COND
+            # body may begin with a commented-out clause:
+            #     %<COND ;(,ZDEBUGGING? '<II-APPLY "Int" .RTN>)
+            #            (ELSE '<APPLY .RTN>)>
+            # (hollywood hijinx CLOCKER, misc.zil ~798).  The old loop only
+            # skipped whitespace and then broke out on the ';' (body[pos] !=
+            # '('), so ZERO clauses were parsed, _evaluate_compile_cond
+            # returned the EMPTY STRING and the whole %<COND ...> vanished
+            # from the source.  CLOCKER lost its <APPLY .RTN>: the clause
+            # collapsed to <COND (<SET FLG T>)> and NO queued interrupt ever
+            # ran (hollywood's tank/plane/rocket attacks never fired).
+            while pos < len(body):
+                ch = body[pos]
+                if ch in ' \t\n\r':
+                    pos += 1
+                    continue
+                if ch != ';':
+                    break
                 pos += 1
+                while pos < len(body) and body[pos] in ' \t\n\r':
+                    pos += 1
+                if pos >= len(body):
+                    break
+                if body[pos] == '"':
+                    pos += 1
+                    while pos < len(body):
+                        if body[pos] == '\\':
+                            pos += 2
+                            continue
+                        if body[pos] == '"':
+                            pos += 1
+                            break
+                        pos += 1
+                elif body[pos] in '(<[':
+                    _open = body[pos]
+                    _close = {'(': ')', '<': '>', '[': ']'}[_open]
+                    _depth = 0
+                    while pos < len(body):
+                        _c = body[pos]
+                        if _c == '"':
+                            pos += 1
+                            while pos < len(body):
+                                if body[pos] == '\\':
+                                    pos += 2
+                                    continue
+                                if body[pos] == '"':
+                                    break
+                                pos += 1
+                            pos += 1
+                            continue
+                        if _c == _open:
+                            _depth += 1
+                        elif _c == _close:
+                            _depth -= 1
+                            if _depth == 0:
+                                pos += 1
+                                break
+                        pos += 1
+                else:
+                    while pos < len(body) and body[pos] not in ' \t\n\r':
+                        pos += 1
 
             if pos >= len(body):
                 break
@@ -2790,6 +2848,14 @@ class ZILCompiler:
                         if syn_upper not in verb_numbers:
                             verb_word_order.append(syn_upper)
                             verb_numbers[syn_upper] = 255 - len(verb_word_order) + 1
+                    elif syn_upper in unique_verbs:
+                        # The synonym has SYNTAX lines of its own, so it is a
+                        # verb in its own right and KEEPS the number assigned
+                        # when those lines were seen.  Sharing the head's
+                        # number made two verbs claim one VERBS[255-n] slot
+                        # (enchanter: <SYNONYM DROP RELEASE EXIT> plus
+                        # <SYNTAX EXIT = V-EXIT> -- 'drop x' dispatched V-EXIT).
+                        pass
                     else:
                         # Non-removed synonym shares main verb's number
                         verb_numbers[syn_upper] = main_verb_num
@@ -4465,11 +4531,23 @@ class ZILCompiler:
 
         def encode_exit_classic(value):
             """Encode a classic (PTSIZE-dispatched) direction exit property."""
-            from .parser.ast_nodes import AtomNode as _A, StringNode as _S
+            from .parser.ast_nodes import (AtomNode as _A, StringNode as _S,
+                                           NumberNode as _N)
 
             def room_num(node):
                 nm = node.value if isinstance(node, _A) else str(node)
                 return obj_name_to_num.get(nm, 0)
+
+            if isinstance(value, _N):
+                # A bare NUMBER under a direction name is DATA, not an exit:
+                # cutthroats keeps the outfitter's prices in P?NORTH
+                # ((NORTH 24) on the flashlight) and V-BUY does
+                # <GETP ,PRSO ,P?NORTH>.  Returning None here dropped the
+                # property entirely and every purchase said "That's not for
+                # sale."  ZILCH stores a 2-byte word (official binary:
+                # FLASHLIGHT property 31 = 00 18).
+                _nv = int(value.value) & 0xFFFF
+                return bytes([(_nv >> 8) & 0xFF, _nv & 0xFF])
 
             if isinstance(value, _A):
                 return bytes([room_num(value) & 0xFF])                    # UEXIT
@@ -4858,10 +4936,17 @@ class ZILCompiler:
             return obj_name_to_num.get(parent_name, 0)
 
         from .parser.ast_nodes import AtomNode as _AtomNode
+        from .parser.ast_nodes import StringNode as _StringNode
 
         def _is_dir_exit_value(v):
             """True if v is a direction-exit value (e.g. [TO, ROOM, ...]) rather
             than a container object -- IN doubles as the IN direction."""
+            if isinstance(v, _StringNode):
+                # (IN "message") is the IN direction's NEXIT refusal string,
+                # never a container.  Treating it as one built the room with
+                # parent 0 (cutthroats WINDING-ROAD-1: no room-name line, and
+                # every <IN? room ,ROOMS> test wrong).
+                return True
             if isinstance(v, list) and v:
                 f = v[0]
                 fv = (f.value.upper() if isinstance(f, _AtomNode)
@@ -4969,6 +5054,30 @@ class ZILCompiler:
         # Refresh table data and offsets after object building (PROPSPEC may have created new tables)
         table_data = codegen.get_table_data()
         table_offsets = codegen.get_table_offsets()
+        # ...and the derived values.  Tables created here are IMPURE and sort
+        # BEFORE every pure table, so each one shifts ACTIONS/PREACTIONS (and
+        # any other table holding routine-address markers) later in the block.
+        # Leaving the fixup list stale wrote enchanter's 208 packed action
+        # routine addresses 306 bytes early: ACTIONS[k] got action k+153's
+        # routine and the top 153 slots kept their raw 0xF0xx placeholders, so
+        # PERFORM's <APPLY <GET ,ACTIONS .A>> called into the string area on
+        # the first command.  impure_tables_size is the static-memory
+        # (PURBOT) boundary and goes stale the same way.
+        if codegen.tables:
+            impure_tables_size = codegen.get_impure_tables_size()
+            table_routine_fixups = codegen.get_table_routine_fixups()
+        # ...and everything else derived from the table layout.  Object
+        # building appends IMPURE tables for table-valued properties
+        # (planetfall: 80 of them, 1,920 bytes), which shifts the sorted
+        # (impure, parser, pure) layout: every pure-table offset moves and the
+        # impure/pure split moves with it.  Leaving these stale made the
+        # assembler patch ACTIONS/PREACTIONS routine addresses at the old
+        # offsets (so those tables kept raw 0xF0xx routine placeholders and
+        # every verb dispatch became a no-op / a wild call) and put the new
+        # writable tables in static memory.
+        tables_with_placeholders = codegen.get_tables_with_placeholders()
+        impure_tables_size = codegen.get_impure_tables_size()
+        table_routine_fixups = codegen.get_table_routine_fixups()
 
         # Register flag bit assignments with codegen for FSET/FCLEAR/FSET? opcodes
         for flag_name, bit_num in flag_bit_map.items():

@@ -61,9 +61,24 @@ def _gassigned_guarded_names(test_node):
     return names
 
 
-def _cond_is_compile_time_mdl(node):
+def _ct_bound_names(bindings):
+    """Names bound at MACRO-expansion time (DEFMAC params and "AUX" vars)."""
+    try:
+        return {str(_k).upper() for _k in (bindings or {}).keys()}
+    except Exception:
+        return set()
+
+
+def _cond_is_compile_time_mdl(node, bound=None):
     def ok(n, guarded):
-        if isinstance(n, (NumberNode, StringNode, LocalVarNode)):
+        if isinstance(n, LocalVarNode):
+            # .X is a compile-time test ONLY when X is a binding of the macro
+            # being expanded.  When it names a ROUTINE local the COND is a
+            # RUNTIME test and folding it silently picks a branch: witness
+            # TIME-PRINT's <TELL <COND (.AM "a.m.") (T "p.m.")>> collapsed to
+            # <PRINT "p.m."> and the game never printed a.m. again.
+            return bound is None or n.name.upper() in bound
+        if isinstance(n, (NumberNode, StringNode)):
             return True
         if isinstance(n, AtomNode):
             return True
@@ -916,6 +931,21 @@ class MDLEvaluator:
                         list_items.append(NumberNode(sub))
                 # Always create the form - even for empty lists (important for PROG/BIND)
                 form_operands.append(FormNode(AtomNode("()", 0, 0), list_items, 0, 0))
+
+        # <FORM GVAL FOO> IS ',FOO and <FORM LVAL FOO> IS '.FOO (MDL).
+        # Leaving them as FormNodes made every consumer treat them as nested
+        # expressions to evaluate onto the stack -- and gen_gval emits NO code
+        # for a name that is an object rather than a global, so the stack
+        # value never existed (witness: <DOBJ? MONICA> -> `je PRSO,sp`, every
+        # ASK/CONFRONT test false).  Normalizing also yields compact operands.
+        if isinstance(operator, AtomNode) and len(form_operands) == 1:
+            _opn = str(operator.value).upper()
+            _arg = form_operands[0]
+            if isinstance(_arg, AtomNode):
+                if _opn == 'GVAL':
+                    return GlobalVarNode(_arg.value, 0, 0)
+                if _opn == 'LVAL':
+                    return LocalVarNode(_arg.value, 0, 0)
 
         return FormNode(operator, form_operands, 0, 0)
 
@@ -2074,7 +2104,7 @@ class MacroExpander:
             # (ASSIGNED? etc.); a runtime COND (FSET?, GETP, ...) must survive
             # into the generated code -- starcross's TELL DEFMAC passes
             # runtime CONDs through, and folding baked "open." into BRIDGE-FCN.
-            if _cond_is_compile_time_mdl(node):
+            if _cond_is_compile_time_mdl(node, _ct_bound_names(bindings)):
                 result = self.mdl_evaluator.evaluate(node, bindings)
                 if isinstance(result, ASTNode):
                     return self._evaluate_mdl(result, bindings)
@@ -2126,7 +2156,7 @@ class MacroExpander:
                 if _items:
                     _shim_clauses.append((_items[0], list(_items[1:])))
             _shim = type('_CondShim', (), {'clauses': _shim_clauses})
-            if _cond_is_compile_time_mdl(_shim):
+            if _cond_is_compile_time_mdl(_shim, _ct_bound_names(bindings)):
                 # Evaluate COND at compile time using MDL evaluator
                 result = self.mdl_evaluator.evaluate(node, bindings)
                 if isinstance(result, ASTNode):
