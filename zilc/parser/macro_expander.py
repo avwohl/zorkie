@@ -2754,6 +2754,28 @@ class MacroExpander:
         # For other node types, return as-is
         return node
 
+    def _all_locals_bound(self, node: ASTNode, bindings: Dict[str, Any]) -> bool:
+        """True if every LocalVarNode referenced in `node` has a binding.
+
+        Guards the eager evaluation of ~<PARSE/STRING/SPNAME ...> name-builders:
+        those are only reduced when their inputs are actually available. Nested
+        macros (e.g. WITH-HOOK's <~<PARSE <STRING "HOOK-BEFORE-" <SPNAME .NAME>>>>)
+        can reach _expand_quasiquote before .NAME is bound; evaluating then would
+        fabricate an empty "HOOK-BEFORE-" atom and reference an undefined routine.
+        In that case we return False and let _substitute keep the old behavior.
+        """
+        if isinstance(node, LocalVarNode):
+            return node.name.upper() in bindings
+        for v in vars(node).values():
+            if isinstance(v, ASTNode):
+                if not self._all_locals_bound(v, bindings):
+                    return False
+            elif isinstance(v, (list, tuple)):
+                for x in v:
+                    if isinstance(x, ASTNode) and not self._all_locals_bound(x, bindings):
+                        return False
+        return True
+
     def _expand_quasiquote(self, node: ASTNode, bindings: Dict[str, Any]) -> ASTNode:
         """
         Expand a quasiquoted expression.
@@ -2765,8 +2787,37 @@ class MacroExpander:
 
         This implements MDL/ZILF quasiquote semantics used for macro templates.
         """
-        # Handle unquote: evaluate the expression with current bindings
+        # Handle unquote: evaluate the expression with current bindings.
+        # (see _all_locals_bound guard note below)
+        #
+        # MDL/ZILF ~EXPR means "evaluate EXPR at expansion time and insert its
+        # value". _substitute alone only substitutes bound .VARs; it leaves
+        # compile-time NAME-constructing builtins un-reduced. That silently broke
+        # the ZILF stdlib idiom  ,~<PARSE <STRING .PREFIX "-READBUF">>  (from
+        # COPY-TO-BUFS / ACTIVATE-BUFS / WORD? / VERB?): it expanded to
+        # <GVAL <PARSE <STRING ...>>> instead of <GVAL EDIT-READBUF>, so the
+        # codegen emitted a garbage operand and COPY-TABLE scribbled over low
+        # memory (corrupting parser globals and crashing the first command).
+        # Evaluate those name-builders here; everything else keeps the previous
+        # substitution behavior so no other macro shifts.
         if isinstance(node, UnquoteNode):
+            expr = node.expr
+            if (isinstance(expr, FormNode)
+                    and isinstance(expr.operator, AtomNode)
+                    and expr.operator.value.upper()
+                    in ('PARSE', 'STRING', 'SPNAME', 'PNAME', 'UNPARSE')
+                    and self._all_locals_bound(expr, bindings)):
+                result = self.mdl_evaluator.evaluate(expr, bindings)
+                if isinstance(result, ASTNode):
+                    return result
+                if isinstance(result, str):
+                    return StringNode(result, node.line, node.column)
+                if isinstance(result, bool):
+                    return AtomNode('T' if result else '<>', node.line, node.column)
+                if isinstance(result, int):
+                    return NumberNode(result, node.line, node.column)
+                if result is not None:
+                    return self._convert_result_to_ast(result)
             return self._substitute(node.expr, bindings)
 
         # Handle splice-unquote: this should be handled by the parent

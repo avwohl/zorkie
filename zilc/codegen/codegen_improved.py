@@ -2875,12 +2875,33 @@ class ImprovedCodeGenerator:
         self.global_values['VERBS'] = self._table_marker(verbs_table_index)
 
     def _generate_verbs_table_zilf(self):
-        """Generate the ZILF-dialect VERBS table (byte-6 options, action-indexed).
+        """Generate the ZILF-standard-library VERBS/syntax table.
 
-        The ZILF library and toy games read VERBS[255 - action_num] and pull the
-        search-scope options from byte 6 of an 8-byte entry. This is the original
-        zorkie layout; the classic MDL compact format lives in
-        _generate_verbs_table_classic.
+        This matches ZILF's BuildOldFormatSyntaxTables (non-compact) exactly,
+        which is what the ZILF stdlib parser (tests/test-pairs/parser.zil,
+        MATCH-SYNTAX) reads:
+
+            PTR = <GET ,VERBS <- 255 ,P-V>>   ; P-V = verb's dictionary value
+            CNT = <GETB PTR 0>                ; number of syntax lines
+            first line at PTR+1, each SYN-REC-SIZE = 8 bytes:
+              byte 0  SYN-NOBJ    object count (0/1/2)
+              byte 1  SYN-PREP1   preposition value before object 1 (0 if none)
+              byte 2  SYN-PREP2   preposition value before object 2 (0 if none)
+              byte 3  SYN-FIND1   GWIM FIND attribute number for object 1 (0 if none)
+              byte 4  SYN-FIND2   GWIM FIND attribute number for object 2 (0 if none)
+              byte 5  SYN-OPTS1   scope search bits for object 1 (SF-* flags)
+              byte 6  SYN-OPTS2   scope search bits for object 2
+              byte 7  SYN-ACTION  action number -> PRSA (indexes ,ACTIONS)
+
+        VERBS is a word array of pointers indexed by (255 - verb_number); the
+        dictionary stores that same verb_number in the verb word's value byte,
+        so <GET ,VERBS <- 255 <verb value>>> lands on the verb's structure.
+        Syntax lines are emitted in REVERSE definition order (ZILF walks the
+        per-verb group with verb.Reverse()).
+
+        NOTE: the toy games (microquest/mazekey/reactor) also reach this path but
+        declare no <SYNTAX>, so they return at the syntax_entries guard below and
+        emit no VERBS table at all -- this format only affects ZILF-library games.
         """
         if not self.action_table or 'syntax_entries' not in self.action_table:
             return
@@ -2889,100 +2910,153 @@ class ImprovedCodeGenerator:
         if not syntax_entries:
             return
 
+        # VERBS is indexed by (255 - the verb's DICTIONARY value). The dictionary
+        # stores each verb word's per-verb V?/ACT? constant (verb_action_num) in
+        # byte 5 -- see compiler._dict_verb_num -- NOT the separate count-down
+        # verb_numbers. So a verb's block must be filed at (255 - verb_action_num)
+        # to match what <GET ,VERBS <- 255 ,P-V>> reads. (For "put" these differ:
+        # verb_action_num=20 vs verb_numbers=246, so indexing by verb_numbers made
+        # every PUT/READ/EXAMINE/... syntax lookup miss and PRSA stayed 0.)
+        verb_numbers = {}
+        for _e in syntax_entries:
+            _v = _e.get('verb')
+            _an = _e.get('verb_action_num') or _e.get('action_num')
+            if _v is not None and _an is not None:
+                verb_numbers.setdefault(str(_v).upper(), _an)
+
         # Reserve VERBS global
         self._alloc_top_global('VERBS')
 
-        # Get NEW-SFLAGS mapping if available
+        # Scope search bits. ZILF's ScopeFlags has two schemes:
+        #  * default (no <SETG NEW-SFLAGS ...>): the "Original" flag values, which
+        #    are exactly the SF-* constants parser.zil reads -- HAVE=2, MANY=4,
+        #    TAKE=8, ON-GROUND=16, IN-ROOM=32, CARRIED=64, HELD=128, default 0.
+        #  * NEW-SFLAGS: a game-supplied name->value map plus a SEARCH-STANDARD
+        #    default, used by games that redefine the scope options.
+        SCOPE_BITS = {
+            'HAVE': 2, 'MANY': 4, 'TAKE': 8, 'ON-GROUND': 16,
+            'IN-ROOM': 32, 'CARRIED': 64, 'HELD': 128,
+        }
         new_sflags = {}
         if self.compiler and hasattr(self.compiler, 'compile_globals'):
-            new_sflags = self.compiler.compile_globals.get('NEW-SFLAGS', {})
-
-        # Get constant values for NEW-SFLAGS lookups
+            new_sflags = self.compiler.compile_globals.get('NEW-SFLAGS', {}) or {}
         sflags_values = {}
-        for flag_name, const_name in new_sflags.items():
-            if const_name in self.constants:
-                sflags_values[flag_name] = self.constants[const_name]
+        for _fn, _cn in new_sflags.items():
+            if _cn in self.constants:
+                sflags_values[str(_fn).upper()] = self.constants[_cn]
 
-        # Built-in scope flag values
-        SEARCH_DO_TAKE = 1
-        SEARCH_MUST_HAVE = 2
-        SEARCH_MANY = 4
-        SEARCH_STANDARD = 8
+        def encode_obj(flags):
+            """Return (find, opts) bytes for one object's SYNTAX flag list.
 
-        # Group syntax entries by the per-verb action number (ZILF indexes VERBS by
-        # the verb's own V?/ACT? constant, so verbs that share a routine still get
-        # distinct slots). Keep the first entry per action.
-        action_to_entry = {}
+            '(FIND <flag>)' sets the GWIM attribute (flag) number; scope words OR
+            into the opts byte. With NEW-SFLAGS the game's custom map is used (plus
+            the SEARCH-STANDARD default for lists that name no custom flag);
+            otherwise the ZILF Original / parser.zil SF-* values are used.
+            """
+            find = 0
+            opts = 0
+            flist = list(flags or [])
+            scope = []
+            i = 0
+            while i < len(flist):
+                f = str(flist[i]).upper()
+                if f == 'FIND' and i + 1 < len(flist):
+                    find = self.constants.get(str(flist[i + 1]).upper(), 0)
+                    i += 2
+                    continue
+                scope.append(f)
+                i += 1
+            if sflags_values:
+                # NEW-SFLAGS scheme (SEARCH-DO-TAKE 1 / MUST-HAVE 2 / MANY 4 /
+                # STANDARD 8 built-ins, plus the game's custom flags).
+                has_custom = False
+                for f in scope:
+                    if f in sflags_values:
+                        opts |= sflags_values[f]
+                        has_custom = True
+                    elif f == 'HAVE':
+                        opts |= 2
+                    elif f == 'TAKE':
+                        opts |= 1
+                    elif f == 'MANY':
+                        opts |= 4
+                if scope and not has_custom:
+                    opts |= 8  # SEARCH-STANDARD default
+            else:
+                for f in scope:
+                    if f in SCOPE_BITS:
+                        opts |= SCOPE_BITS[f]
+            return find & 0xFF, opts & 0xFF
+
+        # Group every SYNTAX line under its verb word (in definition order).
+        verb_to_lines = {}
         for entry in syntax_entries:
-            action_num = entry.get('verb_action_num') or entry['action_num']
-            if action_num not in action_to_entry:
-                action_to_entry[action_num] = entry
+            verb_to_lines.setdefault(entry['verb'], []).append(entry)
 
-        if not action_to_entry:
-            return
+        # Build ALL per-verb syntax structures into ONE blob table. One
+        # self.tables entry keeps the table count low; the VERBS pointer slots
+        # are patched positionally via table_addr_fixups.
+        blob = bytearray()
+        verbnum_to_block_offset = {}  # verb_number -> offset of its structure in blob
+        for verb, lines in verb_to_lines.items():
+            vnum = verb_numbers.get(verb)
+            if vnum is None:
+                continue
 
-        # Create individual syntax entry tables for each action
-        entry_table_indices = {}  # action_num -> table_index
-        for action_num in sorted(action_to_entry.keys()):
-            entry = action_to_entry[action_num]
-            object_flags = entry.get('object_flags', [])
+            verbnum_to_block_offset[vnum] = len(blob)
+            blob.append(len(lines) & 0xFF)  # byte 0: number of syntax lines
 
-            entry_data = bytearray()
-            entry_data.extend([0x00, 0x00])  # verb pointer (unused here)
-            entry_data.extend([0x00, 0x00])  # obj1 flags
-            entry_data.extend([0x00, 0x00])  # obj2 flags
+            for line in reversed(lines):
+                nobj = int(line.get('num_objects', 0) or 0)
+                prep1 = int(line.get('prep1', 0) or 0)
+                prep2 = int(line.get('prep2', 0) or 0)
+                action = int(line.get('action_num', 0) or 0)
+                oflags = line.get('object_flags', []) or []
 
-            # Byte 6: options byte - computed from scope flags
-            options = 0
-            has_new_sflag = False
-            slot1_flags = object_flags[0] if object_flags else []
-            for flag in slot1_flags:
-                flag_upper = flag.upper()
-                if flag_upper in sflags_values:
-                    options |= sflags_values[flag_upper]
-                    has_new_sflag = True
-                elif flag_upper == 'HAVE':
-                    options |= SEARCH_MUST_HAVE
-                elif flag_upper == 'TAKE':
-                    options |= SEARCH_DO_TAKE
-                elif flag_upper == 'MANY':
-                    options |= SEARCH_MANY
-            if slot1_flags and not has_new_sflag:
-                options |= SEARCH_STANDARD
-            entry_data.append(options & 0xFF)
-            entry_data.append(0x00)  # padding to 8 bytes
+                find1, opts1 = encode_obj(oflags[0] if len(oflags) > 0 else [])
+                find2, opts2 = encode_obj(oflags[1] if len(oflags) > 1 else [])
+                if nobj < 1:
+                    find1 = opts1 = prep1 = 0
+                if nobj < 2:
+                    find2 = opts2 = prep2 = 0
 
-            table_index = len(self.tables)
-            self.table_offsets[table_index] = self._table_data_size
-            self._table_data_size += len(entry_data)
-            self.tables.append((f'_SYNTAX_ENTRY_{action_num}', bytes(entry_data), True, False))
-            entry_table_indices[action_num] = table_index
+                blob.append(nobj & 0xFF)      # byte 0 SYN-NOBJ
+                blob.append(prep1 & 0xFF)     # byte 1 SYN-PREP1
+                blob.append(prep2 & 0xFF)     # byte 2 SYN-PREP2
+                blob.append(find1)            # byte 3 SYN-FIND1
+                blob.append(find2)            # byte 4 SYN-FIND2
+                blob.append(opts1)            # byte 5 SYN-OPTS1
+                blob.append(opts2)            # byte 6 SYN-OPTS2
+                blob.append(action & 0xFF)    # byte 7 SYN-ACTION
 
-        # VERBS: array of pointers indexed by (255 - action_num). The parser
-        # only reads VERBS[255 - action] for verb action numbers that have a
-        # syntax entry (entry_table_indices); higher indices address trailing
-        # zero slots no verb can select, so we stop at 255 - min(action_num)
-        # instead of always emitting the full 512-byte array.
+        blob_index = len(self.tables)
+        self.table_offsets[blob_index] = self._table_data_size
+        self._table_data_size += len(blob)
+        self.tables.append(('_SYNTAX_ENTRIES', bytes(blob), True, False))
+
+        # VERBS: word array of pointers indexed by (255 - verb_number). Pointer
+        # slots start as zero and are patched positionally by the assembler
+        # (table_addr_fixups) to blob_address + block_offset. Only indices up to
+        # 255 - min(verb_number) can ever be read, so trim the trailing zeros.
+        verbs_table_index = blob_index + 1
         verbs_data = bytearray()
-        if entry_table_indices:
-            num_slots = 256 - min(entry_table_indices.keys())
+        if verb_numbers:
+            num_slots = 256 - min(verb_numbers.values())
             num_slots = max(1, min(256, num_slots))
         else:
             num_slots = 256
         for i in range(num_slots):
-            action_num = 255 - i
-            if action_num in entry_table_indices:
-                placeholder = self._table_marker(entry_table_indices[action_num])
-                verbs_data.append((placeholder >> 8) & 0xFF)
-                verbs_data.append(placeholder & 0xFF)
-            else:
-                verbs_data.extend([0x00, 0x00])
+            vnum = 255 - i
+            if vnum in verbnum_to_block_offset:
+                self.table_addr_fixups.append(
+                    (verbs_table_index, len(verbs_data), blob_index,
+                     verbnum_to_block_offset[vnum]))
+            verbs_data.extend([0x00, 0x00])
 
-        table_index = len(self.tables)
-        self.table_offsets[table_index] = self._table_data_size
+        self.table_offsets[verbs_table_index] = self._table_data_size
         self._table_data_size += len(verbs_data)
         self.tables.append(("_VERBS", bytes(verbs_data), True, False))
-        self.global_values['VERBS'] = self._table_marker(table_index)
+        self.global_values['VERBS'] = self._table_marker(verbs_table_index)
 
     def generate_long_word_table(self, long_words: List[str]):
         """Generate LONG-WORD-TABLE for words exceeding dictionary length limit.
@@ -8330,6 +8404,22 @@ class ImprovedCodeGenerator:
                 and value_node.operator.value == '<>'
                 and not value_node.operands):
             value_node = NumberNode(0)
+
+        # A literal constant whose 16-bit value lands in the assembler's reserved
+        # marker range (0xE000-0xFFFF: routine / table / string / vocab
+        # placeholder bands) would be misread by the position-blind placeholder
+        # scans and silently rewritten to a resolved address. The ZILF parser's
+        # <SET BEST-SCORE -999> hit this exactly -- -999 = 0xFC19 collides with the
+        # string-operand band 0xFC00|25, so MATCH-SYNTAX's sentinel became a string
+        # address and every syntax line lost the score comparison. Materialize such
+        # constants as <BOR (v & 0x7FFF) 0x8000> instead: both operands sit below
+        # 0xE000, so no marker byte is emitted, and the OR reproduces v exactly.
+        if isinstance(value_node, NumberNode):
+            _v16 = int(value_node.value) & 0xFFFF
+            if 0xE000 <= _v16 <= 0xFFFF:
+                value_node = FormNode(
+                    AtomNode('BOR'),
+                    [NumberNode(_v16 & 0x7FFF), NumberNode(0x8000)])
 
         # Check for indirect variable assignment (computed variable index)
         indirect_var_num = None  # Variable containing the target variable index
@@ -21114,6 +21204,44 @@ class ImprovedCodeGenerator:
                 code.append(0x0D)  # STORE opcode 13 (long form, small/small: 00 0 0 1101)
                 code.append(var_num & 0xFF)
                 code.append(value & 0xFF)
+            elif init_value is not None:
+                # Non-constant initializer (a form/cond/repeat expression, a
+                # variable reference, or a large constant). These were previously
+                # dropped, leaving the loop variable at its 0 default -- e.g. the
+                # ZILF parser's <REPEAT ((I <OR ,P-CONT 1>) W V) ...> then began
+                # its word scan at index 0 (GETWORD? 0 -> "I don't know the word").
+                # Evaluate the initializer onto the stack, then pop it into the
+                # loop variable.
+                ph_before = len(self._current_stmt_routine_offsets)
+                insert_pos = len(code)
+                if isinstance(init_value, FormNode):
+                    # <> / empty form yields no value; leave the var at 0.
+                    init_code = self.generate_form(init_value)
+                elif isinstance(init_value, CondNode):
+                    init_code = self.generate_cond(init_value)
+                elif isinstance(init_value, RepeatNode):
+                    init_code = self.generate_repeat(init_value)
+                else:
+                    # Simple operand (variable / constant / atom): PUSH its value.
+                    ot, ov = self._get_operand_type_and_value(init_value)
+                    push = bytearray([0xE8])               # VAR push
+                    if ot == 1:                            # variable
+                        push += bytes([0xBF, ov & 0xFF])
+                    elif 0 <= ov <= 255:                   # small constant
+                        push += bytes([0x7F, ov & 0xFF])
+                    else:                                  # large constant
+                        push += bytes([0x3F, (ov >> 8) & 0xFF, ov & 0xFF])
+                    init_code = bytes(push)
+                if init_code:
+                    # Re-base placeholder offsets recorded while generating the
+                    # initializer to its position in this REPEAT's code buffer.
+                    for k in range(ph_before, len(self._current_stmt_routine_offsets)):
+                        rel, ph = self._current_stmt_routine_offsets[k]
+                        self._current_stmt_routine_offsets[k] = (insert_pos + rel, ph)
+                    code.extend(init_code)         # result now on the stack
+                    code.append(0xE9)              # VAR pull ...
+                    code.append(0x7F)              # ... one small-constant operand
+                    code.append(var_num & 0xFF)    # ... = loop variable
 
         # Mark loop start position (after initialization)
         loop_start_pos = len(code)

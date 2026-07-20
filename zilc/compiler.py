@@ -2634,6 +2634,18 @@ class ZILCompiler:
             if ch == '!' and i + 1 < n and source[i + 1] == '\\':
                 i += 3  # character literal !\x (may be " < >)
                 continue
+            if ch == '\\' and i + 1 < n:
+                # A bare backslash OUTSIDE a string quotes the next char into an
+                # atom name -- e.g. the buzzword atom \" (a literal quote) in
+                # <BUZZ ... UNDO OOPS \. \, \">, or ,W?\" in the parser. The
+                # escaped char (especially a ") must NOT open a string, else
+                # string parity desyncs for the rest of the file and depth==0
+                # is reached inside PARSER, so routine-internal runtime CONDs
+                # (the bare-direction movement clause) get misread as top-level
+                # compile-time CONDs and deleted. _extract_balanced_content
+                # already skips it this way; keep the two scanners in sync.
+                i += 2
+                continue
             if ch == '"':
                 in_string = True
                 i += 1
