@@ -1,10 +1,65 @@
 # Zorkie STATUS
 
-Last measured: 2026-07-19 (session 8: **20-GAME zwalker L2 SUITE, ALL WIN FROM
-SOURCE**). This file is the single source of truth for project status and
-overrides any status claim in older docs. Reference/spec docs (Z-machine and ZIL
-specs, dialect notes, header/opcode references) live under docs/ and
-tests/test-games/ and are not status reports.
+Last measured: 2026-07-19/20 (sessions 8-9: **27-GAME zwalker L2 SUITE, ALL WIN
+FROM SOURCE — including the first V4 games, Trinity 100/100 and AMFV**). This
+file is the single source of truth for project status and overrides any status
+claim in older docs. Reference/spec docs (Z-machine and ZIL specs, dialect
+notes, header/opcode references) live under docs/ and tests/test-games/ and are
+not status reports.
+
+## Session 9 (2026-07-19 continued): 20 -> 27 games; V3 corpus complete-but-two; V4 arrives
+
+The zwalker L2 suite (compile ZIL source -> replay a source-matched walkthrough
+-> verified win in zwalker) is **27/27**: the previous 20 plus
+**spellbreaker 600/600, stationfall 80/80, plunderedhearts 25/25,
+leathergoddesses (321, self-randomized WIN_TEXT), lurkinghorror 100/100,
+trinity 100/100 (V4), amfv (V4, scoreless WIN_TEXT)**. Every V3 corpus game
+that has a verified route now compiles AND wins; moonmist fits the cap and
+replays its route to completion but stalls on a pre-existing ask/tell topic
+bug; planetfall's preserved source is truncated (comptwo.zil ends mid-object,
+a provenance problem). pytest 696/3 pre-existing throughout.
+
+Landed in session 9 (commit-by-commit catalog in git; highlights):
+- **Round-7** (spellbreaker/stationfall/plunderedhearts): VOC part-of-speech
+  accumulation; pseudo-noun dict value byte; DO-loop LONG exit-branch
+  off-by-2 (bodies >63 bytes executed data); PROPDEF defaults populated
+  (Z-Machine 12.2) -- which made minizork/zork2 match the OFFICIAL binaries
+  and required their routes re-derived (the old ones exploited SIZE=0);
+  JE nested-expression comparand evaluation (two independent shapes).
+- **Round-8** (leathergoddesses/lurkinghorror/moonmist-fit): dictionary
+  backslash-escape normalization (a phantom escaped entry re-sorted the dict
+  and staled 43 objects' SYNONYM fixups); CELF marginal-gain abbreviation
+  selector; 0xF0-band branch guard relaxation; AUX-local trimming; _VTBL
+  suppression; the MDL P?/PE/MULTIFROB DEFMAC OPT-parameter fix (135
+  lurkinghorror routines had compiled to garbage); ZILCH-builtin exit
+  constants; MAP-DIRECTIONS branch widening; variadic-arithmetic operands.
+  Plus positional vocab-placeholder resolution (kills the 8-bit 0xFB00|idx
+  ceiling; trinity 374 words, spellbreaker 262).
+- **V4 correctness** (trinity/amfv, 9 fixes): 16-bit constants truncated in
+  long-form 2OP/short-form 1OP operands (~30 emission sites; objects >255);
+  V4 scan_table (INTBL? was an RFALSE stub returning from the CALLER); V4
+  property-header second size byte bit 7; EZIP exit layouts; word-form room
+  GLOBAL and ADJECTIVE properties; scratch-global collision with the
+  SOFT-GLOBALS pointer; **call_vs2 for V4+ calls with 4..7 args** (calls were
+  silently truncated to 3 args -- amfv's parser passed the match table as the
+  4th arg); dead AUX-store elimination + identical-routine folding +
+  branch-invert peephole (880B, letting trinity's full-synonym build fit the
+  V4 cap at 262052/262140).
+- Verification-method lesson recorded: replay_solve seeds the RNG AFTER
+  GameWalker.start(); ad-hoc lockstep drivers that seed before start explore
+  a different stream and can "verify" a build that fails acceptance. All wins
+  above are replay_solve-verified.
+
+Remaining frontier:
+- moonmist: fits (130196) but its route stalls on a pre-existing ask/tell
+  topic-resolution bug ("Bolitho looks confused"); needs a parser-table
+  lockstep investigation.
+- planetfall: SOURCE truncated (comptwo.zil ends mid-object at TRIFFID);
+  re-check upstream for a complete revision -- not a zorkie bug.
+- cloak: ZILF-stdlib ISAVE (V5+ opcode) in a V3 build; the V5 target itself
+  is the real frontier (call_vs2 and the V4 fixes are a head start).
+- Cosmetics: stray \x01 for some CRLFs in V4 output; TELL two-space family;
+  amfv tubecar-departure message timing (2 of ~14 occurrences).
 
 ## Session 8 (2026-07-19): 16 -> 20 games, machine migrated to macOS, size-reduction pass landed
 

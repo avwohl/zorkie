@@ -18,7 +18,7 @@ _SZ3_INLINE = 'inline' in _SZ3_LEVERS
 _SZ3_TAIL = 'tail' in _SZ3_LEVERS
 _SZ3_PEEP = (_sz3_os.environ.get('MP_SZ3_PEEP')
              if _sz3_os.environ.get('MP_SZ3_PEEP') is not None
-             else ('DPQSTJLRNBZKG' if 'peep' in _SZ3_LEVERS else ''))
+             else ('DPQSTJLRNBZKGV' if 'peep' in _SZ3_LEVERS else ''))
 _SZ3_RULES = set((_sz3_os.environ.get('MP_SZ3_RULES') or 'R0,R1,R2,R3').split(','))
 _SZ3_R0 = 'R0' in _SZ3_RULES
 _SZ3_R1 = 'R1' in _SZ3_RULES
@@ -58,6 +58,41 @@ def _collect_ast_names(node, acc):
     if isinstance(node, ASTNode):
         for v in vars(node).values():
             _collect_ast_names(v, acc)
+
+
+def _collect_value_position_names(node, acc):
+    """Collect identifier-like strings reachable in VALUE position only.
+
+    Like _collect_ast_names, but a FormNode's call-operator atom and a
+    RoutineNode's own definition name are skipped.  A routine whose name is
+    collected here has its ADDRESS taken as data somewhere (<QUEUE I-FOO>,
+    a property value, a table element, a global/constant initializer, a
+    GVAL comparison) -- identical-body routine folding must leave such
+    routines alone, because games compare those addresses (classic INT/QUEUE
+    interrupt bookkeeping scans C-TABLE for a specific routine address)."""
+    if node is None or isinstance(node, (int, float, bool, bytes)):
+        return
+    if isinstance(node, str):
+        acc.add(node.upper())
+        return
+    if isinstance(node, (list, tuple, set, frozenset)):
+        for x in node:
+            _collect_value_position_names(x, acc)
+        return
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _collect_value_position_names(k, acc)
+            _collect_value_position_names(v, acc)
+        return
+    if isinstance(node, StringNode):
+        return
+    if isinstance(node, ASTNode):
+        for k, v in vars(node).items():
+            if k == 'operator' and isinstance(v, AtomNode):
+                continue
+            if k == 'name' and isinstance(node, RoutineNode):
+                continue
+            _collect_value_position_names(v, acc)
 
 
 _2OP_STORE_OPS = frozenset({0x08, 0x09, 0x0F, 0x10, 0x11, 0x12, 0x13,
@@ -895,6 +930,26 @@ class ImprovedCodeGenerator:
     def generate(self, program: Program) -> bytes:
         """Generate bytecode from program AST."""
         self._inline_ok_cache = {}
+        # Names referenced in VALUE (non-call) position anywhere: routines in
+        # this set have their address taken as data, so identical-body folding
+        # (generate_routine) must not alias them.  On any walk failure the set
+        # stays None and folding is disabled outright (safe direction).
+        try:
+            _value_refs = set()
+            _collect_value_position_names(
+                [r.body for r in program.routines]
+                + [getattr(r, 'local_defaults', None) for r in program.routines]
+                + [getattr(g, 'initial_value', None)
+                   for g in getattr(program, 'globals', []) or []]
+                + [getattr(c, 'value', None)
+                   for c in getattr(program, 'constants', []) or []]
+                + [getattr(o, 'properties', None)
+                   for o in (getattr(program, 'objects', []) or [])
+                   + (getattr(program, 'rooms', []) or [])],
+                _value_refs)
+            self._value_position_names = _value_refs
+        except Exception:
+            self._value_position_names = None
         self._str_use_counts = self._count_string_uses(program)
         # Single-use TELL literals are emitted inline (see _inline_print_ok).
         try:
@@ -4264,12 +4319,54 @@ class ImprovedCodeGenerator:
                     elif top == 0xB1 and (instrs[tk]['n'] - instrs[tk]['a']) == 1:
                         force_br[k] = 0
 
+            # --- V: a conditional branch that only skips the following
+            # unconditional JUMP inverts its sense and absorbs the jump's own
+            # target; the jump is dropped (`?~cond:+jumpsize ; jump L` ->
+            # `?cond:L`).  COND chains emit this shape when a clause body is
+            # just a jump to the end.  Applied only when nothing else lands on
+            # the jump, and only when the re-encoded offset provably fits the
+            # branch's existing 1- or 2-byte form (deletions can only shrink
+            # forward distances, so the old-coordinate bound is conservative);
+            # gated to _round > 0 like A/N so an infeasible rewrite can never
+            # discard a round that carries the other rules' gains.
+            flip = set()
+            if 'V' in _SZ3_PEEP and _round > 0:
+                for k, r in enumerate(instrs):
+                    if (drop[k] or k in repl or k in jz2 or k in long2
+                            or k in force_br or ('b', k) in retarget
+                            or r['branch_pos'] is None
+                            or r['branch_off'] in (0, 1)
+                            or r['branch_pos'] + r['branch_len'] != r['n']):
+                        continue
+                    kj = k + 1
+                    if kj >= nins or drop[kj] or kj in repl or kj in jz2:
+                        continue
+                    j = instrs[kj]
+                    if (j['jump_pos'] is None or j['op'] not in (0x8C, 0x9C)
+                            or j['a'] in tg):
+                        continue
+                    if r['n'] + r['branch_off'] - 2 != j['n']:
+                        continue
+                    jt = j['jump_pos'] + j['jump_len'] + j['jump_off'] - 2
+                    if not (jt in byidx or jt == len(code)):
+                        continue
+                    est = jt - r['n'] + 2   # old-coordinate offset bound
+                    if r['branch_len'] == 1:
+                        if not (2 <= est <= 63):
+                            continue
+                    else:
+                        if not (-8000 <= est <= 8000):
+                            continue
+                    flip.add(k)
+                    retarget[('b', k)] = jt
+                    drop[kj] = True
+
             narrow_b = set()
             narrow_j = set()
             if 'N' in _SZ3_PEEP and _round > 0:
                 for k, r in enumerate(instrs):
                     if (drop[k] or k in repl or k in force_br or k in jz2
-                            or k in long2):
+                            or k in long2 or k in flip):
                         continue
                     # Branch bytes / small-jump operands in the 0xF0-0xFF band
                     # are safe now: every placeholder scan over code is gated
@@ -4426,18 +4523,19 @@ class ImprovedCodeGenerator:
                     after = base + (r['n'] - r['a'])
                     off = t - after + 2
                     bp = r['branch_pos'] - r['a']
+                    _bon = r['branch_on'] != (k in flip)   # V inverts the sense
                     if r['branch_len'] == 1:
                         if not (2 <= off <= 63):
                             ok = False
                             break
-                        bb = (0x80 if r['branch_on'] else 0) | 0x40 | off
+                        bb = (0x80 if _bon else 0) | 0x40 | off
                         nb[bp] = bb
                     else:
                         if not (-8192 <= off <= 8191) or off in (0, 1):
                             ok = False
                             break
                         u = off & 0x3FFF
-                        nb[bp] = (0x80 if r['branch_on'] else 0) | ((u >> 8) & 0x3F)
+                        nb[bp] = (0x80 if _bon else 0) | ((u >> 8) & 0x3F)
                         nb[bp + 1] = u & 0xFF
                 if r['jump_pos'] is not None:
                     t = new_target(retarget.get(('j', k),
@@ -4622,6 +4720,7 @@ class ImprovedCodeGenerator:
 
         # Add padding if needed
         current_offset = len(self.code)
+        _pre_pad_len = current_offset
         if current_offset % alignment != 0:
             padding_needed = alignment - (current_offset % alignment)
             self.code.extend(bytes(padding_needed))  # Pad with zeros
@@ -4730,6 +4829,12 @@ class ImprovedCodeGenerator:
         # reset forced B1 back to its default 5, so WT? returned true instead of the
         # verb number and no game verb ever resolved.
         _num_passable = len(routine.params) + len(getattr(routine, 'opt_params', None) or [])
+        # V1-4 only: spans of the constant AUX-init STOREs below. The routine
+        # HEADER already carries these initial values, so the stores exist
+        # solely as the routine-level AGAIN reset target; when the finished
+        # body contains no routine-level AGAIN they are provably dead and are
+        # removed at the end of this function.
+        _const_init_spans = []
         for local_name in local_names:
             if local_name in routine.local_defaults:
                 default_node = routine.local_defaults[local_name]
@@ -4739,6 +4844,7 @@ class ImprovedCodeGenerator:
                 _const_default = None if isinstance(default_node, NumberNode) else self._resolve_constant_default(default_node)
                 if isinstance(default_node, NumberNode) or _const_default is not None:
                     init_val = default_node.value if isinstance(default_node, NumberNode) else _const_default
+                    _span_start = len(routine_code)
                     # Generate STORE instruction: store local init_val
                     if 0 <= init_val <= 255:
                         # Small constant: long form 0 0 0D = 0x0D
@@ -4752,6 +4858,8 @@ class ImprovedCodeGenerator:
                         routine_code.append(local_num & 0xFF)
                         routine_code.append((init_val >> 8) & 0xFF)
                         routine_code.append(init_val & 0xFF)
+                    if self.version <= 4:
+                        _const_init_spans.append((_span_start, len(routine_code)))
                 elif isinstance(default_node, FormNode):
                     # Complex expression - generate code to evaluate and store
                     # Generate the expression code (result ends up on stack)
@@ -5143,6 +5251,7 @@ class ImprovedCodeGenerator:
                 self._pending_vocab_positions = adjusted_voc
 
         # Pop routine loop context and patch AGAIN placeholders
+        _has_routine_again = False
         if hasattr(self, 'loop_stack') and self.loop_stack:
             routine_loop_ctx = self.loop_stack.pop()
             if routine_loop_ctx.get('loop_type') == 'ROUTINE':
@@ -5152,6 +5261,7 @@ class ImprovedCodeGenerator:
                 while i < len(routine_code) - 2:
                     if routine_code[i] == 0x8C and routine_code[i+1] == 0xFF and routine_code[i+2] == 0xAC:
                         # Found routine-level AGAIN placeholder at position i
+                        _has_routine_again = True
                         # Z-machine JUMP: Target = PC + Offset - 2
                         # PC after JUMP = i + 3, so Offset = Target - (i + 3) + 2 = Target - i - 1
                         again_offset = routine_init_start - (i + 1)
@@ -5163,6 +5273,41 @@ class ImprovedCodeGenerator:
                         routine_code[i+2] = again_offset_unsigned & 0xFF
                     i += 1
 
+        # V1-4: the routine header already initializes every AUX local (the
+        # initial-value words emitted above), so the constant STORE run at
+        # routine_init_start is reachable ONLY as the routine-level AGAIN
+        # reset target. When the finished body contains no routine-level
+        # AGAIN, nothing can ever execute those stores a second time and the
+        # entry state they produce is byte-for-byte the header's -- drop them
+        # and shift the recorded fixup positions left. (FormNode initializers
+        # run code at entry and are never recorded as removable spans; V5+
+        # has no header initial values, so the stores are always kept there.)
+        if self.version <= 4 and _const_init_spans and not _has_routine_again:
+            _cuts = list(_const_init_spans)
+            _new_code = bytearray()
+            _prev = 0
+            for _s, _e in _cuts:
+                _new_code.extend(routine_code[_prev:_s])
+                _prev = _e
+            _new_code.extend(routine_code[_prev:])
+            routine_code = _new_code
+
+            def _shift_off(off):
+                d = 0
+                for _s, _e in _cuts:
+                    if off >= _e:
+                        d += _e - _s
+                    else:
+                        break
+                return off - d
+
+            self._pending_placeholders = [
+                (_shift_off(o), pi) for o, pi in self._pending_placeholders]
+            self._pending_tell_positions = [
+                (_shift_off(o), pi) for o, pi in self._pending_tell_positions]
+            self._pending_vocab_positions = [
+                (_shift_off(o), pi) for o, pi in self._pending_vocab_positions]
+
         # ZILCH-style routine-tail return idioms (PRINTR / RET-of-pushed-const).
         # Runs after every in-routine placeholder patch, only truncates the end,
         # and only when nothing branches into the removed bytes.
@@ -5172,6 +5317,42 @@ class ImprovedCodeGenerator:
             routine_code = self._tail_peephole(routine_code, _body0)
         except Exception:
             pass
+
+        # Identical-routine folding: two routines whose finished bodies are
+        # byte-identical AND whose recorded fixup patterns (placeholder /
+        # TELL / vocab positions and indices) are identical necessarily
+        # resolve to identical final bytes, so they can share one copy of
+        # the code.  Verb stubs (<ROUTINE V-DIG () ...> et al.) commonly
+        # collapse this way.  The first routine (initial-PC entry) is never
+        # folded.  Purely a size transform: every reference goes through
+        # self.routines[name] and resolves to the shared address.
+        if not hasattr(self, '_routine_body_dedup'):
+            self._routine_body_dedup = {}
+        _dedup_key = (bytes(routine_code),
+                      tuple(self._pending_placeholders),
+                      tuple(self._pending_tell_positions),
+                      tuple(self._pending_vocab_positions))
+        _shared_start = self._routine_body_dedup.get(_dedup_key)
+        _value_refs = getattr(self, '_value_position_names', None)
+        _foldable = (_value_refs is not None
+                     and routine.name.upper() not in _value_refs)
+        if _shared_start is not None and self.routines and _foldable:
+            # Rewind the alignment padding added for this routine; nothing
+            # else touched self.code since.
+            del self.code[_pre_pad_len:]
+            self.routines[routine.name] = _shared_start
+            self._pending_placeholders.clear()
+            self._pending_tell_positions.clear()
+            self._pending_vocab_positions.clear()
+            if hasattr(self, 'routine_level_locals') and self.compiler is not None:
+                for local_name in self.routine_level_locals:
+                    if (local_name not in self.used_locals and
+                            local_name not in self.locals_with_side_effect_init):
+                        self.compiler.warn("ZIL0210", f"local variable '{local_name}' is never used")
+                for local_name in _trimmed_locals:
+                    self.compiler.warn("ZIL0210", f"local variable '{local_name}' is never used")
+            return bytes(routine_code)
+        self._routine_body_dedup[_dedup_key] = routine_start
 
         # Store routine address for later reference
         self.routines[routine.name] = routine_start
@@ -21260,7 +21441,12 @@ class ImprovedCodeGenerator:
         # Do the evaluation before the CALL opcode. When more than one argument needs
         # the stack, spill all but the last-evaluated one into a scratch global so the
         # CALL (whose stack operands pop left-to-right) sees them in the right order.
-        arg_ops = list(operands[:3])
+        # V4+ calls with 4..7 arguments use CALL_VS2 (VAR:12, a V4 opcode with a
+        # second operand-type byte); truncating to [:3] here silently DROPPED
+        # arguments 4+ (AMFV's <DO-SL ,HERE ,SOG ,SIR .TBL> lost its match table,
+        # so every noun resolved to NOT-HERE-OBJECT: "[You can't see any
+        # simulation mode here!]"). The version limits were validated above.
+        arg_ops = list(operands)
         form_positions = [i for i, op in enumerate(arg_ops)
                           if isinstance(op, (FormNode, CondNode, RepeatNode))]
         call_scratch = ['_CALLARG1_', '_CALLARG2_']
@@ -21309,7 +21495,10 @@ class ImprovedCodeGenerator:
             self._current_stmt_routine_offsets.append((placeholder_offset, placeholder_val))
             code.append(0x00)  # Store result to stack
             return bytes(code)
-        code.append(0xE0)  # VAR form, opcode 0x00
+        # 4..7 args need CALL_VS2 (VAR:12, V4+; two operand-type bytes for up
+        # to 8 operands). 0..3 args keep the 1-type-byte CALL_VS encoding.
+        use_vs2 = len(resolved) > 3
+        code.append(0xEC if use_vs2 else 0xE0)  # VAR form: call_vs2 / call_vs
 
         # Build type byte - first operand is large constant (0x00) for routine address
         types = [0x00]
@@ -21325,13 +21514,16 @@ class ImprovedCodeGenerator:
                 else:
                     types.append(0x00)  # Large constant
 
-        # Pad with "omitted" (0x03)
-        while len(types) < 4:
+        # Pad with "omitted" (0x03): 8 operand slots for CALL_VS2, else 4
+        while len(types) < (8 if use_vs2 else 4):
             types.append(0x03)
 
-        # Pack type byte (each type is 2 bits)
+        # Pack type byte(s) (each type is 2 bits; CALL_VS2 has a second byte)
         type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
         code.append(type_byte)
+        if use_vs2:
+            code.append((types[4] << 6) | (types[5] << 4)
+                        | (types[6] << 2) | types[7])
 
         # Use placeholder encoding for routine address
         placeholder_val = self._get_routine_placeholder(routine_name)
@@ -22565,9 +22757,12 @@ class ImprovedCodeGenerator:
 
         code = bytearray()
 
-        # Routine + up to 3 args (V3 instruction limit; gen_apply validates)
+        # Routine + args. V1-3: at most 3 args (CALL instruction limit,
+        # gen_apply validates). V4+: 4..7 args switch to CALL_VS2 (VAR:12,
+        # a V4 opcode) below -- truncating to [:4] dropped arguments.
+        max_ops = 4 if self.version <= 3 else 8
         all_ops = [NumberNode(0) if self._is_empty_false_form(op) else op
-                   for op in operands[:4]]
+                   for op in operands[:max_ops]]
 
         # A nested form/cond/repeat operand must be EVALUATED first (result
         # pushed to the stack); _get_operand_type_and_value only *assumes* it
@@ -22645,9 +22840,12 @@ class ImprovedCodeGenerator:
                 code.append(_v & 0xFF)
             code.append(0x00)  # Store result to stack
             return bytes(code)
-        code.append(0xE0)  # VAR form, opcode 0x00
+        # More than routine + 3 args needs CALL_VS2 (VAR:12, V4+; two
+        # operand-type bytes for up to 8 operands).
+        use_vs2 = len(resolved) > 4
+        code.append(0xEC if use_vs2 else 0xE0)  # call_vs2 / call_vs
 
-        # Build type byte for all operands (routine + up to 3 args)
+        # Build type byte for all operands (routine + args)
         # Type encoding: 00=large const, 01=small const, 10=variable, 11=omit
         types = []
         operand_bytes = []
@@ -22662,12 +22860,15 @@ class ImprovedCodeGenerator:
                 types.append(0x01)
                 operand_bytes.append([op_val & 0xFF])
 
-        # Pad with "omitted" (11)
-        while len(types) < 4:
+        # Pad with "omitted" (11): 8 operand slots for CALL_VS2, else 4
+        while len(types) < (8 if use_vs2 else 4):
             types.append(0x03)
 
         type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
         code.append(type_byte)
+        if use_vs2:
+            code.append((types[4] << 6) | (types[5] << 4)
+                        | (types[6] << 2) | types[7])
 
         # Add all operand bytes
         for op_bytes in operand_bytes:
@@ -22695,12 +22896,13 @@ class ImprovedCodeGenerator:
         """
         if len(operands) < 1:
             raise ValueError("APPLY requires at least 1 operand")
-        if self.version < 5:
+        if self.version < 4:
             if len(operands) > 4:
-                raise ValueError("APPLY accepts at most 4 operands in V3/V4")
+                raise ValueError("APPLY accepts at most 4 operands in V1-3")
         else:
+            # CALL_VS2 (up to 7 args) is a V4 opcode
             if len(operands) > 8:
-                raise ValueError("APPLY accepts at most 8 operands in V5+")
+                raise ValueError("APPLY accepts at most 8 operands in V4+")
 
         # APPLY is like CALL - pass all operands including args
         return self.gen_call(operands)
