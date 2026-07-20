@@ -97,8 +97,10 @@ def _ct_bound_names(bindings):
         return set()
 
 
-def _cond_is_compile_time_mdl(node, bound=None, ops=None, allow_quote=False):
+def _cond_is_compile_time_mdl(node, bound=None, ops=None, allow_quote=False,
+                              ct_globals=None):
     _ops = ops if ops is not None else _CT_COND_OPS
+    _ctg = ct_globals or ()
     def ok(n, guarded):
         if isinstance(n, LocalVarNode):
             # .X is a compile-time test ONLY when X is a binding of the macro
@@ -112,9 +114,11 @@ def _cond_is_compile_time_mdl(node, bound=None, ops=None, allow_quote=False):
         if isinstance(n, AtomNode):
             return True
         if isinstance(n, GlobalVarNode):
-            # ,X is compile-time only when the same test GASSIGNED?-guards X
-            # (the classic <AND <GASSIGNED? X> ,X> ZILCH-switch idiom).
-            return n.name.upper() in guarded
+            # ,X is compile-time when the same test GASSIGNED?-guards X (the
+            # classic <AND <GASSIGNED? X> ,X> ZILCH-switch idiom) OR when X is a
+            # known compile-time global (MDL-ZIL SETG20 switch, e.g. DEBUGGING?).
+            _nm = n.name.upper()
+            return _nm in guarded or _nm in _ctg
         if isinstance(n, FormNode):
             if not isinstance(n.operator, AtomNode):
                 return False
@@ -136,9 +140,10 @@ def _cond_is_compile_time_mdl(node, bound=None, ops=None, allow_quote=False):
 _CT_COND_EXT_OPS = _CT_COND_OPS | {'REST', 'NTH'}
 
 
-def _body_is_ct_cond_mdl(body, bound):
+def _body_is_ct_cond_mdl(body, bound, ct_globals=None):
     """True when EVERY top-level form of a DEFMAC body is a COND whose every
-    clause test is compile-time MDL over the macro's own bindings.
+    clause test is compile-time MDL over the macro's own bindings (and any
+    known compile-time globals passed in ct_globals).
 
     Such bodies (lurkinghorror/moonmist's P?) are stateful -- early conds SET
     an "AUX" list that later conds read -- so the legacy pre-substitution
@@ -167,7 +172,7 @@ def _body_is_ct_cond_mdl(body, bound):
             return False
         _shim = type('_CondShim', (), {'clauses': clauses})
         if not _cond_is_compile_time_mdl(_shim, bound, ops=_CT_COND_EXT_OPS,
-                                         allow_quote=True):
+                                         allow_quote=True, ct_globals=ct_globals):
             return False
     return True
 
@@ -214,6 +219,11 @@ class MDLEvaluator:
             name = node.name.upper()
             if name in env:
                 return env[name]
+            # Fall back to compile-time globals (MDL-ZIL SETG20 switches like
+            # DEBUGGING?); these persist across the whole expansion.
+            _ct = getattr(self.macro_expander, 'ct_globals', None)
+            if _ct is not None and name in _ct:
+                return _ct[name]
             # Return as GlobalVarNode - will be resolved at runtime
             return node
 
@@ -334,7 +344,10 @@ class MDLEvaluator:
             return self._eval_cond(operands, env)
         elif op_name == 'SET':
             return self._eval_set(operands, env)
-        elif op_name == 'SETG':
+        elif op_name == 'SETG' or op_name == 'SETG20':
+            # SETG20 is the MDL-ZIL compile-time SETG (the "20" package): it names
+            # a compile-time global used by the form/menu builders, never a
+            # runtime Z-machine global.
             return self._eval_setg(operands, env)
         elif op_name == 'NTH':
             return self._eval_nth(operands, env)
@@ -1829,6 +1842,11 @@ class MacroExpander:
         self.program: Optional['Program'] = None
         # Prefix macros registered via MAKE-PREFIX-MACRO (char -> function)
         self.prefix_macros: Dict[str, Any] = {}
+        # Compile-time globals defined by the MDL-ZIL <SETG20 ...> idiom (e.g.
+        # DEBUGGING?). Referenced as ,NAME inside macro CONDs; they let the
+        # form/debug-gating macros fold at expansion time instead of leaking
+        # compile-time-only ops (ASSIGNED?, EMPTY?) into Z-code.  name -> value.
+        self.ct_globals: Dict[str, Any] = {}
 
     def define_macro(self, macro: MacroNode):
         """Store a macro definition."""
@@ -2124,7 +2142,7 @@ class MacroExpander:
         # could never observe its own SETs and the RepeatNode leaked into
         # codegen (FORM/LENGTH?/RETURN!- emitted as routine calls).
         if isinstance(macro.body, RepeatNode) or _body_is_ct_cond_mdl(
-                macro.body, _ct_bound_names(bindings)):
+                macro.body, _ct_bound_names(bindings), self.ct_globals):
             _env = {}
             _defaulted = getattr(self, '_last_defaulted_params', set())
             for _k, _v in bindings.items():

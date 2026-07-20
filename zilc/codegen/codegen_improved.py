@@ -26,6 +26,22 @@ _SZ3_R2 = 'R2' in _SZ3_RULES
 _SZ3_R3 = 'R3' in _SZ3_RULES
 
 
+# MDL-ZIL "Z" primitive aliases (bureaucracy, zorkzero). In the MDL-ZIL dialect
+# the Z-machine instructions carry a leading Z so they don't clash with the
+# like-named MDL builtins; each is an exact synonym of the un-prefixed opcode
+# zorkie already generates. ZGET/ZPUT/ZREST/ZAPPLY/ZERO? are intentionally
+# absent -- they have dedicated handling elsewhere.
+_Z_PRIM_ALIASES = {
+    'ZCRLF': 'CRLF', 'ZPRINT': 'PRINT', 'ZPRINTB': 'PRINTB',
+    'ZPRINTN': 'PRINTN', 'ZPRINTC': 'PRINTC', 'ZPRINTD': 'PRINTD',
+    'ZPRINTI': 'PRINTI', 'ZPRINTR': 'PRINTR',
+    'ZREMOVE': 'REMOVE', 'ZRANDOM': 'RANDOM', 'ZABS': 'ABS',
+    'ZREAD': 'READ', 'ZBACK': 'BACK', 'ZBUFOUT': 'BUFOUT',
+    'ZMEMQ': 'MEMQ', 'ZSAVE': 'SAVE', 'ZRESTORE': 'RESTORE',
+    'ZGETB': 'GETB', 'ZPUTB': 'PUTB', 'ZINTBL': 'INTBL?',
+    'ZCOPYT': 'COPYT', 'ZDIROUT': 'DIROUT', 'ZINPUT': 'INPUT',
+}
+
 
 # ZILCH spells the punctuation vocabulary words with descriptive W? names, but
 # the dictionary word is the punctuation CHARACTER itself (declared via BUZZ
@@ -1086,7 +1102,15 @@ class ImprovedCodeGenerator:
         # globals (spill scratch + parser table pointers) move to a TOP-DOWN
         # band at 0xFF..; user overflow goes to the FUNNY (SOFT-GLOBALS)
         # table. Small games keep the legacy bottom-up numbering.
-        self._big_globals = len(program.globals) > 210
+        #
+        # A game that explicitly asks for FUNNY-GLOBALS? (bureaucracy) already
+        # has enough globals to exhaust the hard range even when its DECLARED
+        # (program.globals) count looks small -- most of its globals are created
+        # by top-level <SETG> and runtime SETG-new. Without the big-globals
+        # policy the internal scratch globals get lazily allocated past 0xFF and
+        # overflow the one-byte variable field, so opt such games in too.
+        self._big_globals = (len(program.globals) > 210
+                             or getattr(self, 'funny_globals_enabled', False))
         if self._big_globals:
             for _nm in ('_SCRATCH_', '_CMP_SCRATCH_', '_CMP_SCRATCH2_',
                         '_OR_SCRATCH_', '_CALLARG1_', '_CALLARG2_',
@@ -1170,8 +1194,13 @@ class ImprovedCodeGenerator:
                 # V3 status line global - already reserved above
                 pass
             else:
-                # Check for redefinition
-                if global_node.name in self.globals and not allow_redefine:
+                # Check for redefinition. A top-level <SETG NAME value> on an
+                # atom that is already a declared global is an *assignment*, not
+                # a redefinition: it just updates the initial value (handled by
+                # the capture block below), so it must not trip this guard. Only
+                # a genuine duplicate <GLOBAL NAME ...> is an error.
+                if (global_node.name in self.globals and not allow_redefine
+                        and not getattr(global_node, 'from_setg', False)):
                     raise ValueError(
                         f"Global '{global_node.name}' is already defined. "
                         f"Use <SET REDEFINE T> to allow redefinition."
@@ -1537,9 +1566,14 @@ class ImprovedCodeGenerator:
         for _off, _src in _ptr_fixups:
             self.table_addr_fixups.append((table_idx, _off, _src, 0))
 
-        # Set the global's initial value to the table reference marker
-        if table_idx > 0xFF:
-            raise ValueError("SOFT-GLOBALS table index exceeds 8-bit marker range")
+        # Set the global's initial value to the table reference marker. The
+        # marker lives only in globals_data, whose assembler resolver
+        # (_resolve_table_placeholders) understands BOTH the 0xFF00 band
+        # (idx < 256) and the 0xF800 band (idx 256..511), so a big game like
+        # bureaucracy -- which registers 300+ tables before the soft-globals
+        # table -- resolves correctly.  _table_marker caps at 511.
+        if table_idx > 0x1FF:
+            raise ValueError("SOFT-GLOBALS table index exceeds table-marker range (max 511)")
         self.global_values[self.funny_globals_table_global] = self._table_marker(table_idx)
 
     def _setup_action_table_globals(self):
@@ -5649,6 +5683,16 @@ class ImprovedCodeGenerator:
             form.operator.value in self._routine_names):
             return self.gen_routine_call(form.operator.value, form.operands)
 
+        # MDL-ZIL "Z" primitive aliases: in the MDL-ZIL dialect the Z-machine
+        # instructions are spelled with a leading Z to distinguish them from the
+        # like-named MDL builtins (bureaucracy: <ZCRLF>, <ZPRINT ,X>,
+        # <ZBUFOUT <>>, <ZBACK .T 2>, ...). They are exact synonyms of the
+        # un-prefixed builtins zorkie already generates, so normalize the name
+        # here (only when not shadowed by a user routine, already handled above).
+        # ZGET/ZPUT/ZREST/ZAPPLY/ZERO? keep their own dedicated handling.
+        if op_name in _Z_PRIM_ALIASES:
+            op_name = _Z_PRIM_ALIASES[op_name]
+
         # Control flow
         if op_name == 'RTRUE':
             if form.operands:
@@ -6222,7 +6266,11 @@ class ImprovedCodeGenerator:
             return self.gen_perform(form.operands)
         elif op_name == 'CALL':
             return self.gen_call(form.operands)
-        elif op_name == 'APPLY':
+        elif op_name == 'APPLY' or op_name == 'ZAPPLY':
+            # ZAPPLY is the MDL-ZIL indirect call: <ZAPPLY routine-value args...>
+            # calls the routine whose (packed) address is the first operand,
+            # exactly like APPLY/CALL. bureaucracy dispatches field/menu/clock
+            # handlers this way (<ZAPPLY <FIELD-FCN .TBL> ...>).
             return self.gen_apply(form.operands)
 
         # Daemon/Interrupt system
@@ -7613,6 +7661,29 @@ class ImprovedCodeGenerator:
                         code.extend(token_code)
                     i += 1
 
+                elif (i + 1 < len(operands)
+                        and self._tell_token_print_routine(atom_name) is not None):
+                    # Game-defined composite TELL token that follows the
+                    # standard Infocom naming convention: a token X dispatches
+                    # to the routine named X+"PRINT" (D->DPRINT, T->TPRINT,
+                    # A->APRINT, AR->ARPRINT, TR->TRPRINT). This is exactly the
+                    # mapping a <TELL-TOKENS ... TR * <TRPRINT .X> ...> form
+                    # encodes. nordandbert *uses* TR/AR heavily but its
+                    # <TELL-TOKENS> declaration lives in an unloaded LGOP file
+                    # (misc.zil), so the tokens are never registered; the
+                    # convention lets the loaded print routine (defined in
+                    # tells.zil) handle them. Fires only when a matching routine
+                    # actually exists, so it never masks a genuine typo/error
+                    # and never shadows the built-in D/T/A/N/C tokens (handled
+                    # above) or a game's own <TELL-TOKENS>/<DEFMAC TELL>.
+                    routine_name = self._tell_token_print_routine(atom_name)
+                    i += 1
+                    call_form = FormNode(
+                        AtomNode(routine_name, op.line, op.column),
+                        [operands[i]], op.line, op.column)
+                    code.extend(self.generate_form(call_form))
+                    i += 1
+
                 else:
                     # Unknown atom - error
                     # Bare atom references in TELL are not allowed
@@ -7732,6 +7803,48 @@ class ImprovedCodeGenerator:
                 i += 1
 
         return bytes(code)
+
+    def _tell_token_print_routine(self, name: str):
+        """Return the print routine an unregistered composite TELL token maps to.
+
+        Infocom's TELL macro dispatches a composite token to a print routine
+        named after it. The standard conventions (as seen in the <TELL-TOKENS>
+        forms and the print routines Infocom's own sources define) are:
+
+          * append PRINT:        D->DPRINT, T->TPRINT, A->APRINT,
+                                 AR->ARPRINT, TR->TRPRINT
+          * a token carrying a leading descriptive letter+hyphen prefix maps to
+            the "-PRINT" routine of its tail: T-IS-ARE -> IS-ARE-PRINT
+
+        Used only as a fallback for a token the game references but did not
+        register (via <TELL-TOKENS> or a <DEFMAC TELL>), and only when a routine
+        with the conventional name actually exists in the program -- so it never
+        masks a genuine typo and never shadows the built-in D/T/A/N/C tokens or
+        a game's own declarations. Returns the routine's actual (source-cased)
+        name, or None.
+        """
+        if not name:
+            return None
+        cache = getattr(self, '_routine_name_map_cache', None)
+        if cache is None:
+            cache = {}
+            program = getattr(self.compiler, 'program', None) if self.compiler else None
+            if program is not None:
+                for r in getattr(program, 'routines', []) or []:
+                    rn = getattr(r, 'name', None)
+                    if rn:
+                        cache[rn.upper()] = rn
+            self._routine_name_map_cache = cache
+        up = name.upper()
+        candidates = [up + 'PRINT', up + '-PRINT']
+        if '-' in up:
+            tail = up.split('-', 1)[1]
+            candidates.append(tail + '-PRINT')
+            candidates.append(tail + 'PRINT')
+        for cand in candidates:
+            if cand in cache:
+                return cache[cand]
+        return None
 
     def _is_tell_token(self, name: str, next_arg: ASTNode = None) -> bool:
         """Check if a name is a custom TELL token.

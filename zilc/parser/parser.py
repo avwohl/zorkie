@@ -12,10 +12,16 @@ from .ast_nodes import *
 class Parser:
     """Parses ZIL tokens into an Abstract Syntax Tree."""
 
-    def __init__(self, tokens: List[Token], filename: str = "<input>"):
+    def __init__(self, tokens: List[Token], filename: str = "<input>", mdl_zil: bool = False):
         self.tokens = tokens
         self.filename = filename
         self.pos = 0
+        # MDL-ZIL? dialect (set by <FILE-FLAGS MDL-ZIL?>). In this dialect the
+        # game's routines are written with <DEFINE NAME (args) body> rather than
+        # <ROUTINE ...> (bureaucracy, zorkzero), so DEFINE compiles to a Z-machine
+        # routine here.  In classic ZIL, DEFINE is an MDL compile-time function /
+        # macro helper (zork1's MULTIFROB), so it stays a macro definition.
+        self.mdl_zil = mdl_zil
         self.current_token = self.tokens[0] if tokens else None
         # Depth of enclosing quasiquote (`) templates. While > 0, forms are DATA
         # (a template), so special-form dispatch (ROUTINE/CONSTANT/OBJECT/...) is
@@ -159,9 +165,25 @@ class Parser:
                             name_node.value,
                             node.operands[1],
                             node.line,
-                            node.column
+                            node.column,
+                            from_setg=True
                         )
                         program.globals.append(global_node)
+                elif op_name == 'MSETG' and len(node.operands) >= 2:
+                    # MSETG is ZILCH's macro-time SETG: it names a COMPILE-TIME
+                    # constant (usable as ,NAME and inside table / DEFINE-GLOBALS
+                    # initializers), not a runtime Z-machine global.  Route it
+                    # through the CONSTANT machinery so the value folds at compile
+                    # time -- values may reference earlier MSETG constants via
+                    # arithmetic, e.g. <MSETG HATCH-OBJECT <+ ,OBJECT-BREAK 1>>.
+                    name_node = node.operands[0]
+                    if isinstance(name_node, AtomNode):
+                        program.constants.append(ConstantNode(
+                            name_node.value,
+                            node.operands[1],
+                            node.line,
+                            node.column
+                        ))
                 elif op_name in ('ZPUT', 'PUTB', 'ZGET', 'ZREST'):
                     # Compile-time table manipulation operations
                     program.compile_time_ops.append(node)
@@ -398,8 +420,26 @@ class Parser:
                 return node
 
             elif op_name == "DEFINE":
-                # DEFINE is like DEFMAC but for compile-time only
-                # Parse it the same way but mark as compile-time
+                # In the MDL-ZIL? dialect, <DEFINE NAME [ACT] (args) body> is the
+                # game's routine-definition form (bureaucracy has no <ROUTINE> at
+                # all; even GO is <DEFINE GO () ...>).  Compile it to a Z-machine
+                # routine.  In classic ZIL, DEFINE names a compile-time MDL
+                # function used inside macro expansion, so keep it as a macro.
+                if self.mdl_zil:
+                    node = self.parse_routine(line, col)
+                else:
+                    # DEFINE is like DEFMAC but for compile-time only
+                    # Parse it the same way but mark as compile-time
+                    node = self.parse_defmac(line, col)
+                self.expect(TokenType.RANGLE)
+                return node
+
+            elif op_name == "DEFINE20":
+                # DEFINE20 is the MDL-ZIL compile-time-only function definition
+                # (the "20" MDL package): form builders, MULTIFROB, etc. It is
+                # NEVER a Z-machine routine -- it runs during macro expansion --
+                # so always parse it as a macro definition, exactly like classic
+                # DEFINE. (Its body may use MDL-only ops such as <ASSIGNED? arg>.)
                 node = self.parse_defmac(line, col)
                 self.expect(TokenType.RANGLE)
                 return node
@@ -769,11 +809,16 @@ class Parser:
 
         elif token.type == TokenType.LOCAL_VAR:
             self.advance()
-            return LocalVarNode(token.value, line, col)
+            # Strip an MDL ADECL type hint on the reference (.LOCAL:FIX -> LOCAL);
+            # the DECL is a compile-time type annotation with no runtime meaning.
+            return LocalVarNode(token.value.split(':', 1)[0], line, col)
 
         elif token.type == TokenType.GLOBAL_VAR:
             self.advance()
-            return GlobalVarNode(token.value, line, col)
+            # Strip an MDL ADECL type hint (,HEIGHT:FIX -> HEIGHT); otherwise the
+            # decorated name looks like a distinct (undeclared) global and
+            # codegen tries to allocate a fresh slot for it.
+            return GlobalVarNode(token.value.split(':', 1)[0], line, col)
 
         elif token.type == TokenType.CHAR_LOCAL_VAR:
             self.advance()
@@ -836,6 +881,28 @@ class Parser:
         # In a full implementation, we'd have a VectorNode type
         return items
 
+    def _normalize_param_decl(self, name: str) -> str:
+        """Strip an MDL ADECL type declaration from a routine parameter name.
+
+        Two lexed forms occur (both are compile-time type hints with no Z-machine
+        representation, so the DECL is discarded and only the base name kept):
+
+            NAME:FIX        the ADECL is glued to the atom -> return NAME
+            NAME:<OR ...>   the lexer emits atom "NAME:" followed by a separate
+                            <...> DECL form -> return NAME and consume the form
+
+        bureaucracy's MDL-ZIL routines use these, e.g.
+        <DEFINE DESCRIBE-SEAT (N:<OR FIX FALSE> PERS ...) ...>.
+        """
+        if name.endswith(':'):
+            # Trailing colon: the DECL is the following <...> form (or [...] vec).
+            if self.current_token.type in (TokenType.LANGLE, TokenType.LBRACKET):
+                self.parse_expression()
+            return name[:-1]
+        if ':' in name:
+            return name.split(':', 1)[0]
+        return name
+
     def parse_routine(self, line: int, col: int) -> RoutineNode:
         """Parse ROUTINE definition."""
         # <ROUTINE name (params "AUX" aux-vars) body...>
@@ -893,8 +960,12 @@ class Parser:
                         self.error("Expected parameter name in default value form")
                     param_name = self.current_token.value
                     self.advance()
-                    # Parse the default value expression
-                    default_value = self.parse_expression()
+                    param_name = self._normalize_param_decl(param_name)
+                    # Parse the default value expression (optional: an ADECL-only
+                    # aux binding like (NAME:FIX) may omit it)
+                    default_value = None
+                    if self.current_token.type != TokenType.RPAREN:
+                        default_value = self.parse_expression()
                     self.expect(TokenType.RPAREN)
                     if in_aux:
                         aux_vars.append(param_name)
@@ -904,19 +975,24 @@ class Parser:
                     else:
                         params.append(param_name)
                     # Store the default value
-                    local_defaults[param_name] = default_value
+                    if default_value is not None:
+                        local_defaults[param_name] = default_value
                     continue
 
                 # Handle simple parameter name
                 if self.current_token.type == TokenType.ATOM:
-                    if in_aux:
-                        aux_vars.append(self.current_token.value)
-                    elif in_optional:
-                        opt_params.append(self.current_token.value)
-                        aux_vars.append(self.current_token.value)  # Also add to aux_vars for local slot
-                    else:
-                        params.append(self.current_token.value)
+                    _raw_name = self.current_token.value
                     self.advance()
+                    # Normalize AFTER advancing so a trailing-colon DECL form
+                    # (Y:<OR FIX FALSE>) is consumed from the correct position.
+                    param_name = self._normalize_param_decl(_raw_name)
+                    if in_aux:
+                        aux_vars.append(param_name)
+                    elif in_optional:
+                        opt_params.append(param_name)
+                        aux_vars.append(param_name)  # Also add to aux_vars for local slot
+                    else:
+                        params.append(param_name)
                 else:
                     self.error("Expected parameter name")
 
@@ -1828,22 +1904,23 @@ class Parser:
                 is_byte = True
                 self.advance()
 
-            # Parse value
-            if self.current_token.type == TokenType.NUMBER:
-                value = self.current_token.value
-                self.advance()
-            elif self.current_token.type == TokenType.ATOM:
-                # Could be a constant reference - for now, default to 0
-                # TODO: Handle constant references
-                value = 0
-                self.advance()
-            else:
-                self.error(f"Expected value in DEFINE-GLOBALS entry, got {self.current_token.type}")
-                value = 0
+            # Parse the initial value as a general expression. ZILCH allows any
+            # GVAL here: a literal number, a compile-time constant reference
+            # (,MINIMUM-BALANCE), the false/true atoms (<> / T), a string, or a
+            # nested table constructor (<TABLE 0 0 ...>).  A missing value
+            # (e.g. (FLIGHT-ATTENDANT-HE/SHE:STRING)) defaults to 0.  The node
+            # is resolved at compile time in _process_define_globals.
+            value = 0
+            value_node = None
+            if self.current_token.type != TokenType.RPAREN:
+                value_node = self.parse_expression()
+                if isinstance(value_node, NumberNode):
+                    value = value_node.value
 
             self.expect(TokenType.RPAREN)
 
-            entries.append(DefineGlobalEntry(name=name, value=value, is_byte=is_byte, adecl=adecl))
+            entries.append(DefineGlobalEntry(name=name, value=value, is_byte=is_byte,
+                                             adecl=adecl, value_node=value_node))
 
         return DefineGlobalsNode(table_name, entries, line, col)
 

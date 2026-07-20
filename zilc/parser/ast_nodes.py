@@ -291,10 +291,16 @@ class VersionNode(ASTNode):
 class GlobalNode(ASTNode):
     """GLOBAL variable definition."""
     def __init__(self, name: str, initial_value: ASTNode = None,
-                 line: int = 0, column: int = 0):
+                 line: int = 0, column: int = 0, from_setg: bool = False):
         super().__init__(NodeType.GLOBAL, line, column)
         self.name = name
         self.initial_value = initial_value
+        # True when this node came from a top-level <SETG NAME value> rather
+        # than a <GLOBAL NAME value> declaration. A top-level SETG on an atom
+        # that is already a declared global is an *assignment* (it updates the
+        # initial value), not a redefinition -- so it must not trigger the
+        # duplicate-GLOBAL error. See codegen's global-registration loop.
+        self.from_setg = from_setg
 
     def __repr__(self):
         return f"Global({self.name})"
@@ -621,9 +627,10 @@ class LongWordsNode(ASTNode):
 class DefineGlobalEntry:
     """A single entry in a DEFINE-GLOBALS declaration."""
     name: str           # Global name (e.g., MY-WORD)
-    value: int          # Initial value
+    value: int          # Initial value (folded literal, or 0 when value_node set)
     is_byte: bool       # True if BYTE, False if WORD (default)
     adecl: str = None   # Optional ADECL annotation (e.g., :FIX)
+    value_node: 'ASTNode' = None  # Full initial-value expression (None => literal value)
 
 
 class DefineGlobalsNode(ASTNode):

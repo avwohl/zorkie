@@ -21,17 +21,29 @@ class ZILCompiler:
 
     def __init__(self, version: int = 3, verbose: bool = False, enable_string_dedup: bool = False,
                  include_paths: Optional[list] = None, lax_brackets: bool = False,
-                 override_version: bool = False):
+                 override_version: bool = False, allow_undefined_routines: bool = False):
         self.version = version
         self.verbose = verbose
         self.enable_string_dedup = enable_string_dedup
         self.compilation_flags = {}  # ZILF compilation flags
         self.file_flags = set()  # FILE-FLAGS like SENTENCE-ENDS?
+        self._ct_globals = {}  # MDL-ZIL compile-time globals (<SETG20 NAME literal>)
         self.custom_alphabets = {}  # CHRSET custom alphabets {0: "...", 1: "...", 2: "..."}
         self.language = None  # LANGUAGE directive (e.g., GERMAN)
         self.include_paths = include_paths or []  # Additional paths to search for includes
         self.lax_brackets = lax_brackets  # Allow unbalanced brackets (extra >) for source files like Beyond Zork
         self.override_version = override_version  # If True, ignore source VERSION directive
+        # When True, a call to a routine that is defined in no compiled file is
+        # downgraded from a fatal ZIL0415 error to a loud warning, and the call
+        # is left as the CALL-to-address-0 no-op the codegen already emits (the
+        # Z-machine defines "call routine 0" as an immediate return of false).
+        # Off by default so a genuine typo / wrong entry file still fails fast
+        # (see tests/zilf test_compilation_stops_after_100_errors). Opt in only
+        # for provenance-incomplete historical sources whose missing routines are
+        # off the boot path -- the ZILCH compiler itself emitted an unresolved
+        # external here and left the link error to ZAP; this restores that
+        # compiler-only leniency. Mirrors the existing lax_brackets escape hatch.
+        self.allow_undefined_routines = allow_undefined_routines
         self.warnings: List[str] = []  # Compilation warnings
         self.errors: List[str] = []  # Compilation errors
 
@@ -358,7 +370,8 @@ class ZILCompiler:
                     # tables/globals.
                     _retry = type(self)(
                         version=self.version, verbose=self.verbose,
-                        enable_string_dedup=self.enable_string_dedup)
+                        enable_string_dedup=self.enable_string_dedup,
+                        allow_undefined_routines=self.allow_undefined_routines)
                     _retry._v4_syn_word_cap = 4
                     _retry._main_source_path = self._main_source_path
                     story_data = _retry.compile_string(source, str(input_path))
@@ -470,7 +483,7 @@ class ZILCompiler:
 
         return self.compile_string(combined_source, main_file)
 
-    def preprocess_ifiles(self, source: str, base_path: Path) -> str:
+    def preprocess_ifiles(self, source: str, base_path: Path, _top_level: bool = True) -> str:
         """
         Preprocess IFILE directives by expanding them inline.
 
@@ -479,6 +492,11 @@ class ZILCompiler:
         Args:
             source: Source code with potential IFILE directives
             base_path: Base directory for resolving relative file paths
+            _top_level: True only for the outermost (whole-program) invocation.
+                The SETG-demote analysis must see the FULLY expanded source; when
+                run per-included-file (recursive calls) it would demote a global
+                that is declared in one file but only referenced from another
+                (bureaucracy's HEIGHT: <SETG> in misc.zil, read in forms.zil).
 
         Returns:
             Source code with IFILE directives expanded
@@ -557,26 +575,48 @@ class ZILCompiler:
                     content = f.read()
                 # Preprocess control characters in included file
                 content = self.preprocess_control_characters(content)
-                # Recursively process nested IFILE directives - use file's parent as new base
-                return self.preprocess_ifiles(content, file_path.parent)
+                # Recursively process nested IFILE directives - use file's parent as new base.
+                # Not top-level: the demote analysis must only run on the fully
+                # expanded whole-program source (see _top_level docstring).
+                return self.preprocess_ifiles(content, file_path.parent, _top_level=False)
             except FileNotFoundError:
                 raise FileNotFoundError(f"IFILE not found: {file_path}")
 
         _result_src = re.sub(ifile_pattern, replace_ifile, source, flags=re.IGNORECASE)
-        _setg_top = set(re.findall(r'(?m)^<SETG\s+([A-Z0-9?!\.\-]+)\s', _result_src))
-        _global_decl = set(re.findall(r'<GLOBAL\s+([A-Z0-9?!\.\-]+)', _result_src))
-        _const_decl = set(re.findall(r'<CONSTANT\s+([A-Z0-9?!\.\-]+)', _result_src))
-        _demote = getattr(self, '_setg_demote', None)
-        if _demote is None:
-            _demote = set(); self._setg_demote = _demote
-        for _name in _setg_top - _global_decl:
-            _esc = re.escape(_name)
-            _runtime_ref = re.search(r',' + _esc + r'(?![A-Z0-9?!\.\-])', _result_src)
-            _inner_setg = re.search(r'(?m)^[ \t].*<SETG\s+' + _esc + r'(?![A-Z0-9?!\.\-])', _result_src)
-            if _name in _const_decl:
-                _demote.add(_name)      # CONSTANT redefinition wins (ZILCH)
-            elif not _runtime_ref and not _inner_setg:
-                _demote.add(_name)      # pure compile-time atom, no runtime use
+        # The SETG-demote analysis must see the WHOLE program: a top-level SETG
+        # in one file can be read (,NAME) or re-SETG'd from another. Running it on
+        # a single recursively-expanded file demotes cross-file globals wrongly.
+        if _top_level:
+            # MDL-ZIL compile-time globals: <SETG20 NAME literal>. These name
+            # compile-time switches (DEBUGGING?, ...) read as ,NAME inside
+            # form/debug macro CONDs; capturing their literal value lets those
+            # CONDs fold at expansion time. Non-literal SETG20s (dynamic values
+            # built by the form-builders) are handled during macro evaluation.
+            for _m in re.finditer(
+                    r'<SETG20\s+([A-Z0-9?!\.\-]+)\s+(<>|T|-?[0-9]+)\s*>',
+                    _result_src):
+                _nm, _lit = _m.group(1).upper(), _m.group(2)
+                if _lit == 'T':
+                    _val = True
+                elif _lit == '<>':
+                    _val = False
+                else:
+                    _val = int(_lit)
+                self._ct_globals.setdefault(_nm, _val)
+            _setg_top = set(re.findall(r'(?m)^<SETG\s+([A-Z0-9?!\.\-]+)\s', _result_src))
+            _global_decl = set(re.findall(r'<GLOBAL\s+([A-Z0-9?!\.\-]+)', _result_src))
+            _const_decl = set(re.findall(r'<CONSTANT\s+([A-Z0-9?!\.\-]+)', _result_src))
+            _demote = getattr(self, '_setg_demote', None)
+            if _demote is None:
+                _demote = set(); self._setg_demote = _demote
+            for _name in _setg_top - _global_decl:
+                _esc = re.escape(_name)
+                _runtime_ref = re.search(r',' + _esc + r'(?![A-Z0-9?!\.\-])', _result_src)
+                _inner_setg = re.search(r'(?m)^[ \t].*<SETG\s+' + _esc + r'(?![A-Z0-9?!\.\-])', _result_src)
+                if _name in _const_decl:
+                    _demote.add(_name)      # CONSTANT redefinition wins (ZILCH)
+                elif not _runtime_ref and not _inner_setg:
+                    _demote.add(_name)      # pure compile-time atom, no runtime use
 
         return _result_src
 
@@ -2619,6 +2659,37 @@ class ZILCompiler:
         result.append(source[pos:])
         return ''.join(result)
 
+    @staticmethod
+    def _pos_in_string(source: str, idx: int) -> bool:
+        """True if character position `idx` lies inside a "..." string literal.
+
+        The `%` read-macro (%<COND ...>, %<+ ...>, etc.) is inert inside MDL
+        string literals -- a game may write `"%<COND ...>"` as a plain string
+        (e.g. seastalker's people.zil toggles code by quoting the %<COND
+        opener). Counting brackets/matching the read-macro across that string
+        would swallow the real code that follows.
+
+        Escapes are handled the same way the lexer reads strings: a backslash
+        consumes the following character (forward skip), so an in-string \"
+        escape and the outside-string !\" char literal both leave a `"` that
+        does not toggle string state. A naive look-back-one test miscounts
+        consecutive backslashes (e.g. a string ending in \\") and desyncs
+        parity for the rest of the file.
+        """
+        n = len(source)
+        limit = idx if idx < n else n
+        in_string = False
+        i = 0
+        while i < limit:
+            c = source[i]
+            if c == '\\' and i + 1 < n:
+                i += 2
+                continue
+            if c == '"':
+                in_string = not in_string
+            i += 1
+        return in_string
+
     def _process_compile_cond(self, source: str) -> str:
         """
         Process %<COND> compile-time conditionals.
@@ -2639,9 +2710,16 @@ class ZILCompiler:
                 result.append(source[pos:])
                 break
 
+            abs_match_pos = pos + match.start()
+
+            # %<COND inside a string literal is just text, not a read-macro.
+            if self._pos_in_string(source, abs_match_pos):
+                result.append(source[pos:pos + match.end()])
+                pos = pos + match.end()
+                continue
+
             # Check if preceded by semicolon - if so, this is a comment form
             # that should be left for the lexer to skip
-            abs_match_pos = pos + match.start()
             if abs_match_pos > 0 and source[abs_match_pos - 1] == ';':
                 # This is ;%<COND ...> - a comment form, skip it
                 result.append(source[pos:pos + match.end()])
@@ -2935,6 +3013,12 @@ class ZILCompiler:
 
             match_pos = pos + match.start()
 
+            # %< inside a string literal is just text, not a read-macro.
+            if self._pos_in_string(source, match_pos):
+                result.append(source[pos:match_pos + 2])
+                pos = match_pos + 2
+                continue
+
             # Check if this is a valid compile-time form
             # Peek at what comes after %<
             after_pos = match_pos + 2  # Skip %<
@@ -3003,6 +3087,12 @@ class ZILCompiler:
                 break
 
             match_pos = pos + match.start()
+
+            # %< inside a string literal is just text, not a read-macro.
+            if self._pos_in_string(source, match_pos):
+                result.append(source[pos:match_pos + 2])
+                pos = match_pos + 2
+                continue
 
             # Add text before match
             result.append(source[pos:match_pos])
@@ -4521,21 +4611,52 @@ class ZILCompiler:
             program: Program node (for adding synthetic globals)
         """
         # Calculate table structure:
-        # Each word entry takes 2 bytes, each byte entry takes 1 byte
+        # Each word entry takes 2 bytes, each byte entry takes 1 byte.
+        # Each entry's initial value is a full GVAL expression (see parser):
+        # a number, a compile-time constant (,MINIMUM-BALANCE), <> / T, a
+        # string, or a nested table (<TABLE 0 0 ...>).  Encode every value
+        # through the shared table-value encoder so string / routine / nested-
+        # table / vocab placeholders are recorded and resolved by the assembler
+        # exactly as they are for a normal <GLOBAL X <TABLE ...>>.
+        from .parser.ast_nodes import NumberNode
+        table_name_key = f"_DEFINE_GLOBALS_{dg.table_name}"
         table_data = bytearray()
         entry_offsets = {}  # name -> (offset, is_byte)
+        pending_str = []
+        pending_rtn = []
+        pending_nst = []
+        pending_voc = []
 
         for entry in dg.entries:
             offset = len(table_data)
             entry_offsets[entry.name] = (offset, entry.is_byte)
 
+            node = getattr(entry, 'value_node', None)
+            if node is None:
+                node = NumberNode(entry.value)
+
+            codegen._encode_string_marker_offsets = []
+            codegen._encode_routine_marker_offsets = []
+            codegen._encode_nested_table_ptr_offsets = []
+            codegen._encode_vocab_marker_offsets = []
+            encoded = codegen._encode_table_values([node], default_is_byte=entry.is_byte)
+            # A BYTE entry must occupy exactly one byte and a word entry two;
+            # normalize length in case an evaluated value produced nothing.
             if entry.is_byte:
-                # Byte entry
-                table_data.append(entry.value & 0xFF)
+                if len(encoded) == 0:
+                    encoded = bytearray([0])
+                encoded = encoded[:1]
             else:
-                # Word entry (big-endian)
-                table_data.append((entry.value >> 8) & 0xFF)
-                table_data.append(entry.value & 0xFF)
+                if len(encoded) < 2:
+                    encoded = bytearray([0, 0])
+                encoded = encoded[:2]
+
+            base = len(table_data)
+            table_data.extend(encoded)
+            pending_str.extend(base + o for o in codegen._encode_string_marker_offsets)
+            pending_rtn.extend(base + o for o in codegen._encode_routine_marker_offsets)
+            pending_nst.extend((base + o, c) for o, c in codegen._encode_nested_table_ptr_offsets)
+            pending_voc.extend((base + o, fi) for o, fi in codegen._encode_vocab_marker_offsets)
 
         # Register the table as an impure (mutable) table in the codegen
         # The table must be in impure memory so it can be modified at runtime
@@ -4543,7 +4664,19 @@ class ZILCompiler:
         codegen.table_offsets[table_idx] = codegen._table_data_size
         codegen._table_data_size += len(table_data)
         codegen.table_counter += 1
-        codegen.tables.append((f"_DEFINE_GLOBALS_{dg.table_name}", bytes(table_data), False, False))  # is_pure=False, is_parser_table=False
+        codegen.tables.append((table_name_key, bytes(table_data), False, False))  # is_pure=False, is_parser_table=False
+
+        # Register placeholder fixups so string / routine / nested-table / vocab
+        # references embedded in the initial values get resolved by the assembler.
+        for _o in pending_str:
+            codegen._table_string_fixups.append((table_idx, _o))
+        for _o in pending_rtn:
+            codegen._table_routine_marker_offsets.append((table_idx, _o))
+        for _o, _child in pending_nst:
+            codegen.table_addr_fixups.append((table_idx, _o, _child, 0))
+            codegen._tables_with_nested_ptrs.add(table_name_key)
+        for _o, _fi in pending_voc:
+            codegen._table_vocab_fixups.append((table_idx, _o, _fi))
 
         # Register the global to point to this table
         codegen.globals[dg.table_name] = codegen.next_global
@@ -4594,7 +4727,7 @@ class ZILCompiler:
 
         # Parsing
         self.log("Parsing...")
-        parser = Parser(tokens, filename)
+        parser = Parser(tokens, filename, mdl_zil='MDL-ZIL?' in self.file_flags)
         program = parser.parse()
         self.log(f"  {len(program.routines)} routines")
         self.log(f"  {len(program.objects)} objects")
@@ -4612,6 +4745,7 @@ class ZILCompiler:
         if program.macros or program.top_level_forms:
             self.log("Expanding macros...")
             expander = MacroExpander()
+            expander.ct_globals.update(getattr(self, '_ct_globals', {}) or {})
             program = expander.expand_all(program)
             self.log(f"  Macros expanded")
 
@@ -4826,6 +4960,23 @@ class ZILCompiler:
                                        compiler=self)
         self._last_codegen = codegen  # debug introspection hook
 
+        # Pre-register scalar compile-time constants so DEFINE-GLOBALS initial
+        # values (and, more generally, anything encoded before the main constant
+        # pass at generate()) can fold constant references.  DEFINE-GLOBALS is
+        # processed here, before codegen.generate() registers the CONSTANT table,
+        # so a soft-global initialized to ,MINIMUM-BALANCE would otherwise see an
+        # unknown name and fall back to 0.  Walk program.constants in source order
+        # (this includes MSETG-defined constants) and fold each purely-scalar
+        # value; table/string constants evaluate to None and are skipped (they
+        # are handled by the later, side-effecting constant pass).
+        if program.define_globals:
+            for _c in program.constants:
+                if _c.name in codegen.constants:
+                    continue
+                _v = codegen.eval_expression(_c.value)
+                if isinstance(_v, int):
+                    codegen.constants[_c.name] = _v
+
         # Process DEFINE-GLOBALS declarations
         # Each DEFINE-GLOBALS creates a table global and registers entry accessors
         for dg in program.define_globals:
@@ -4860,6 +5011,21 @@ class ZILCompiler:
 
         # Report missing routines as errors (one error per call site)
         missing_routines = codegen.get_missing_routines()
+        if missing_routines and self.allow_undefined_routines:
+            # Leniency mode: the codegen already compiled each call to a missing
+            # routine as a CALL to address 0 (a Z-machine no-op that returns
+            # false). Downgrade the fatal error to a loud warning and continue so
+            # a provenance-incomplete source whose missing routines are off the
+            # boot path can still build and boot. Named + printed so the loss is
+            # never silent.
+            call_counts = codegen.get_missing_routine_call_counts()
+            for routine_name in sorted(missing_routines):
+                count = call_counts.get(routine_name, 1)
+                msg = (f"undefined routine '{routine_name}' ({count} call site(s)) "
+                       f"stubbed to a no-op (call 0) [--allow-undefined-routines]")
+                self.warn("ZIL0415", msg)
+                print(f"Warning: ZIL0415: {msg}", file=sys.stderr)
+            missing_routines = set()
         if missing_routines:
             call_counts = codegen.get_missing_routine_call_counts()
             error_limit = 100
@@ -7516,11 +7682,17 @@ def main():
                        help='Verbose output')
     parser.add_argument('--string-dedup', action='store_true',
                        help='Enable string table deduplication (uses PRINT_PADDR)')
+    parser.add_argument('--allow-undefined-routines', action='store_true',
+                       help='Downgrade calls to undefined routines from a fatal '
+                            'error to a warning, stubbing them as no-ops (call 0). '
+                            'For provenance-incomplete historical sources whose '
+                            'missing routines are off the boot path.')
 
     args = parser.parse_args()
 
     compiler = ZILCompiler(version=args.version, verbose=args.verbose,
-                          enable_string_dedup=args.string_dedup)
+                          enable_string_dedup=args.string_dedup,
+                          allow_undefined_routines=args.allow_undefined_routines)
 
     # Use multi-file compilation if includes are specified
     if args.include:
