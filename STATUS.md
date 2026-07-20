@@ -1,11 +1,34 @@
 # Zorkie STATUS
 
-Last measured: 2026-07-19/20 (sessions 8-9: **27-GAME zwalker L2 SUITE, ALL WIN
-FROM SOURCE — including the first V4 games, Trinity 100/100 and AMFV**). This
+Last measured: 2026-07-20 (sessions 8-9: **28-GAME zwalker L2 SUITE, ALL WIN
+FROM SOURCE — every Infocom V3 corpus game plus the first V4 games (Trinity
+100/100, AMFV); moonmist now wins; cloak (ZILF stdlib) compiles as V3**). This
 file is the single source of truth for project status and overrides any status
 claim in older docs. Reference/spec docs (Z-machine and ZIL specs, dialect
 notes, header/opcode references) live under docs/ and tests/test-games/ and are
 not status reports.
+
+## Session 9 tail: 27 -> 28 games; moonmist wins; cloak compiles as V3
+
+- **moonmist WINS** (28th game): six parser/compile-time fixes — the MDL
+  CHARACTER type (the game's own TELL DEFMAC needs it), LAST-OBJECT auto-fill,
+  a FAR-AWAY? branch-corruption crash, the SETG clock/dinner idiom, classic
+  punctuation vocabulary, and a global FORM-fold GUARDED to scalar value-forms
+  (an unguarded fold collapsed cutthroats' <GLOBAL DELIVERY-TABLE <TABLE ...>>
+  to an int and crashed it — full L2 suite is now the mandatory gate after any
+  codegen change, not a subset of canaries).
+- **cloak compiles as V3** (frontier, not yet a win): its "ISAVE requires V5"
+  was a misdiagnosis — cloak is <VERSION ZIP>=V3 and the V5-only ISAVE sits in
+  <IF-UNDO>, which must be stripped for V3. Added ~10 general ZILF-standard-
+  library front-end features (ZIP-OPTIONS/IF-UNDO, LIBRARY-MESSAGE, DEFSTRUCT,
+  pronoun subsystem, table-constructor DEFINE inlining + ITABLE folding, ...).
+  Remaining blocker to a cloak WIN: the ZILF *library* parser (the
+  _is_classic_parser=False path, never exercised before) reads a VERBS/syntax-
+  table byte layout zorkie doesn't emit — MATCH-SYNTAX never sets PRSA so every
+  command mis-dispatches. That parser-table format is the next frontier.
+- Every V3 corpus game with a verified route now wins from source. planetfall
+  stays SOURCE-blocked (truncated comptwo.zil). The remaining frontier is the
+  ZILF-library parser-table format (cloak) and a V5 target.
 
 ## Session 9 (2026-07-19 continued): 20 -> 27 games; V3 corpus complete-but-two; V4 arrives
 
