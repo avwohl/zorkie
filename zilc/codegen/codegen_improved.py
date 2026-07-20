@@ -1354,12 +1354,13 @@ class ImprovedCodeGenerator:
             self._routine_names.add(routine.name)
 
         # Store routine parameter info for call validation
-        # Maps routine name -> (num_required, num_optional)
+        # Maps routine name -> (num_required, num_optional, num_aux)
         self._routine_param_info = {}
         for routine in program.routines:
             num_required = len(routine.params)
             num_optional = len(routine.opt_params)
-            self._routine_param_info[routine.name] = (num_required, num_optional)
+            num_aux = len(getattr(routine, 'aux_vars', None) or [])
+            self._routine_param_info[routine.name] = (num_required, num_optional, num_aux)
 
         # Generate routines - GO must be first as it's the entry point
         # First, find the GO routine and put it at the front
@@ -7173,6 +7174,28 @@ class ImprovedCodeGenerator:
                         return self._gen_targeted_block_return(
                             operands[:1] if operands else [], idx)
                 # No enclosing PROG/REPEAT - fall through to routine return
+
+        # A bare <RETURN> inside a LOOP (REPEAT/DO/MAP-CONTENTS) universally
+        # means "break out of the loop" (block-scoped), so it must NOT be
+        # promoted to a whole-routine return by the V5 "funny return" default.
+        # Infocom's V5 ZIL relies on this: e.g. Border Zone's SYNTAX-CHECK does
+        #   <REPEAT () ... <COND (<OR .DRIVE1 .DRIVE2> <RETURN>) ...> ...>
+        # and expects <RETURN> to fall through to the code AFTER the loop that
+        # calls SYNTAX-FOUND (which sets PRSA/P-SYNTAX). Without this, the whole
+        # parser silently fails ("There isn't anything to <verb>!"). The V5
+        # routine-return default (ZILF's DO-FUNNY-RETURN?) only governs a bare
+        # RETURN inside a non-looping <PROG>. This override is a no-op for
+        # V3/V4 (use_routine_return is already False there), so their output
+        # stays byte-identical.
+        if use_routine_return and self.block_stack and not activation_name:
+            _LOOP_BLOCK_TYPES = ('REPEAT', 'DO', 'MAP-CONTENTS')
+            for _blk in reversed(self.block_stack):
+                _bt = _blk.get('block_type')
+                if _bt == 'BIND':
+                    continue  # BIND is a scope, not a control-flow target
+                if _bt in _LOOP_BLOCK_TYPES:
+                    use_routine_return = False
+                break  # only the innermost non-BIND block decides
 
         # If using routine return or we're at routine level, skip block handling
         if use_routine_return:
@@ -21839,12 +21862,18 @@ class ImprovedCodeGenerator:
         # Validate argument count if we have info about this routine
         num_args = len(operands)
         if hasattr(self, '_routine_param_info') and routine_name in self._routine_param_info:
-            num_required, num_optional = self._routine_param_info[routine_name]
-            max_allowed = num_required + num_optional
+            num_required, num_optional, num_aux = self._routine_param_info[routine_name]
+            # ZILCH/Z-machine fill locals positionally regardless of the
+            # required/OPT/AUX distinction: a caller may pass a value into an
+            # AUX local, overriding its default (a common Infocom idiom, e.g.
+            # Border Zone's <BACKTRACK? .RM T> where TOO-LATE? is an AUX var).
+            # So the true call-arity limit is the total number of locals.
+            max_allowed = num_required + num_optional + num_aux
             if num_args > max_allowed:
                 raise ValueError(
                     f"ZIL0112: Call to {routine_name} has {num_args} arguments, "
-                    f"but routine only accepts {max_allowed} ({num_required} required, {num_optional} optional)"
+                    f"but routine only accepts {max_allowed} "
+                    f"({num_required} required, {num_optional} optional, {num_aux} aux)"
                 )
 
         # Check version-specific call argument limits
