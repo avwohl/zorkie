@@ -340,8 +340,30 @@ class ZILCompiler:
             with open(input_path, 'r', encoding='utf-8') as f:
                 source = f.read()
 
-            # Compile
-            story_data = self.compile_string(source, str(input_path))
+            # Compile. If a V4+ build overflows the hard story-size cap,
+            # retry ONCE with the legacy 4-word SYNONYM cap (graceful size
+            # degradation; loudly reported so the loss is visible).
+            try:
+                story_data = self.compile_string(source, str(input_path))
+            except ValueError as _sz_e:
+                if (self.version >= 4
+                        and 'too large' in str(_sz_e)
+                        and getattr(self, '_v4_syn_word_cap', None) is None):
+                    print("Warning: story exceeds the size cap with full "
+                          "SYNONYM lists; retrying with 4-word cap "
+                          "(5th+ object synonyms will not parse)",
+                          file=sys.stderr)
+                    # Fresh compiler instance: compile_string is stateful and
+                    # a second pass on the same instance would double-register
+                    # tables/globals.
+                    _retry = type(self)(
+                        version=self.version, verbose=self.verbose,
+                        enable_string_dedup=self.enable_string_dedup)
+                    _retry._v4_syn_word_cap = 4
+                    _retry._main_source_path = self._main_source_path
+                    story_data = _retry.compile_string(source, str(input_path))
+                else:
+                    raise
 
             # Write output
             self.log(f"Writing {output_path}...")
@@ -5072,13 +5094,36 @@ class ZILCompiler:
             return codegen.register_data_string(text)
 
         def encode_exit_classic(value):
-            """Encode a classic (PTSIZE-dispatched) direction exit property."""
+            """Encode a classic (PTSIZE-dispatched) direction exit property.
+
+            V3 (ZIP) layouts -- object numbers fit a byte:
+              UEXIT(1)=[room], NEXIT(2)=[str], FEXIT(3)=[fcn, pad],
+              CEXIT(4)=[room, var#, str], DEXIT(5)=[room, door, str, pad].
+            V4+ (EZIP) layouts -- object numbers are WORDS (up to 2000
+            objects; trinity has 593) and the games declare UEXIT 2,
+            NEXIT 3, FEXIT 4, CEXIT 5, DEXIT 6 with word accessors
+            (REXIT=word 0, CEXITSTR=word 1, CEXITFLAG=byte 4,
+            DEXITOBJ=word 1, DEXITSTR=word 2). Emitting the V3 byte
+            layouts made every PTSIZE dispatch miss and V-WALK fell
+            through silently -- no movement at all in trinity/amfv."""
             from .parser.ast_nodes import (AtomNode as _A, StringNode as _S,
                                            NumberNode as _N)
+            ezip = self.version >= 4
 
             def room_num(node):
                 nm = node.value if isinstance(node, _A) else str(node)
                 return obj_name_to_num.get(nm, 0)
+
+            def w2(v):
+                v = int(v) & 0xFFFF
+                return [(v >> 8) & 0xFF, v & 0xFF]
+
+            def uexit(room):
+                return bytes(w2(room)) if ezip else bytes([room & 0xFF])
+
+            def nexit(strword):
+                return bytes(w2(strword) + [0]) if ezip \
+                    else bytes(w2(strword))
 
             if isinstance(value, _N):
                 # A bare NUMBER under a direction name is DATA, not an exit:
@@ -5092,32 +5137,31 @@ class ZILCompiler:
                 return bytes([(_nv >> 8) & 0xFF, _nv & 0xFF])
 
             if isinstance(value, _A):
-                return bytes([room_num(value) & 0xFF])                    # UEXIT
+                return uexit(room_num(value))                              # UEXIT
             if isinstance(value, _S):
-                w = _register_prop_string(value.value)
-                return bytes([(w >> 8) & 0xFF, w & 0xFF])                  # NEXIT
+                return nexit(_register_prop_string(value.value))           # NEXIT
             if not isinstance(value, (list, tuple)) or not value:
                 return None
             toks = list(value)
             if isinstance(toks[0], _S):                                    # (DIR "msg")
-                w = _register_prop_string(toks[0].value)
-                return bytes([(w >> 8) & 0xFF, w & 0xFF])
+                return nexit(_register_prop_string(toks[0].value))
             k0 = toks[0].value.upper() if isinstance(toks[0], _A) else ''
             if k0 == 'SORRY' and len(toks) >= 2 and isinstance(toks[1], _S):
-                w = _register_prop_string(toks[1].value)
-                return bytes([(w >> 8) & 0xFF, w & 0xFF])                  # NEXIT
+                return nexit(_register_prop_string(toks[1].value))         # NEXIT
             if k0 == 'PER' and len(toks) >= 2:
                 rtn = toks[1].value if isinstance(toks[1], _A) else str(toks[1])
                 ph = resolve_atom_value(rtn)  # 0xFA00|idx routine placeholder
                 if not isinstance(ph, int):
                     ph = 0
-                return bytes([(ph >> 8) & 0xFF, ph & 0xFF, 0])             # FEXIT
+                if ezip:
+                    return bytes(w2(ph) + [0, 0])                          # FEXIT
+                return bytes(w2(ph) + [0])                                 # FEXIT
             if k0 == 'TO':
                 dest = room_num(toks[1]) if len(toks) >= 2 else 0
                 if_i = next((i for i, t in enumerate(toks)
                              if isinstance(t, _A) and t.value.upper() == 'IF'), None)
                 if if_i is None:
-                    return bytes([dest & 0xFF])                            # UEXIT
+                    return uexit(dest)                                     # UEXIT
                 cond = toks[if_i + 1] if len(toks) > if_i + 1 else None
                 cond_name = cond.value if isinstance(cond, _A) else str(cond)
                 is_door = any(isinstance(t, _A) and t.value.upper() == 'IS'
@@ -5129,11 +5173,14 @@ class ZILCompiler:
                         els = _register_prop_string(toks[i + 1].value)
                 if is_door:
                     dobj = obj_name_to_num.get(cond_name, 0)
-                    return bytes([dest & 0xFF, dobj & 0xFF,
-                                  (els >> 8) & 0xFF, els & 0xFF, 0])       # DEXIT
+                    if ezip:
+                        return bytes(w2(dest) + w2(dobj) + w2(els))        # DEXIT
+                    return bytes([dest & 0xFF, dobj & 0xFF]
+                                 + w2(els) + [0])                          # DEXIT
                 gnum = codegen.globals.get(cond_name, 0)
-                return bytes([dest & 0xFF, gnum & 0xFF,
-                              (els >> 8) & 0xFF, els & 0xFF])              # CEXIT
+                if ezip:
+                    return bytes(w2(dest) + w2(els) + [gnum & 0xFF])       # CEXIT
+                return bytes([dest & 0xFF, gnum & 0xFF] + w2(els))         # CEXIT
             return None
 
         # Helper to extract property number and value
@@ -5182,9 +5229,18 @@ class ZILCompiler:
                     # The classic THIS-IT? matches the typed noun against the WHOLE
                     # P?SYNONYM word array (ZMEMQ over PTSIZE/2 entries); storing
                     # only the first synonym made "open trapdoor" etc. unfindable.
-                    # V3 property data caps at 8 bytes = 4 words.
+                    # V3 property data caps at 8 bytes = 4 words. V4+ keeps
+                    # the FULL synonym list (property cap 64 bytes = 31 words
+                    # after markers): trinity's route types MARKER's 9th
+                    # synonym ("examine diagram"). If the finished story
+                    # overflows the version size cap, compile_string retries
+                    # once with the legacy 4-word cap (_v4_syn_word_cap).
                     marker_words = []
-                    for w in words[:4]:
+                    if self.version >= 4:
+                        _syn_cap = getattr(self, '_v4_syn_word_cap', None) or 31
+                    else:
+                        _syn_cap = 4
+                    for w in words[:_syn_cap]:
                         word_lower = self._unescape_vocab_word(str(w)).lower()
                         if word_lower in dict_word_offsets:
                             # The marker word is a placeholder only; the REAL
@@ -5218,12 +5274,38 @@ class ZILCompiler:
                     elif hasattr(adjectives, 'value'):
                         words.append(adjectives.value)
 
-                    # Classic parser: THIS-IT? matches the typed adjective with
-                    # ZMEMQB -- a BYTE compare of the A?<word> adjective NUMBER
-                    # against the P?ADJECTIVE byte array. The old encoding stored a
-                    # 0xFE00|word-offset marker that resolved to a dictionary word
-                    # ADDRESS, so no adjective ever matched and two-word nouns
-                    # ("open trap door") reported "You can't see any ...".
+                    # V3 classic parser: THIS-IT? matches the typed adjective
+                    # with ZMEMQB -- a BYTE compare of the A?<word> adjective
+                    # NUMBER against the P?ADJECTIVE byte array. The old encoding
+                    # stored a 0xFE00|word-offset marker that resolved to a
+                    # dictionary word ADDRESS, so no adjective ever matched and
+                    # two-word nouns ("open trap door") reported "You can't see
+                    # any ...".
+                    #
+                    # V4+ (EZIP) has NO adjective numbers: P-ADJ holds the typed
+                    # word's dictionary ADDRESS and THIS-IT? word-scans
+                    # P?ADJECTIVE with INTBL?, so encode a word array of dict
+                    # addresses exactly like SYNONYM (byte A? numbers made
+                    # trinity's "take paper bird" unfindable).
+                    if (self.version >= 4
+                            and getattr(self, '_is_classic_parser', False)):
+                        _adj_marks = []
+                        for w in words[:32]:
+                            wl = self._unescape_vocab_word(str(w)).lower()
+                            if wl in dict_word_offsets:
+                                dict_word_fixups.append(
+                                    (obj_idx, prop_num, 2 * len(_adj_marks),
+                                     dict_word_offsets[wl]))
+                                _adj_marks.append(
+                                    0x8000 | (dict_word_offsets[wl] & 0x0FFF))
+                        if _adj_marks:
+                            data = bytearray()
+                            for mw in _adj_marks:
+                                data.extend([(mw >> 8) & 0xFF, mw & 0xFF])
+                            props[prop_num] = bytes(data)
+                        else:
+                            props[prop_num] = 0
+                        continue
                     adj_nums = []
                     if getattr(self, '_is_classic_parser', False):
                         for w in words[:8]:
@@ -5288,12 +5370,20 @@ class ZILCompiler:
                     if 'GLOBAL' not in prop_map:
                         prop_map['GLOBAL'] = alloc_spill_prop_num('GLOBAL')
                     prop_num = prop_map['GLOBAL']
+                    # V4+ (EZIP): object numbers are words and GLOBAL-IN? scans
+                    # the table with word INTBL?/GET, so encode WORD entries
+                    # (byte entries put every room-global out of scope --
+                    # trinity's "unscrew gnomon" fell into ORPHAN). V3 keeps
+                    # the byte array (GLOBAL-CHECK walks it with GETB).
                     nums = bytearray()
                     for item in (value if isinstance(value, list) else [value]):
                         nm = item.value if hasattr(item, 'value') else item
                         onum = obj_name_to_num.get(nm) if isinstance(nm, str) else None
                         if onum is not None:
-                            nums.append(onum & 0xFF)
+                            if self.version >= 4:
+                                nums.extend([(onum >> 8) & 0xFF, onum & 0xFF])
+                            else:
+                                nums.append(onum & 0xFF)
                     props[prop_num] = bytes(nums)
                 elif key in prop_map:
                     prop_num = prop_map[key]

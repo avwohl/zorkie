@@ -196,9 +196,16 @@ class ObjectTable:
                     prop_table.append(size_byte)
                     prop_table.extend(prop_data[:data_length])
                 else:
-                    # Double size bytes
+                    # Double size bytes. Standard 12.4.2.1.1: bit 7 of the
+                    # SECOND size byte must be SET -- get_prop_len reads the
+                    # byte at data_addr-1 and decides by its top bit whether
+                    # it is a length byte (bits 0-5) or a one-byte header
+                    # (length 1/2). Without it PTSIZE returned 1/2 for every
+                    # long property: trinity's THIS-IT? scanned 0-length
+                    # SYNONYM tables ("You can't see any coin here") and
+                    # V-WALK never matched UEXIT/DEXIT sizes (no movement).
                     size_byte1 = 0x80 | prop_num  # Bit 7 = 1
-                    size_byte2 = data_length & 0x3F  # Bits 5-0 = length
+                    size_byte2 = 0x80 | (data_length & 0x3F)
                     prop_table.append(size_byte1)
                     prop_table.append(size_byte2)
                     prop_table.extend(prop_data)

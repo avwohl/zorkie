@@ -9306,10 +9306,7 @@ class ImprovedCodeGenerator:
 
         # ADD is 2OP opcode 0x14
         # First operand from input, second is constant 1
-        opcode = 0x14 | (op_type << 6)  # second operand is always small const
-        code.append(opcode)
-        code.append(op_val & 0xFF)
-        code.append(0x01)  # Add 1
+        code.extend(self._asm_2op(0x14, op_type, op_val, 0, 1))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -9333,10 +9330,7 @@ class ImprovedCodeGenerator:
 
         # SUB is 2OP opcode 0x15
         # First operand from input, second is constant 1
-        opcode = 0x15 | (op_type << 6)  # second operand is always small const
-        code.append(opcode)
-        code.append(op_val & 0xFF)
-        code.append(0x01)  # Subtract 1
+        code.extend(self._asm_2op(0x15, op_type, op_val, 0, 1))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -9382,53 +9376,27 @@ class ImprovedCodeGenerator:
             code.append(0x00)  # Store to stack
             return bytes(code)
 
-        # JL a b ?use_a (offset will be calculated)
-        # 2OP opcode 0x02 = JL
-        opcode = 0x02 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
-        # Branch offset: skip store_b + jump = need to calculate
-        # Store b: LOAD var (3 bytes) or ADD 0 const (4 bytes)
-        # JUMP end: 3 bytes (1OP JUMP + 2 byte offset)
-        if op2_type == 1:
-            store_b_len = 3  # LOAD var, store
-            store_a_len = 3
-        else:
-            store_b_len = 4  # ADD 0 const, store
-            store_a_len = 4 if op1_type == 0 else 3
-        jump_len = 3
-        branch_offset = store_b_len + jump_len + 2  # +2 for branch byte calculation
+        # Materialize both push snippets FIRST so branch/jump offsets use
+        # their real sizes (a large constant pushes via VAR-form ADD).
+        store_b = self._push_operand_code(op2_type, op2_val)
+        store_a = self._push_operand_code(op1_type, op1_val)
+
+        # JL a b ?use_a
+        code.extend(self._asm_2op(0x02, op1_type, op1_val, op2_type, op2_val))
+        branch_offset = len(store_b) + 3 + 2  # store_b + JUMP + branch bias
         code.append(0x40 | (branch_offset & 0x3F))  # Short branch, true polarity
 
         # Store b (a >= b case)
-        if op2_type == 1:  # Variable
-            code.append(0x9E)  # 1OP LOAD var (10 01 1110) with small const type
-            code.append(op2_val & 0xFF)
-            code.append(0x00)  # Store to stack
-        else:  # Constant
-            code.append(0x54)  # ADD 0 const
-            code.append(0x00)
-            code.append(op2_val & 0xFF)
-            code.append(0x00)  # Store to stack
+        code.extend(store_b)
 
-        # JUMP past store_a (short unconditional jump)
-        # 1OP JUMP is 0x8C in short form with large constant
-        jump_offset = store_a_len + 2  # Offset from next instruction
+        # JUMP past store_a (1OP JUMP with 2-byte offset)
+        jump_offset = len(store_a) + 2  # Offset from next instruction
         code.append(0x8C)  # JUMP
         code.append((jump_offset >> 8) & 0xFF)
         code.append(jump_offset & 0xFF)
 
         # use_a: Store a
-        if op1_type == 1:  # Variable
-            code.append(0x9E)  # LOAD var (10 01 1110) with small const type
-            code.append(op1_val & 0xFF)
-            code.append(0x00)  # Store to stack
-        else:  # Constant
-            code.append(0x54)  # ADD 0 const
-            code.append(0x00)
-            code.append(op1_val & 0xFF)
-            code.append(0x00)  # Store to stack
+        code.extend(store_a)
 
         return bytes(code)
 
@@ -9469,50 +9437,28 @@ class ImprovedCodeGenerator:
             code.append(0x00)  # Store to stack
             return bytes(code)
 
-        # JG a b ?use_a
-        # 2OP opcode 0x03 = JG
-        opcode = 0x03 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        # Materialize both push snippets FIRST so branch/jump offsets use
+        # their real sizes (a large constant pushes via VAR-form ADD; the old
+        # variable path also misencoded LOAD as 0x8E large-const form).
+        store_b = self._push_operand_code(op2_type, op2_val)
+        store_a = self._push_operand_code(op1_type, op1_val)
 
-        if op2_type == 1:
-            store_b_len = 3
-            store_a_len = 3
-        else:
-            store_b_len = 4
-            store_a_len = 4 if op1_type == 0 else 3
-        jump_len = 3
-        branch_offset = store_b_len + jump_len + 2
+        # JG a b ?use_a
+        code.extend(self._asm_2op(0x03, op1_type, op1_val, op2_type, op2_val))
+        branch_offset = len(store_b) + 3 + 2
         code.append(0x40 | (branch_offset & 0x3F))
 
         # Store b (a <= b case)
-        if op2_type == 1:
-            code.append(0x8E)
-            code.append(op2_val & 0xFF)
-            code.append(0x00)
-        else:
-            code.append(0x54)
-            code.append(0x00)
-            code.append(op2_val & 0xFF)
-            code.append(0x00)
+        code.extend(store_b)
 
         # JUMP past store_a
-        jump_offset = store_a_len + 2
+        jump_offset = len(store_a) + 2
         code.append(0x8C)
         code.append((jump_offset >> 8) & 0xFF)
         code.append(jump_offset & 0xFF)
 
         # use_a: Store a
-        if op1_type == 1:
-            code.append(0x8E)
-            code.append(op1_val & 0xFF)
-            code.append(0x00)
-        else:
-            code.append(0x54)
-            code.append(0x00)
-            code.append(op1_val & 0xFF)
-            code.append(0x00)
+        code.extend(store_a)
 
         return bytes(code)
 
@@ -10371,10 +10317,7 @@ class ImprovedCodeGenerator:
 
         # XOR simulation: (A OR B) AND NOT(A AND B)
         # Step 1: A AND B → stack
-        and_opcode = 0x09 | (op1_type << 6) | (op2_type << 5)
-        code.append(and_opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x09, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         # Step 2: NOT stack → stack
@@ -10386,10 +10329,7 @@ class ImprovedCodeGenerator:
         code.append(0x00)  # Store to stack
 
         # Step 3: A OR B → stack
-        or_opcode = 0x08 | (op1_type << 6) | (op2_type << 5)
-        code.append(or_opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x08, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         # Step 4: AND stack stack → stack
@@ -11541,18 +11481,12 @@ class ImprovedCodeGenerator:
         if op1_type == 0 and op2_type == 0:
             # Both constants - calculate at compile time
             offset = (op2_val - 1) * 4 + 1
-            opcode = 0x0F | (0 << 6) | (0 << 5)  # LOADW const const
-            code.append(opcode)
-            code.append(op1_val & 0xFF)
-            code.append(offset & 0xFF)
+            code.extend(self._asm_2op(0x0F, 0, op1_val, 0, offset))
             code.append(0x00)  # Store to stack
         else:
             # At least one variable - need runtime calculation
             # For now, just use the word_num directly (simplified)
-            opcode = 0x0F | (op1_type << 6) | (op2_type << 5)  # LOADW
-            code.append(opcode)
-            code.append(op1_val & 0xFF)
-            code.append(op2_val & 0xFF)
+            code.extend(self._asm_2op(0x0F, op1_type, op1_val, op2_type, op2_val))
             code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -12042,21 +11976,8 @@ class ImprovedCodeGenerator:
         # For constant bit number, create mask at compile time
         if op2_type == 0 and 0 <= op2_val < 16:
             mask = 1 << op2_val
-            if mask <= 255:
-                # Small mask - use 2OP long form
-                opcode = 0x09 | (op1_type << 6) | (0 << 5)
-                code.append(opcode)
-                code.append(op1_val & 0xFF)
-                code.append(mask & 0xFF)
-            else:
-                # Large mask (bits 8-15) - use VAR form with large constant
-                code.append(0xC9)  # AND VAR form
-                type1 = 0x01 if op1_type == 0 else 0x02
-                type_byte = (type1 << 6) | (0x00 << 4) | 0x0F  # val, large const, omit, omit
-                code.append(type_byte)
-                code.append(op1_val & 0xFF)
-                code.append((mask >> 8) & 0xFF)
-                code.append(mask & 0xFF)
+            # AND value with the mask (VAR form when either is large)
+            code.extend(self._asm_2op(0x09, op1_type, op1_val, 0, mask))
             code.append(0x00)  # Store to stack
         else:
             # Variable bit number - compute mask at runtime using conditional chain
@@ -12089,10 +12010,7 @@ class ImprovedCodeGenerator:
                 code.append(0x00)  # Store to stack (replaces old)
 
             # Now AND value with computed mask
-            and_opcode = 0x09 | (op1_type << 6) | (1 << 5)  # AND val, var(stack)
-            code.append(and_opcode)
-            code.append(op1_val & 0xFF)
-            code.append(0x00)  # Stack (mask)
+            code.extend(self._asm_2op(0x09, op1_type, op1_val, 1, 0))
             code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -12542,6 +12460,157 @@ class ImprovedCodeGenerator:
 
         return bytes(code)
 
+    def _spill_top_to(self, code, expr_start, sv):
+        """The expression just emitted at code[expr_start:] left its value on
+        the stack; move it into scratch variable `sv`. When the expression's
+        FINAL instruction is a store-to-sp, retarget that store byte in place
+        (size-neutral, so internal branch offsets stay valid) -- saves the
+        3-byte STORE sv,sp that would otherwise follow. Falls back to
+        appending STORE sv,sp when the tail cannot be proven safe."""
+        sv &= 0xFF
+        pos = self._tail_store_pos(bytes(code[expr_start:]))
+        if pos is not None and code[expr_start + pos] == 0x00:
+            code[expr_start + pos] = sv
+        else:
+            code.extend([0x2D, sv, 0x00])  # STORE sv, sp (pop)
+
+    def _tail_store_pos(self, blob):
+        """Walk a V3+ instruction stream; return the offset of the FINAL
+        instruction's store byte, or None when the stream cannot be decoded,
+        is empty, or the final instruction does not store."""
+        v = self.version
+        n = len(blob)
+        i = 0
+        last_store = None
+        while i < n:
+            store_pos = None
+            op = blob[i]
+            if op == 0xBE:  # extended (V5+)
+                if v < 5 or i + 2 >= n:
+                    return None
+                ext = blob[i + 1]
+                tb = blob[i + 2]
+                i += 3
+                for sh in (6, 4, 2, 0):
+                    t = (tb >> sh) & 3
+                    if t == 3:
+                        break
+                    i += 2 if t == 0 else 1
+                store = ext in _EXT_STORE_OPS
+                branch = ext in _EXT_BRANCH_OPS
+            elif op < 0x80:  # long 2OP
+                opnum = op & 0x1F
+                if opnum == 0:
+                    return None
+                i += 3
+                store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
+                branch = opnum in _2OP_BRANCH_OPS
+            elif op < 0xB0:  # short 1OP
+                opnum = op & 0x0F
+                t = (op >> 4) & 3
+                i += 1
+                i += 2 if t == 0 else 1
+                store = opnum in (0x01, 0x02, 0x03, 0x04, 0x0E) \
+                    or (opnum == 0x08 and v >= 4) \
+                    or (opnum == 0x0F and v <= 4)
+                branch = opnum in _1OP_BRANCH_OPS
+            elif op < 0xC0:  # short 0OP
+                opnum = op & 0x0F
+                i += 1
+                if opnum in (0x02, 0x03):  # print / print_ret inline z-string
+                    while True:
+                        if i + 1 >= n:
+                            return None
+                        w = (blob[i] << 8) | blob[i + 1]
+                        i += 2
+                        if w & 0x8000:
+                            break
+                store = (opnum in (0x05, 0x06) and v == 4)
+                branch = (opnum in (0x05, 0x06) and v <= 3) or opnum in (0x0D, 0x0F)
+            else:  # variable form
+                opnum = op & 0x1F
+                var_of_2op = op < 0xE0
+                i += 1
+                ntypes = 2 if (not var_of_2op and v >= 4 and opnum in (0x0C, 0x1A)) else 1
+                if i + ntypes > n:
+                    return None
+                tbs = blob[i:i + ntypes]
+                i += ntypes
+                done = False
+                for tb in tbs:
+                    for sh in (6, 4, 2, 0):
+                        t = (tb >> sh) & 3
+                        if t == 3:
+                            done = True
+                            break
+                        i += 2 if t == 0 else 1
+                    if done:
+                        break
+                if var_of_2op:
+                    store = opnum in _2OP_STORE_OPS or (opnum == 0x19 and v >= 4)
+                    branch = opnum in _2OP_BRANCH_OPS
+                else:
+                    store = opnum in (0x00, 0x07) \
+                        or (v >= 4 and opnum in (0x0C, 0x16, 0x17)) \
+                        or (v >= 5 and opnum in (0x04, 0x18))
+                    branch = (v >= 4 and opnum == 0x17) or (v >= 5 and opnum == 0x1F)
+            if store:
+                store_pos = i
+                i += 1
+            if branch:
+                if i >= n:
+                    return None
+                b = blob[i]
+                i += 1
+                if not (b & 0x40):
+                    i += 1
+            if i > n:
+                return None
+            last_store = store_pos
+        return last_store
+
+    def _emit_scan_table(self, operands, code, store_var):
+        """Emit SCAN_TABLE (VAR:23) for INTBL? operands into `code`,
+        storing the found-address-or-0 into `store_var`, WITHOUT the branch
+        byte (callers append a no-op 0xC2 in value context, or the real
+        condition branch in branch context). Nested-form operands are
+        evaluated first via _resolve_operand_list_ext."""
+        nodes = list(operands[:3])
+        if self.version >= 5 and len(operands) >= 4:
+            nodes.append(operands[3])
+        resolved = self._resolve_operand_list_ext(nodes, code)
+        if self.version >= 5 and len(operands) < 4:
+            # 4th operand (form): default 0x82 = word entries, forward
+            resolved.append((1, 0x82))
+
+        # SCAN_TABLE is VAR opcode 23 (NOT EXT!)
+        # VAR form: 0xE0 + (opcode & 0x1F) = 0xE0 + 23 = 0xF7
+        code.append(0xF7)  # VAR:23 = SCAN_TABLE
+
+        # Build type byte: value, table, length[, form]
+        # _resolve_operand_list_ext types: 0=large, 1=small, 2=variable
+        types = []
+        op_bytes = []
+        for op_t, op_v in resolved:
+            if op_t == 0:  # Large constant
+                types.append(0x00)
+                op_bytes.append([(op_v >> 8) & 0xFF, op_v & 0xFF])
+            elif op_t == 1:  # Small constant
+                types.append(0x01)
+                op_bytes.append([op_v & 0xFF])
+            else:  # Variable
+                types.append(0x02)
+                op_bytes.append([op_v & 0xFF])
+
+        while len(types) < 4:
+            types.append(0x03)  # omitted
+
+        code.append((types[0] << 6) | (types[1] << 4)
+                    | (types[2] << 2) | types[3])
+        for ob in op_bytes:
+            code.extend(ob)
+        code.append(store_var & 0xFF)
+
     def gen_intbl(self, operands: List[ASTNode]) -> bytes:
         """Generate INTBL? (check if value in table - V4+).
 
@@ -12569,53 +12638,27 @@ class ImprovedCodeGenerator:
                 raise ValueError("INTBL? requires 3-4 operands in V5+")
 
         code = bytearray()
-        op1_type, op1_val = self._get_operand_type_and_value(operands[0])  # value
-        op2_type, op2_val = self._get_operand_type_and_value(operands[1])  # table
-        op3_type, op3_val = self._get_operand_type_and_value(operands[2])  # length
 
-        # V5+: Use SCAN_TABLE opcode (VAR:23)
-        if self.version >= 5:
-            # SCAN_TABLE is VAR opcode 23 (NOT EXT!)
-            # VAR form: 0xE0 + (opcode & 0x1F) = 0xE0 + 23 = 0xF7
-            code.append(0xF7)  # VAR:23 = SCAN_TABLE
-
-            # Get 4th operand (form) if provided, default to 0x82 (word entries, forward)
-            if len(operands) >= 4:
-                op4_type, op4_val = self._get_operand_type_and_value(operands[3])
-            else:
-                op4_type, op4_val = 0, 0x82  # Default: word entries, forward
-
-            # Build type byte for 4 operands: value, table, length, form
-            types = []
-            op_bytes = []
-
-            for op_t, op_v in [(op1_type, op1_val), (op2_type, op2_val),
-                               (op3_type, op3_val), (op4_type, op4_val)]:
-                if op_t == 0:  # Constant
-                    if op_v > 255:
-                        types.append(0x00)  # Large constant
-                        op_bytes.append([(op_v >> 8) & 0xFF, op_v & 0xFF])
-                    else:
-                        types.append(0x01)  # Small constant
-                        op_bytes.append([op_v & 0xFF])
-                else:  # Variable
-                    types.append(0x02)
-                    op_bytes.append([op_v & 0xFF])
-
-            type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
-            code.append(type_byte)
-
-            # Encode operands
-            for ob in op_bytes:
-                code.extend(ob)
-
-            # Store result to stack
-            code.append(0x00)
+        # V4+: Use SCAN_TABLE opcode (VAR:23). scan_table is a V4 opcode
+        # (Standard 1.1, "4 scan_table"); the old code only used it for V5+
+        # and V4 games fell into a fallback that emitted a bare RFALSE for
+        # variable operands -- returning from the CONTAINING routine
+        # mid-flow (trinity's NOT-HERE-OBJECT-F stopped after "You can't
+        # see"). V4 takes exactly 3 operands (word entries); the optional
+        # form/size operand is V5+ only. Operands are resolved with
+        # _resolve_operand_list_ext so nested forms like
+        # <INTBL? .W <REST .TBL 2> <GET .TBL 0>> are EVALUATED first.
+        if self.version >= 4:
+            self._emit_scan_table(operands, code, store_var=0x00)
             # Branch on success: offset 2 means skip to next instruction (no-op branch)
             # Bit 7 = 1 (branch if true), bit 6 = 1 (short form), offset = 2
             code.append(0xC2)
 
             return bytes(code)
+
+        op1_type, op1_val = self._get_operand_type_and_value(operands[0])  # value
+        op2_type, op2_val = self._get_operand_type_and_value(operands[1])  # table
+        op3_type, op3_val = self._get_operand_type_and_value(operands[2])  # length
 
         # V3/V4: Generate loop-based search
         # L01 = counter, L02 = offset, L03 = value, L04 = table
@@ -12781,10 +12824,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # Use LOADB with base and offset
-        opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x10, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -12857,10 +12897,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # Use LOADW with base and offset
-        opcode = 0x0F | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0F, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -14635,18 +14672,22 @@ class ImprovedCodeGenerator:
             # Opcode byte is 0xC0 + 0x3D = 0xFD
             code.append(0xFD)
 
-            # Build type byte for 3 operands
-            types = []
-            types.append(0x01 if op1_type == 0 else 0x02)
-            types.append(0x01 if op2_type == 0 else 0x02)
-            types.append(0x01 if op3_type == 0 else 0x02)
-            types.append(0x03)  # omit
-            type_byte = (types[0] << 6) | (types[1] << 4) | (types[2] << 2) | types[3]
-            code.append(type_byte)
-
-            code.append(op1_val & 0xFF)
-            code.append(op2_val & 0xFF)
-            code.append(op3_val & 0xFF)
+            # Build type byte for 3 operands; large constants need 2 bytes
+            trip = []
+            for _t, _v in ((op1_type, op1_val), (op2_type, op2_val),
+                           (op3_type, op3_val)):
+                if _t == 1:
+                    trip.append((2, _v & 0xFF))
+                elif 0 <= _v <= 255:
+                    trip.append((1, _v))
+                else:
+                    trip.append((0, _v & 0xFFFF))
+            code.append((trip[0][0] << 6) | (trip[1][0] << 4)
+                        | (trip[2][0] << 2) | 0x03)
+            for _t, _v in trip:
+                if _t == 0:
+                    code.append((_v >> 8) & 0xFF)
+                code.append(_v & 0xFF)
 
             return bytes(code)
 
@@ -16254,12 +16295,7 @@ class ImprovedCodeGenerator:
         # In V3+, GET_CHILD is 1OP with store and branch:
         # Short form: 10 tt 0010 where tt = operand type
         # For variable operand: 10 10 0010 = 0xA2
-        if container_type == 1:  # Variable
-            code.append(0xA2)  # GET_CHILD 1OP short form with variable operand
-            code.append(container_val & 0xFF)
-        else:  # Small constant
-            code.append(0x92)  # GET_CHILD 1OP short form with small constant operand
-            code.append(container_val & 0xFF)
+        code.extend(self._asm_1op(0x02, container_type, container_val))
 
         # Store result to var
         code.append(var_num & 0xFF)
@@ -17102,15 +17138,12 @@ class ImprovedCodeGenerator:
         code.append(0x00)
         code.append(0x00)
 
-        # Store item in L03
-        code.append(0x0D | (op1_type << 6))
-        code.append(0x03)  # L03 = item
-        code.append(op1_val & 0xFF)
+        # Store item in L03 (store L03, item -- operand 1 is the variable
+        # NUMBER as a small constant; a large-constant item forces VAR form)
+        code.extend(self._asm_2op(0x0D, 0, 0x03, op1_type, op1_val))
 
         # Store table in L04
-        code.append(0x0D | (op2_type << 6))
-        code.append(0x04)  # L04 = table
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0D, 0, 0x04, op2_type, op2_val))
 
         loop_start = len(code)
 
@@ -18509,10 +18542,7 @@ class ImprovedCodeGenerator:
 
         # First, test the attribute to get the previous value
         # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
-        opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0A, op1_type, op1_val, op2_type, op2_val))
         # Branch on true (was set), offset 8 to skip false case (6 bytes: 3 + 3)
         code.append(0xC8)
 
@@ -18528,10 +18558,7 @@ class ImprovedCodeGenerator:
         code.extend([0xE8, 0x7F, 0x01])  # PUSH #1
 
         # Now set the attribute (SET_ATTR is 2OP opcode 0x0B)
-        opcode = 0x0B | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0B, op1_type, op1_val, op2_type, op2_val))
 
         return bytes(code)
 
@@ -18592,10 +18619,7 @@ class ImprovedCodeGenerator:
 
         # First, test the attribute to get the previous value
         # TEST_ATTR is 2OP opcode 0x0A (branch instruction)
-        opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0A, op1_type, op1_val, op2_type, op2_val))
         # Branch on true (was set), offset 8 to skip false case (6 bytes: 3 + 3)
         code.append(0xC8)
 
@@ -18611,10 +18635,7 @@ class ImprovedCodeGenerator:
         code.extend([0xE8, 0x7F, 0x01])  # PUSH #1
 
         # Now clear the attribute (CLEAR_ATTR is 2OP opcode 0x0C)
-        opcode = 0x0C | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0C, op1_type, op1_val, op2_type, op2_val))
 
         return bytes(code)
 
@@ -18654,10 +18675,7 @@ class ImprovedCodeGenerator:
             op2_type, op2_val = self._get_operand_type_and_value(op1)
 
         # TEST_ATTR is 2OP opcode 0x0A (branch)
-        opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0A, op1_type, op1_val, op2_type, op2_val))
         # Branch on true (attribute set), offset 8 to skip false case (6 bytes: 3 + 3)
         code.append(0xC8)
 
@@ -18691,10 +18709,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # INSERT_OBJ is 2OP opcode 0x0E
-        opcode = 0x0E | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0E, op1_type, op1_val, op2_type, op2_val))
 
         return bytes(code)
 
@@ -18707,12 +18722,7 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # REMOVE_OBJ is 1OP opcode 0x09
-        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
-        if op_type == 0:  # Constant (small)
-            code.append(0x99)  # Short 1OP, small constant
-        else:  # Variable
-            code.append(0xA9)  # Short 1OP, variable
-        code.append(op_val & 0xFF)
+        code.extend(self._asm_1op(0x09, op_type, op_val))
 
         return bytes(code)
 
@@ -18737,12 +18747,7 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         # GET_PARENT is 1OP opcode 0x03
-        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
-        if op_type == 0:  # Constant (small)
-            code.append(0x93)  # Short 1OP, small constant
-        else:  # Variable
-            code.append(0xA3)  # Short 1OP, variable
-        code.append(op_val & 0xFF)
+        code.extend(self._asm_1op(0x03, op_type, op_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -18769,10 +18774,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # GET_PROP is 2OP opcode 0x11
-        opcode = 0x11 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x11, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -18805,12 +18807,27 @@ class ImprovedCodeGenerator:
                 code.extend(expr)
                 if i != exprs[-1]:
                     scratch_n += 1
-                    name = f'_NARG{scratch_n}_'
-                    if name not in self.globals:
-                        self.globals[name] = self.next_global
-                        self.next_global += 1
-                    sv = self.globals[name]
-                    code.extend([0xD4, 0x9F, 0x00, 0x00, sv & 0xFF])  # ADD sp 0 -> sv
+                    # Must go through _alloc_top_global: a raw next_global
+                    # grab collided with SOFT-GLOBALS' top-down slot
+                    # (trinity: both got var 240, the spill clobbered the
+                    # soft-globals table pointer and every FUNNY global
+                    # read wild memory -- "Palace Gate, in the dory").
+                    try:
+                        sv = self._alloc_top_global(f'_NARG{scratch_n}_',
+                                                    initial=0)
+                    except ValueError:
+                        # Hard slots exhausted (trinity uses every one):
+                        # reuse the rank-matched call-arg spill scratch --
+                        # identical role (pre-operand spill), consumed by
+                        # the very next instruction of this statement.
+                        alt = f'_CALLARG{scratch_n}_'
+                        if alt in self.globals:
+                            sv = self.globals[alt]
+                        elif '_SCRATCH_' in self.globals:
+                            sv = self.globals['_SCRATCH_']
+                        else:
+                            raise
+                    self._spill_top_to(code, insert, sv)
                     out.append((2, sv))
                 else:
                     out.append((2, 0))  # stack
@@ -18912,12 +18929,9 @@ class ImprovedCodeGenerator:
         op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
             operands[0], operands[1], code)
 
-        # GET_NEXT_PROP is 2OP opcode 0x13 (long form with store)
+        # GET_NEXT_PROP is 2OP opcode 0x13 (with store)
         # _get_operand_type_and_value returns: 0=constant, 1=variable
-        opcode = 0x13 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x13, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -19520,6 +19534,7 @@ class ImprovedCodeGenerator:
         if self._is_empty_false_form(n2):
             n2 = NumberNode(0)
         if is_expr(n1):
+            _e1_start = len(code)
             emit(n1)  # value -> stack
             if is_expr(n2):
                 # Spill to a DEDICATED scratch global -- var 0x10 is the
@@ -19529,7 +19544,7 @@ class ImprovedCodeGenerator:
                     self.globals['_CMP_SCRATCH_'] = self.next_global
                     self.next_global += 1
                 temp = self.globals['_CMP_SCRATCH_']
-                code.extend([0xD4, 0x9F, 0x00, 0x00, temp])
+                self._spill_top_to(code, _e1_start, temp)
                 op1_type, op1_val = 1, temp
             else:
                 op1_type, op1_val = 1, 0     # stack
@@ -19568,6 +19583,77 @@ class ImprovedCodeGenerator:
                 if sz == 2:
                     code.append((v >> 8) & 0xFF)
                 code.append(v & 0xFF)
+
+    def _asm_2op(self, opcode_num, op1_type, op1_val, op2_type, op2_val):
+        """Assemble a 2OP opcode + operands (no store/branch byte) from
+        _get_operand_type_and_value-convention operands (type 0=constant,
+        1=variable).
+
+        A constant outside 0..255 cannot ride in the 1-byte long form; it
+        forces the VAR form of the same 2OP with a proper type byte. V4+
+        games can have >255 objects (trinity: 593), so a long-form
+        `insert_obj obj, #DUMMY-OBJECT` truncated object 418 to 162 and
+        DESCRIBE-OBJECTS teleported the player into WSAND ("West Beach")
+        on turn 1. Object numbers (<= 0x07D0) can never collide with the
+        0xE0xx/0xF0xx placeholder bands, and the structural placeholder
+        scan decodes VAR forms, so large operands emitted here stay
+        fixup-safe."""
+        ops = []
+        for t, v in ((op1_type, op1_val), (op2_type, op2_val)):
+            if t == 1:
+                ops.append((2, v & 0xFF))           # variable
+            elif 0 <= v <= 255:
+                ops.append((1, v))                  # small constant
+            else:
+                ops.append((0, v & 0xFFFF))         # large constant
+        code = bytearray()
+        if ops[0][0] != 0 and ops[1][0] != 0:
+            code.append(opcode_num
+                        | (0x40 if ops[0][0] == 2 else 0)
+                        | (0x20 if ops[1][0] == 2 else 0))
+            code.append(ops[0][1])
+            code.append(ops[1][1])
+        else:
+            code.append(0xC0 | opcode_num)
+            code.append((ops[0][0] << 6) | (ops[1][0] << 4) | 0x0F)
+            for t, v in ops:
+                if t == 0:
+                    code.append((v >> 8) & 0xFF)
+                code.append(v & 0xFF)
+        return code
+
+    def _asm_1op(self, opcode_num, op_type, op_val):
+        """Assemble a short-form 1OP opcode + operand (no store/branch byte)
+        from _get_operand_type_and_value-convention operands (type
+        0=constant, 1=variable). Constants outside 0..255 use the
+        large-constant form (0x8X) instead of truncating to the small form
+        (0x9X) -- e.g. <FIRST? ,X-OBJECT> with X-OBJECT = object 305."""
+        code = bytearray()
+        if op_type == 1:
+            code.append(0xA0 | opcode_num)
+            code.append(op_val & 0xFF)
+        elif 0 <= op_val <= 255:
+            code.append(0x90 | opcode_num)
+            code.append(op_val & 0xFF)
+        else:
+            code.append(0x80 | opcode_num)
+            code.append((op_val >> 8) & 0xFF)
+            code.append(op_val & 0xFF)
+        return code
+
+    def _push_operand_code(self, op_type, op_val):
+        """Push a _get_operand_type_and_value-convention operand (type
+        0=constant, 1=variable) onto the stack. Variables use 1OP LOAD;
+        small constants ADD 0,n -> sp; large constants VAR-form ADD."""
+        out = bytearray()
+        if op_type == 1:                    # LOAD var -> sp
+            out.extend([0x9E, op_val & 0xFF, 0x00])
+        elif 0 <= op_val <= 255:            # ADD 0, small -> sp
+            out.extend([0x54, 0x00, op_val & 0xFF, 0x00])
+        else:                               # VAR ADD 0, large -> sp
+            out.extend([0xD4, 0x4F, 0x00,
+                        (op_val >> 8) & 0xFF, op_val & 0xFF, 0x00])
+        return out
 
     def _emit_decchk_condition(self, condition, code):
         """Emit DLESS?/IGRTR? directly as DEC_CHK/INC_CHK with a branch
@@ -19925,10 +20011,7 @@ class ImprovedCodeGenerator:
                         obj_node, attr_node, code)
 
                     # TEST_ATTR is 2OP opcode 0x0A
-                    opcode = 0x0A | (op1_type << 6) | (op2_type << 5)
-                    code.append(opcode)
-                    code.append(op1_val & 0xFF)
-                    code.append(op2_val & 0xFF)
+                    code.extend(self._asm_2op(0x0A, op1_type, op1_val, op2_type, op2_val))
                     # Branch byte will be added below
 
             # Handle BTST (TEST) - bit test: branches if (value & mask) == mask
@@ -20093,7 +20176,7 @@ class ImprovedCodeGenerator:
                                     self.globals['_CMP_SCRATCH_'] = self.next_global
                                     self.next_global += 1
                                 _scratch = self.globals['_CMP_SCRATCH_']
-                                code.extend([0xD4, 0x9F, 0x00, 0x00, _scratch])
+                                code.extend([0x2D, _scratch & 0xFF, 0x00])  # STORE scratch, sp (pop)
                                 op1_type, op1_val = 1, _scratch
 
                             # Build type byte (evaluating expression comparands to
@@ -20419,6 +20502,16 @@ class ImprovedCodeGenerator:
                 op1_type, op1_val, op2_type, op2_val = self._resolve_two_cmp_operands(
                     condition.operands[0], condition.operands[1], code)
                 self._emit_cmp_branch(code, 6, op1_type, op1_val, op2_type, op2_val)
+                # Branch byte added by the shared fallthrough below
+
+            # Handle INTBL? (SCAN_TABLE, V4+) directly as a branch: store the
+            # result into the scratch global and branch on found, instead of
+            # value-form store->sp + no-op branch + JZ (saves 3 bytes/site).
+            elif (op_name in ('INTBL?', 'IN-TABLE?') and self.version >= 4
+                  and len(condition.operands) >= 3):
+                _scr = self._alloc_top_global('_CMP_SCRATCH_', initial=0)
+                self._emit_scan_table(condition.operands, code,
+                                      store_var=_scr)
                 # Branch byte added by the shared fallthrough below
 
             # Handle DLESS?/IGRTR? directly as DEC_CHK/INC_CHK branches
@@ -21197,13 +21290,25 @@ class ImprovedCodeGenerator:
                         self.global_values[sname] = 0
                         self.next_global += 1
                     svar = self.globals[sname]
-                    code.extend([0xD4, 0x9F, 0x00, 0x00, svar & 0xFF])  # ADD stack 0 -> svar (pop)
+                    self._spill_top_to(code, insert_pos, svar)
                     resolved.append((1, svar))
             else:
                 resolved.append(self._get_operand_type_and_value(op))
 
         # CALL is VAR opcode 0x00 (V1-4) / CALL_VS (V4+); routine address is a large
         # constant (16-bit packed address, emitted as a placeholder).
+        if self.version >= 4 and not resolved:
+            # No-arg call: 1OP call_1s (4 bytes) instead of VAR call_vs (5).
+            # trinity alone has ~3100 no-arg calls; this keeps the correctly-
+            # compiled build under the 256KB V4 cap.
+            placeholder_val = self._get_routine_placeholder(routine_name)
+            code.append(0x88)  # call_1s, large-constant operand
+            placeholder_offset = len(code)
+            code.append((placeholder_val >> 8) & 0xFF)
+            code.append(placeholder_val & 0xFF)
+            self._current_stmt_routine_offsets.append((placeholder_offset, placeholder_val))
+            code.append(0x00)  # Store result to stack
+            return bytes(code)
         code.append(0xE0)  # VAR form, opcode 0x00
 
         # Build type byte - first operand is large constant (0x00) for routine address
@@ -21265,10 +21370,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # LOADW is 2OP opcode 0x0F
-        opcode = 0x0F | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0F, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -21288,10 +21390,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # LOADB is 2OP opcode 0x10 (LOADW is 0x0F)
-        opcode = 0x10 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x10, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -21428,6 +21527,7 @@ class ImprovedCodeGenerator:
 
         for i, op in enumerate(operands[:3]):
             if isinstance(op, (FormNode, CondNode)):
+                _e_start = len(code)
                 inner_code = (self.generate_form(op)
                               if isinstance(op, FormNode)
                               else self.generate_cond(op, value_context=True))
@@ -21447,8 +21547,7 @@ class ImprovedCodeGenerator:
                         self.global_values[sname] = 0
                         self.next_global += 1
                     svar = self.globals[sname]
-                    # ADD stack 0 -> svar  (pop the top into the scratch global)
-                    code.extend([0xD4, 0x9F, 0x00, 0x00, svar & 0xFF])
+                    self._spill_top_to(code, _e_start, svar)
                     op_types[i] = 2
                     op_vals[i] = svar
             else:
@@ -21688,10 +21787,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # LOADW is 2OP opcode 0x0F
-        opcode = 0x0F | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x0F, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -21978,13 +22074,7 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._resolve_obj_operand(operands[0], code)
 
         # GET_CHILD is 1OP opcode 0x02 (store + branch)
-        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
-        # 0x92 = small constant, 0xA2 = variable
-        if op_type == 1:  # Variable
-            code.append(0xA2)
-        else:  # Constant (small)
-            code.append(0x92)
-        code.append(op_val & 0xFF)
+        code.extend(self._asm_1op(0x02, op_type, op_val))
         code.append(0x00)  # Store to stack
         # Branch byte: 0xC2 = branch on true, short offset, offset 2 (next instruction)
         # This makes the branch a no-op - we just want the stored value
@@ -22001,13 +22091,7 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._resolve_obj_operand(operands[0], code)
 
         # GET_SIBLING is 1OP opcode 0x01 (store + branch)
-        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
-        # 0x91 = small constant, 0xA1 = variable
-        if op_type == 1:  # Variable
-            code.append(0xA1)
-        else:  # Constant (small)
-            code.append(0x91)
-        code.append(op_val & 0xFF)
+        code.extend(self._asm_1op(0x01, op_type, op_val))
         code.append(0x00)  # Store to stack
         # Branch byte: 0xC2 = branch on true, short offset, offset 2 (next instruction)
         # This makes the branch a no-op - we just want the stored value
@@ -22024,13 +22108,7 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._resolve_obj_operand(operands[0], code)
 
         # GET_PARENT is 1OP opcode 0x03 (store only)
-        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
-        # 0x93 = small constant, 0xA3 = variable
-        if op_type == 1:  # Variable
-            code.append(0xA3)
-        else:  # Constant (small)
-            code.append(0x93)
-        code.append(op_val & 0xFF)
+        code.extend(self._asm_1op(0x03, op_type, op_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -22054,13 +22132,7 @@ class ImprovedCodeGenerator:
         op_type, op_val = self._resolve_obj_operand(operands[0], code)
 
         # GET_CHILD stores child object (0 if none)
-        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
-        # 0x92 = small constant, 0xA2 = variable
-        if op_type == 1:  # Variable
-            code.append(0xA2)
-        else:  # Constant (small)
-            code.append(0x92)
-        code.append(op_val & 0xFF)
+        code.extend(self._asm_1op(0x02, op_type, op_val))
         code.append(0x00)  # Store to stack
         # Don't include branch byte - caller handles branching
 
@@ -22088,21 +22160,13 @@ class ImprovedCodeGenerator:
 
         # Get parent of obj1
         # GET_PARENT is 1OP opcode 0x03 (store instruction)
-        # 1OP short form: 10 tt nnnn where tt: 00=large, 01=small, 10=variable
-        if op1_type == 0:  # Constant (small)
-            code.append(0x93)  # Short 1OP, small constant
-        else:  # Variable
-            code.append(0xA3)  # Short 1OP, variable
-        code.append(op1_val & 0xFF)
+        code.extend(self._asm_1op(0x03, op1_type, op1_val))
         code.append(0x00)  # Store to stack
 
         # Compare with obj2 using JE (jump if equal)
         # JE is 2OP opcode 0x01 (branch instruction)
         # First operand is stack (variable 0x00), second is obj2
-        opcode = 0x01 | (1 << 6) | (op2_type << 5)  # Stack is always variable
-        code.append(opcode)
-        code.append(0x00)  # Stack (result of GET_PARENT)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x01, 1, 0, op2_type, op2_val))
         # Branch: if equal, skip to true case (offset 8 bytes forward)
         code.append(0xC8)
 
@@ -22334,6 +22398,7 @@ class ImprovedCodeGenerator:
             if isinstance(opnd, (FormNode, CondNode)):
                 # Evaluate the expression and spill to a scratch global so several
                 # chunks can reference it without popping the stack repeatedly.
+                _e_start = len(code)
                 expr = (self.generate_form(opnd) if isinstance(opnd, FormNode)
                         else self.generate_cond(opnd))
                 code.extend(expr)
@@ -22342,7 +22407,7 @@ class ImprovedCodeGenerator:
                     scratch = self.next_global
                     self.globals['_MFROB_SCRATCH_'] = scratch
                     self.next_global += 1
-                code.extend([0xD4, 0x9F, 0x00, 0x00, scratch & 0xFF])  # ADD sp 0 -> scratch
+                self._spill_top_to(code, _e_start, scratch)
                 resolved.append((2, scratch))
             else:
                 t, v = self._get_operand_type_and_value(opnd)
@@ -22555,8 +22620,7 @@ class ImprovedCodeGenerator:
                         self.global_values[sname] = 0
                         self.next_global += 1
                     svar = self.globals[sname]
-                    # ADD sp 0 -> svar (pops the stack into the scratch var)
-                    code.extend([0xD4, 0x9F, 0x00, 0x00, svar & 0xFF])
+                    self._spill_top_to(code, insert_pos, svar)
                     resolved.append((2, svar))
             else:
                 op_type, op_val = self._get_operand_type_and_value(op)
@@ -22566,6 +22630,21 @@ class ImprovedCodeGenerator:
                     resolved.append((op_type, op_val))
 
         # CALL_VS is VAR opcode 0x00
+        if self.version >= 4 and len(resolved) == 1:
+            # No-arg call: 1OP call_1s instead of VAR call_vs (1 byte shorter).
+            _t, _v = resolved[0]
+            if _t == 2:
+                code.append(0xA8)  # call_1s, variable operand
+                code.append(_v & 0xFF)
+            elif _t == 1 and 0 <= _v <= 255:
+                code.append(0x98)  # call_1s, small-constant operand
+                code.append(_v & 0xFF)
+            else:
+                code.append(0x88)  # call_1s, large-constant operand
+                code.append((_v >> 8) & 0xFF)
+                code.append(_v & 0xFF)
+            code.append(0x00)  # Store result to stack
+            return bytes(code)
         code.append(0xE0)  # VAR form, opcode 0x00
 
         # Build type byte for all operands (routine + up to 3 args)
@@ -23219,11 +23298,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # CALL_2S is 2OP opcode 0x19
-        # Long form: opcode | (op1_type << 6) | (op2_type << 5)
-        opcode = 0x19 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x19, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store result to stack
 
         return bytes(code)
@@ -23254,11 +23329,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # CALL_2N is 2OP opcode 0x1A
-        # Long form: opcode | (op1_type << 6) | (op2_type << 5)
-        opcode = 0x1A | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x1A, op1_type, op1_val, op2_type, op2_val))
 
         return bytes(code)
 
@@ -24061,10 +24132,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # GET_PROP_ADDR is 2OP opcode 0x12
-        opcode = 0x12 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x12, op1_type, op1_val, op2_type, op2_val))
         code.append(0x00)  # Store to stack
 
         return bytes(code)
@@ -24097,13 +24165,7 @@ class ImprovedCodeGenerator:
             operands[0], operands[1], code)
 
         # Use TEST opcode (2OP:7) which branches if (value AND mask) == mask
-        # TEST is opcode 7 in 2OP range
-        # Long form: $00-$1F = (small, small), $20-$3F = (small, var), etc.
-        # Opcode 7: $07 = (small, small, opcode 7)
-        opcode = 0x07 | (op1_type << 6) | (op2_type << 5)
-        code.append(opcode)
-        code.append(op1_val & 0xFF)
-        code.append(op2_val & 0xFF)
+        code.extend(self._asm_2op(0x07, op1_type, op1_val, op2_type, op2_val))
         # TEST branches on true when (value & mask) == mask -> push 1, else push 0.
         # Materialize on the stack so <BTST ...> works as a sub-value.
         code.extend(self._compare_materialize_tail(1, 0))
