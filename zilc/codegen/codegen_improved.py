@@ -15523,7 +15523,14 @@ class ImprovedCodeGenerator:
                             # Check for side-effect initializer (FormNode = routine call)
                             if isinstance(binding[1], FormNode):
                                 prog_side_effect_vars.add(var_name)
-                            if isinstance(init_value, int):
+                            src_var = self._var_ref_number(binding[1])
+                            if src_var is not None:
+                                # Copy a variable's VALUE (STORE var_num, [read src])
+                                code.append(0xCD)  # 2OP:13 STORE, variable form
+                                code.append(0x6F)  # types: small const, variable
+                                code.append(var_num & 0xFF)
+                                code.append(src_var & 0xFF)
+                            elif isinstance(init_value, int):
                                 if 0 <= init_value <= 255:
                                     # Small constant - use 0x0D (small, small)
                                     code.append(0x0D)  # STORE
@@ -15790,7 +15797,14 @@ class ImprovedCodeGenerator:
                             init_value = self.get_operand_value(binding[1])
                             if isinstance(binding[1], FormNode):
                                 bind_side_effect_vars.add(var_name)
-                            if isinstance(init_value, int):
+                            src_var = self._var_ref_number(binding[1])
+                            if src_var is not None:
+                                # Copy a variable's VALUE (STORE var_num, [read src])
+                                code.append(0xCD)  # 2OP:13 STORE, variable form
+                                code.append(0x6F)  # types: small const, variable
+                                code.append(var_num & 0xFF)
+                                code.append(src_var & 0xFF)
+                            elif isinstance(init_value, int):
                                 if 0 <= init_value <= 255:
                                     code.append(0x0D)
                                     code.append(var_num & 0xFF)
@@ -15834,7 +15848,14 @@ class ImprovedCodeGenerator:
                             # Check for side-effect initializer (FormNode = routine call)
                             if isinstance(binding[1], FormNode):
                                 bind_side_effect_vars.add(var_name)
-                            if isinstance(init_value, int):
+                            src_var = self._var_ref_number(binding[1])
+                            if src_var is not None:
+                                # Copy a variable's VALUE (STORE var_num, [read src])
+                                code.append(0xCD)  # 2OP:13 STORE, variable form
+                                code.append(0x6F)  # types: small const, variable
+                                code.append(var_num & 0xFF)
+                                code.append(src_var & 0xFF)
+                            elif isinstance(init_value, int):
                                 if 0 <= init_value <= 255:
                                     # Small constant - use 0x0D (small, small)
                                     code.append(0x0D)  # STORE
@@ -21418,6 +21439,37 @@ class ImprovedCodeGenerator:
             # unresolved 0xFFxx pointers and every HERO-BLOW missed.
             self._emitted_nested_table_ptr = True
             return self._table_marker(table_index)
+        return None
+
+    def _var_ref_number(self, node: ASTNode) -> Optional[int]:
+        """If ``node`` is a *variable read* -- a global variable (,X), a local
+        (.X), or an explicit <GVAL X>/<LVAL X> of one -- return the Z-machine
+        variable number to read.  Otherwise (object/constant atoms, forms with
+        side effects, numbers) return None.
+
+        This distinguishes a genuine variable reference from a value: e.g.
+        get_operand_value(,HERE) returns HERE's global *index* (16), which as a
+        PROG/BIND initializer would be stored as the constant 16 instead of
+        copying HERE's value.  ,ROOMS (an object) and ,MY-CONST stay values."""
+        if isinstance(node, LocalVarNode):
+            return self.locals.get(node.name)
+        if isinstance(node, GlobalVarNode):
+            nm = node.name
+            if nm in self.objects or nm in self.constants:
+                return None
+            return self.globals.get(nm)
+        if (isinstance(node, FormNode)
+                and isinstance(node.operator, AtomNode)
+                and len(node.operands) == 1
+                and isinstance(node.operands[0], AtomNode)):
+            op = node.operator.value.upper()
+            nm = node.operands[0].value
+            if op in ('LVAL', '.'):
+                return self.locals.get(nm)
+            if op in ('GVAL', ','):
+                if nm in self.objects or nm in self.constants:
+                    return None
+                return self.globals.get(nm)
         return None
 
     def get_variable_number(self, node: ASTNode) -> int:

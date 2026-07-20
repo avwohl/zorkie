@@ -1809,30 +1809,24 @@ class ZILCompiler:
         return ''.join(out)
 
     def _build_struct_table(self, base: str, inits, accessors: dict) -> str:
-        """Splice MAKE-<STRUCT> field initializers into an explicit <TABLE ...>
-        base, replacing the element at each field's byte offset with its value
-        (so e.g. NOUN-PHRASE's NP-YTBL/NP-NTBL point at their real sub-tables).
-        Non-<TABLE> bases (ITABLE runs) are returned unchanged."""
+        """Splice MAKE-<STRUCT> field initializers into the base table.
+
+        For an explicit <TABLE ...> base, replace the element at each field's
+        byte offset with its value (so e.g. NOUN-PHRASE's NP-YTBL/NP-NTBL, which
+        hand-write the mixed byte/word layout, point at their real sub-tables).
+
+        For an <ITABLE n (BYTE)> base (a flat zero run rather than a hand-written
+        element list -- e.g. PARSER-RESULT's <ITABLE 26 (BYTE)>), expand it into
+        the equivalent explicit mixed byte/word <TABLE ...>: every initialized
+        word field becomes a word element holding its sub-table pointer, every
+        other byte becomes <BYTE 0>.  Without this the field pointers (PST-PRSOS/
+        PST-READBUF/PST-LEXBUF, ...) stay 0 and SAVE-PARSER-RESULT's COPY-* scribble
+        over low memory.  Bases we don't recognise are returned unchanged."""
         import re
-        m = re.match(r'<\s*(TABLE|LTABLE|PTABLE)\b', base, re.IGNORECASE)
-        if not m or not inits:
+        if not inits:
             return base
-        tabop = m.group(1)
-        elem_toks = self._split_tokens(base[m.end():-1])
-        # A leading (BYTE)/(WORD)/(PURE ...) group is a table flag, not an element.
-        prefix = []
-        idx = 0
-        while idx < len(elem_toks) and elem_toks[idx].startswith('('):
-            prefix.append(elem_toks[idx])
-            idx += 1
-        elems = elem_toks[idx:]
-        default_byte = any('BYTE' in f.upper() for f in prefix)
-        off_to_elem = {}
-        off = 0
-        for ei, e in enumerate(elems):
-            off_to_elem[off] = ei
-            is_byte = default_byte or re.match(r'<\s*BYTE\b', e, re.IGNORECASE)
-            off += 1 if is_byte else 2
+        # (byte offset -> (is_byte, value)) for the initialized fields.
+        by_off = {}
         k = 0
         while k + 1 < len(inits):
             nm = inits[k].lstrip("'").upper()
@@ -1842,11 +1836,71 @@ class ZILCompiler:
             if not acc:
                 continue
             foff, getter, _putter = acc
-            byteoff = foff if getter.upper() in ('GETB', 'PUTB') else foff * 2
-            ei = off_to_elem.get(byteoff)
-            if ei is not None:
-                elems[ei] = val
-        return '<' + tabop + ' ' + ' '.join(prefix + elems) + '>'
+            is_byte = getter.upper() in ('GETB', 'PUTB')
+            byteoff = foff if is_byte else foff * 2
+            by_off[byteoff] = (is_byte, val)
+
+        m = re.match(r'<\s*(TABLE|LTABLE|PTABLE)\b', base, re.IGNORECASE)
+        if m:
+            tabop = m.group(1)
+            elem_toks = self._split_tokens(base[m.end():-1])
+            # A leading (BYTE)/(WORD)/(PURE ...) group is a flag, not an element.
+            prefix = []
+            idx = 0
+            while idx < len(elem_toks) and elem_toks[idx].startswith('('):
+                prefix.append(elem_toks[idx])
+                idx += 1
+            elems = elem_toks[idx:]
+            default_byte = any('BYTE' in f.upper() for f in prefix)
+            off_to_elem = {}
+            off = 0
+            for ei, e in enumerate(elems):
+                off_to_elem[off] = ei
+                is_byte = default_byte or re.match(r'<\s*BYTE\b', e, re.IGNORECASE)
+                off += 1 if is_byte else 2
+            for byteoff, (_ib, val) in by_off.items():
+                ei = off_to_elem.get(byteoff)
+                if ei is not None:
+                    elems[ei] = val
+            return '<' + tabop + ' ' + ' '.join(prefix + elems) + '>'
+
+        # ITABLE base: expand the flat zero run into an explicit mixed TABLE so
+        # the field pointers can be spliced in as real (word) elements.
+        im = re.match(r'<\s*ITABLE\b', base, re.IGNORECASE)
+        if im and by_off:
+            itoks = self._split_tokens(base[im.end():-1])
+            size = None
+            byte_elems = False
+            seen_size = False
+            for t in itoks:
+                if t.startswith('(') or t.upper() in ('NONE', 'BYTE', 'WORD',
+                                                      'LEXV', 'PURE'):
+                    if 'BYTE' in t.upper() or 'LEXV' in t.upper():
+                        byte_elems = True
+                    continue
+                if not seen_size:
+                    seen_size = True
+                    if re.fullmatch(r'-?\d+', t.strip()):
+                        size = int(t)
+            if size is None:
+                return base            # non-literal size: leave base as-is
+            size_bytes = size if byte_elems else size * 2
+            elems = []
+            o = 0
+            while o < size_bytes:
+                if o in by_off:
+                    is_byte, val = by_off[o]
+                    if is_byte:
+                        elems.append(f'<BYTE {val}>')
+                        o += 1
+                    else:
+                        elems.append(val)
+                        o += 2
+                else:
+                    elems.append('<BYTE 0>')
+                    o += 1
+            return '<TABLE ' + ' '.join(elems) + '>'
+        return base
 
     def _rewrite_accessors(self, source: str, accessors: dict) -> str:
         import re

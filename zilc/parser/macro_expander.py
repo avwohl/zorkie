@@ -177,6 +177,55 @@ def _body_is_ct_cond_mdl(body, bound, ct_globals=None):
     return True
 
 
+def _body_writes_names(node, names):
+    """True if any <SET nm ...> in ``node`` targets a name in ``names``."""
+    if isinstance(node, FormNode):
+        if (isinstance(node.operator, AtomNode)
+                and node.operator.value.upper() == 'SET' and node.operands):
+            tgt = node.operands[0]
+            tn = getattr(tgt, 'value', getattr(tgt, 'name', None))
+            if tn is not None and str(tn).upper() in names:
+                return True
+        return any(_body_writes_names(o, names) for o in node.operands)
+    if isinstance(node, CondNode):
+        for cond, acts in node.clauses:
+            if _body_writes_names(cond, names):
+                return True
+            if any(_body_writes_names(a, names) for a in acts):
+                return True
+        return False
+    if isinstance(node, RepeatNode):
+        return any(_body_writes_names(i, names) for i in node.body)
+    if hasattr(node, 'body') and isinstance(getattr(node, 'body'), list):
+        return any(_body_writes_names(i, names) for i in node.body)
+    if isinstance(node, list):
+        return any(_body_writes_names(i, names) for i in node)
+    return False
+
+
+def _macro_computes_on_aux(macro):
+    """True when a DEFMAC keeps compile-time state in its own "AUX" variables --
+    i.e. it declares AUX vars and its body <SET>s at least one of them (e.g.
+    scope.zil's MAP-SCOPE building INIT-STAGES, or WITH-GLOBAL building its
+    binding lists).  Such macros must be MDL-EVALUATED, not substituted: the
+    legacy substitution path leaves those compile-time <SET>s in the emitted
+    body, where they leak as bogus routine locals (MATCH-NOUN-PHRASE overflowed
+    past the 15-local limit).  Ordinary template macros have no AUX writes and
+    keep the legacy path."""
+    aux = set()
+    for param in getattr(macro, 'params', ()):
+        try:
+            is_aux = param[3]
+            pname = param[0]
+        except (IndexError, TypeError):
+            continue
+        if is_aux:
+            aux.add(str(pname).upper())
+    if not aux:
+        return False
+    return _body_writes_names(macro.body, aux)
+
+
 class MDLEvaluator:
     """
     Compile-time MDL evaluator for macro expansion.
@@ -393,6 +442,20 @@ class MDLEvaluator:
                 else:
                     result.append(evaluated)
             return result
+        elif op_name == 'CONS':
+            # <CONS x list> -> a new MDL list with x prepended to list.
+            # (scope.zil's MAP-SCOPE prepends the count PUT onto INIT-STAGES.)
+            head = self.evaluate(operands[0], env) if operands else None
+            rest = (self._as_mdl_list(self.evaluate(operands[1], env))
+                    if len(operands) > 1 else None)
+            if rest is None:
+                rest = []
+            items = ([]
+                     if head is None and not operands
+                     else (list(head.items)
+                           if isinstance(head, SpliceResultNode)
+                           else [head]))
+            return items + list(rest)
         elif op_name == 'GVAL':
             return self._eval_gval(operands, env)
         elif op_name == 'LVAL':
@@ -2141,8 +2204,10 @@ class MacroExpander:
         # pre-substitute .VARs with their initial values, so the loop body
         # could never observe its own SETs and the RepeatNode leaked into
         # codegen (FORM/LENGTH?/RETURN!- emitted as routine calls).
-        if isinstance(macro.body, RepeatNode) or _body_is_ct_cond_mdl(
-                macro.body, _ct_bound_names(bindings), self.ct_globals):
+        if (isinstance(macro.body, RepeatNode)
+                or _body_is_ct_cond_mdl(
+                    macro.body, _ct_bound_names(bindings), self.ct_globals)
+                or _macro_computes_on_aux(macro)):
             _env = {}
             _defaulted = getattr(self, '_last_defaulted_params', set())
             for _k, _v in bindings.items():
