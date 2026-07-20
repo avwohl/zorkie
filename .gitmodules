@@ -75,7 +75,7 @@
 	url = https://github.com/historicalsource/nordandbert.git
 [submodule "tests/test-games/infocom-zil/planetfall"]
 	path = tests/test-games/infocom-zil/planetfall
-	url = https://github.com/historicalsource/planetfall.git
+	url = https://github.com/the-infocom-files/planetfall.git
 [submodule "tests/test-games/infocom-zil/plunderedhearts"]
 	path = tests/test-games/infocom-zil/plunderedhearts
 	url = https://github.com/historicalsource/plunderedhearts.git
