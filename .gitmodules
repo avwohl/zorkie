@@ -72,7 +72,7 @@
 	url = https://github.com/historicalsource/moonmist.git
 [submodule "tests/test-games/infocom-zil/nordandbert"]
 	path = tests/test-games/infocom-zil/nordandbert
-	url = https://github.com/historicalsource/nordandbert.git
+	url = https://github.com/the-infocom-files/nordandbert.git
 [submodule "tests/test-games/infocom-zil/planetfall"]
 	path = tests/test-games/infocom-zil/planetfall
 	url = https://github.com/the-infocom-files/planetfall.git
