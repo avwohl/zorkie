@@ -773,6 +773,24 @@ class Lexer:
                 line = self.line
                 col = self.column
                 inside_form = self.angle_depth > 0 or self.paren_depth > 0
+                # A compile-time ARITHMETIC form used as a value -- %<- ...>,
+                # %<+ ...>, %<* ...>, %</ ...> -- must actually be folded, not
+                # replaced by 0.  moonmist stores I-DINNER's queue tick as
+                # <TABLE ... 1 %<- ,DINNER-TIME ,PRESENT-TIME-ATOM 10> I-DINNER>
+                # and queues I-LIONEL-SPEAKS with %<- ,LIONEL-TIME
+                # ,PRESENT-TIME-ATOM>; dropped to 0 the after-dinner clock
+                # collapses.  Drop only the % here so <...> tokenizes as an
+                # ordinary form and codegen's constant folder evaluates it.
+                # DEBUG-CODE / COND reader-conditionals keep the skip below.
+                if inside_form:
+                    _j = self.pos + 2
+                    while _j < len(self.source) and self.source[_j] in ' \t\n\r':
+                        _j += 1
+                    if (_j + 1 < len(self.source)
+                            and self.source[_j] in '-+*/'
+                            and self.source[_j + 1] in ' \t\n\r'):
+                        self.advance()  # drop % only; < becomes LANGLE next loop
+                        continue
                 self.advance()  # Skip %
                 self.advance()  # Skip <
                 # Skip the entire form including nested angle brackets

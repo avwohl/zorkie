@@ -27,6 +27,18 @@ _SZ3_R3 = 'R3' in _SZ3_RULES
 
 
 
+# ZILCH spells the punctuation vocabulary words with descriptive W? names, but
+# the dictionary word is the punctuation CHARACTER itself (declared via BUZZ
+# \. \, \" \' ...).  Without this map W?APOSTROPHE interned the literal word
+# "apostrophe" instead of "'", so moonmist's FIX-POSSESSIVES apostrophe test
+# (<==? <GET P-LEXV PTR> ,W?APOSTROPHE>) never matched and "take butler's note"
+# / "take maid's note" failed to parse.
+_W_PUNCT = {
+    'PERIOD': '.', 'COMMA': ',', 'QUOTE': '"', 'APOSTROPHE': "'",
+    'EXCLAIM': '!', 'QUESTION': '?', 'COLON': ':', 'SEMICOLON': ';',
+}
+
+
 class _PlaceholderScanDesync(Exception):
     """Raised when _walk_large_const_positions cannot decode a code stream."""
 
@@ -968,6 +980,34 @@ class ImprovedCodeGenerator:
         for _c in getattr(program, 'constants', ()):
             if isinstance(_c.value, NumberNode) and _c.name not in self.constants:
                 self.constants[_c.name] = _c.value.value
+        # Pre-register the ZILCH compile-time SETG idiom used for the clock /
+        # dinner times: <CONSTANT DINNER-TIME <SETG DINNER-TIME 480>> and
+        # <GLOBAL PRESENT-TIME <SETG PRESENT-TIME-ATOM 420>>.  The SETG both
+        # yields the number and names a compile-time constant that later table
+        # elements fold against -- moonmist's C-TABLE stores <- ,DINNER-TIME
+        # ,PRESENT-TIME-ATOM 10> as I-DINNER's tick, and globals (the C-TABLE
+        # among them) are encoded BEFORE the CONSTANT pass, so both names must
+        # exist now or the tick folds to 0 and dinner is served at turn 0.
+        def _preregister_setg_idiom(_node):
+            if (isinstance(_node, FormNode)
+                    and isinstance(_node.operator, AtomNode)
+                    and _node.operator.value.upper() in ('SETG', 'SET')
+                    and len(_node.operands) == 2
+                    and isinstance(_node.operands[0], AtomNode)):
+                _v = self.eval_expression(_node.operands[1])
+                if _v is not None:
+                    _nm = _node.operands[0].value
+                    if _nm not in self.constants and _nm not in self.globals:
+                        self.constants[_nm] = _v
+                    return _v
+            return None
+        for _c in getattr(program, 'constants', ()):
+            if _c.name not in self.constants:
+                _v = _preregister_setg_idiom(_c.value)
+                if _v is not None:
+                    self.constants[_c.name] = _v
+        for _g in getattr(program, 'globals', ()):
+            _preregister_setg_idiom(getattr(_g, 'initial_value', None))
         # Add verb constants from action table
         if self.action_table and 'verb_constants' in self.action_table:
             for const_name, value in self.action_table['verb_constants'].items():
@@ -1169,6 +1209,30 @@ class ImprovedCodeGenerator:
                             if self._last_voc_form_idx is not None:
                                 self._global_vocab_fixups[global_node.name] = \
                                     self._last_voc_form_idx
+                        else:
+                            # A compile-time-foldable *scalar* FORM initial value:
+                            # <GLOBAL PRESENT-TIME <SETG PRESENT-TIME-ATOM 420>>
+                            # (SETG yields 420) and <GLOBAL C-INTS <- 138
+                            # <* 12 6>>> (== 66).  Unhandled here these stayed 0,
+                            # so moonmist's clock (PRESENT-TIME) and interrupt
+                            # base (C-INTS, used by CLOCKER's <REST ,C-TABLE
+                            # ,C-INTS>) both started wrong and the dinner /
+                            # after-dinner schedule was off.
+                            # ONLY fold pure value-forms (SETG/SET + arithmetic):
+                            # a table constructor (<TABLE ...>) also "evaluates"
+                            # to a small int here (cutthroats' <GLOBAL
+                            # DELIVERY-TABLE <TABLE 0 0 ...>>), which would
+                            # overwrite the table pointer that the table pass
+                            # installs and crash the game.
+                            _iv = global_node.initial_value
+                            _op = (_iv.operator.value.upper()
+                                   if isinstance(getattr(_iv, 'operator', None), AtomNode)
+                                   else None)
+                            if _op in ('SETG', 'SET', '-', '+', '*', '/', 'MOD',
+                                       'LSH', 'ORB', 'ANDB', 'XORB', 'BOR', 'BAND'):
+                                _fv = self.eval_expression(_iv)
+                                if isinstance(_fv, int):
+                                    self.global_values[global_node.name] = _fv
                 elif isinstance(global_node.initial_value, StringNode):
                     # <GLOBAL X "string"> -- the global holds the PACKED address of the
                     # string. Register the string and store a 0xFC00|idx placeholder that
@@ -3254,6 +3318,18 @@ class ImprovedCodeGenerator:
             self.constants[const_node.name] = placeholder_value
             return
 
+        # ZILCH auto-patches the constant LAST-OBJECT to the number of the
+        # last (highest-numbered) object; a game only declares a placeholder
+        # <CONSTANT LAST-OBJECT 0> ("ZILCH should stick the # of the last
+        # object here").  moonmist's MOBY-FIND scans objects 1..LAST-OBJECT
+        # (<IGRTR? OBJ LAST-OBJECT>): left at 0 the loop stops after the first
+        # object, so ASK/TELL ABOUT any out-of-scope topic (ghost, tamara, ...)
+        # matched nothing.  Honor the auto value here instead of raising a
+        # redefinition conflict on the game's placeholder 0.
+        if const_node.name == 'LAST-OBJECT' and self.objects:
+            self.constants['LAST-OBJECT'] = max(self.objects.values())
+            return
+
         value = self.eval_expression(const_node.value)
         if value is not None:
             # Check for redefinition with different value
@@ -3279,6 +3355,15 @@ class ImprovedCodeGenerator:
                 return 1
             elif node.value == '<>':
                 return 0
+        elif isinstance(node, GlobalVarNode):
+            # ,NAME in a compile-time expression (e.g. moonmist's C-TABLE
+            # element <- ,DINNER-TIME ,PRESENT-TIME-ATOM 10>, the % dropped by
+            # the lexer) folds to a same-named CONSTANT when one exists; the
+            # ZILCH clock/dinner-time names are exactly such compile-time
+            # constants.  Left unhandled this returned None and the arithmetic
+            # collapsed the whole element to 0.
+            if node.name in self.constants:
+                return self.constants[node.name]
         elif isinstance(node, FormNode):
             # Handle <> (FALSE) form
             if isinstance(node.operator, AtomNode) and node.operator.value == '<>' and not node.operands:
@@ -3353,6 +3438,23 @@ class ImprovedCodeGenerator:
                             return (values[0] << shift) & 0xFFFF
                         else:
                             return (values[0] >> (-shift)) & 0xFFFF
+                elif op in ('SETG', 'SET') and len(node.operands) == 2:
+                    # ZILCH compile-time SETG: <CONSTANT DINNER-TIME <SETG
+                    # DINNER-TIME 480>> and <GLOBAL PRESENT-TIME <SETG
+                    # PRESENT-TIME-ATOM 420>> both use a SETG *as their value
+                    # expression* to (a) yield the number and (b) name a
+                    # compile-time constant.  Evaluate the value, register the
+                    # named constant so later ,NAME and %<...> references fold
+                    # (moonmist's dinner/clock timing reads ,DINNER-TIME), and
+                    # return the value for the enclosing CONSTANT/GLOBAL.
+                    val = self.eval_expression(node.operands[1])
+                    name_node = node.operands[0]
+                    if isinstance(name_node, AtomNode) and val is not None:
+                        if (name_node.value not in self.constants
+                                and name_node.value not in self.globals):
+                            self.constants[name_node.value] = val
+                        return val
+                    return None
                 elif op == 'ASCII':
                     # ASCII converts a character to its ASCII code
                     if len(node.operands) == 1:
@@ -6531,6 +6633,13 @@ class ImprovedCodeGenerator:
             # Check for VOC form: <VOC "word" pos>
             if isinstance(val.operator, AtomNode) and val.operator.value.upper() == 'VOC':
                 return self._handle_voc_form(val)
+            # A compile-time arithmetic element folds to a constant (moonmist's
+            # C-TABLE stores <- ,DINNER-TIME ,PRESENT-TIME-ATOM 10> as
+            # I-DINNER's queue tick).  get_operand_value doesn't evaluate
+            # arithmetic, so try the constant folder first.
+            _folded = self.eval_expression(val)
+            if _folded is not None:
+                return _folded
             # Otherwise try to get operand value
             return self.get_operand_value(val) or 0
 
@@ -9019,6 +9128,14 @@ class ImprovedCodeGenerator:
                 # Only escaped single characters become the literal character
                 if name_part.startswith('\\') and len(name_part) == 2:
                     word = name_part[1]  # Strip the backslash, e.g., \, -> ,
+                elif (name_part.upper() in _W_PUNCT
+                        and getattr(getattr(self, "compiler", None),
+                                    "_is_classic_parser", False)):
+                    # Classic Infocom parser: W?APOSTROPHE/W?COMMA/... name the
+                    # punctuation CHARACTER word.  (ZILF-library games instead
+                    # treat W?COMMA as the literal word "comma", split from the
+                    # symbol W?\, -- so only the classic parser gets this map.)
+                    word = _W_PUNCT[name_part.upper()]
                 else:
                     # Word names like COMMA -> "comma"
                     word = name_part.lower()
@@ -9190,6 +9307,14 @@ class ImprovedCodeGenerator:
                 # Only escaped single characters become the literal character
                 if name_part.startswith('\\') and len(name_part) == 2:
                     word = name_part[1]  # Strip the backslash, e.g., \, -> ,
+                elif (name_part.upper() in _W_PUNCT
+                        and getattr(getattr(self, "compiler", None),
+                                    "_is_classic_parser", False)):
+                    # Classic Infocom parser: W?APOSTROPHE/W?COMMA/... name the
+                    # punctuation CHARACTER word.  (ZILF-library games instead
+                    # treat W?COMMA as the literal word "comma", split from the
+                    # symbol W?\, -- so only the classic parser gets this map.)
+                    word = _W_PUNCT[name_part.upper()]
                 else:
                     # Word names like COMMA -> "comma"
                     word = name_part.lower()
@@ -9310,6 +9435,14 @@ class ImprovedCodeGenerator:
                 # Only escaped single characters become the literal character
                 if name_part.startswith('\\') and len(name_part) == 2:
                     word = name_part[1]  # Strip the backslash, e.g., \, -> ,
+                elif (name_part.upper() in _W_PUNCT
+                        and getattr(getattr(self, "compiler", None),
+                                    "_is_classic_parser", False)):
+                    # Classic Infocom parser: W?APOSTROPHE/W?COMMA/... name the
+                    # punctuation CHARACTER word.  (ZILF-library games instead
+                    # treat W?COMMA as the literal word "comma", split from the
+                    # symbol W?\, -- so only the classic parser gets this map.)
+                    word = _W_PUNCT[name_part.upper()]
                 else:
                     # Word names like COMMA -> "comma"
                     word = name_part.lower()

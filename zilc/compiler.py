@@ -667,12 +667,18 @@ class ZILCompiler:
         # Handle SETG
         # Variable names can include MDL special suffixes like !- (unbind)
         # Value can be: integer, T, <>, character literal (!\X), or quoted string ("text")
-        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.|\"\S*\")?\s*>'
+        # An optional trailing comment (`;<datum>`) may sit between the value
+        # and the closing > -- moonmist writes <SETG PRESENT-TIME-ATOM 420
+        # ;1140>; without allowing it the SETG was not tracked, so the
+        # compile-time %<- ,DINNER-TIME ,PRESENT-TIME-ATOM 10> (I-DINNER's
+        # queue tick) could not fold and dinner was served at turn 0.
+        _setg_tail = r'(?:\s*;[^\s>]+)?\s*>'
+        setg_pattern = r'<\s*SETG\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.|\"\S*\")?' + _setg_tail
         source = re.sub(setg_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
         # Handle SET (compile-time settings like REDEFINE)
         # Variable names can include MDL special suffixes like !- (unbind)
-        set_pattern = r'<\s*SET\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.|\"\S*\")?\s*>'
+        set_pattern = r'<\s*SET\s+([A-Z0-9\-?!]+)\s+(\d+|T|<>|!\\.|\"\S*\")?' + _setg_tail
         source = re.sub(set_pattern, extract_set_or_setg, source, flags=re.IGNORECASE)
 
         # Handle shorthand flag forms like <FUNNY-GLOBALS?> (sets flag to T)

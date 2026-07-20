@@ -44,6 +44,34 @@ _CT_COND_OPS = {'ASSIGNED?', 'GASSIGNED?', 'TYPE?', 'NOT', 'AND', 'OR', 'EMPTY?'
 _ZILCH_ENV_ASSIGNED = {'ZILCH', 'PREDGEN'}
 
 
+def _char_literal_code(node):
+    r"""ASCII code of a ZIL character-literal atom, or None.
+
+    The lexer emits ZIL character constants (!\X, !X, \X) as ATOM tokens
+    (e.g. <TELL !\  LN> -> AtomNode "!\ "), but in MDL a character constant
+    has TYPE CHARACTER, not ATOM.  A game's own TELL DEFMAC dispatches on
+    <TYPE? .E CHARACTER> vs <TYPE? .E ATOM> and calls <ASCII .E>; without
+    this distinction the CHARACTER arm is never taken and every !\X in TELL
+    is misread as a bare atom (moonmist's <TELL !\  LN> became
+    <PRINT <GETP LN !\ >>).  Kept in lock-step with codegen's
+    _parse_char_literal so both stages agree on what a character literal is.
+    """
+    if not isinstance(node, AtomNode):
+        return None
+    v = node.value
+    _esc = {'n': 10, 't': 9, 'r': 13, '0': 0}
+    # !\X  -- backslash-escaped character after !
+    if v.startswith('!\\') and len(v) == 3:
+        return _esc.get(v[2], ord(v[2]))
+    # \X   -- backslash-escaped character (len 2 only; \,TELL etc. are atoms)
+    if v.startswith('\\') and len(v) == 2:
+        return _esc.get(v[1], ord(v[1]))
+    # !X   -- single character after ! (len 2; bare ! and !</!,/!. splices differ)
+    if v.startswith('!') and len(v) == 2 and v[1] not in '<,.':
+        return ord(v[1])
+    return None
+
+
 def _gassigned_guarded_names(test_node):
     names = set()
     def walk(n):
@@ -322,6 +350,8 @@ class MDLEvaluator:
             return self._eval_type(operands, env)
         elif op_name == 'SPNAME':
             return self._eval_spname(operands, env)
+        elif op_name == 'ASCII':
+            return self._eval_ascii(operands, env)
         elif op_name == '=?' or op_name == 'EQUAL?':
             return self._eval_equal(operands, env)
         elif op_name == '==?':
@@ -912,6 +942,13 @@ class MDLEvaluator:
                 type_name = type_op.value.upper()
 
             if type_name:
+                # A ZIL character literal (!\X, !X, \X) is TYPE CHARACTER in
+                # MDL, not ATOM -- a game TELL DEFMAC branches on exactly this.
+                if _char_literal_code(val) is not None:
+                    if type_name == 'CHARACTER':
+                        return True
+                    # falls through -- never matches ATOM/STRING/etc.
+                    continue
                 if type_name == 'ATOM' and isinstance(val, AtomNode):
                     return True
                 if type_name == 'STRING' and isinstance(val, (str, StringNode)):
@@ -952,6 +989,27 @@ class MDLEvaluator:
             return val.upper()
 
         return ""
+
+    def _eval_ascii(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        r"""Evaluate <ASCII x> at compile time.
+
+        MDL's ASCII is bidirectional: <ASCII !\A> -> 65 and <ASCII 65> -> the
+        character A.  In a TELL DEFMAC's CHARACTER arm it is only ever applied
+        to a character constant to get its code (<PRINTC <ASCII .E>>), so a
+        character literal or an existing number both resolve to the numeric
+        code here; anything else is returned unchanged for runtime handling.
+        """
+        if not operands:
+            return None
+        val = self.evaluate(operands[0], env)
+        code = _char_literal_code(val)
+        if code is not None:
+            return code
+        if isinstance(val, int):
+            return val
+        if isinstance(val, NumberNode):
+            return val.value
+        return val
 
     def _eval_equal(self, operands: List[ASTNode], env: Dict[str, Any]) -> bool:
         """Evaluate =? (string equality)."""

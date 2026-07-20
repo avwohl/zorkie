@@ -530,10 +530,30 @@ class ZAssembler:
                 pos = _walk_large_const_positions(chunk, self.version,
                                                   include_print_paddr)
             except _PlaceholderScanDesync:
-                try:
-                    pos = _walk_large_const_positions(chunk.rstrip(b'\x00'), self.version,
-                                                      include_print_paddr)
-                except _PlaceholderScanDesync:
+                # A routine chunk runs up to the NEXT routine's start, so it
+                # includes the inter-routine alignment padding (routines pack
+                # on a 2-byte boundary in V1-3, 4 in V4-7, 8 in V8): up to
+                # align-1 trailing 0x00 pad bytes follow the last instruction.
+                # rstrip'ing ALL trailing zeros over-peeled a genuine 0x00
+                # operand byte (FAR-AWAY?'s closing `ret stack` = AB 00),
+                # desynced again, and dropped the whole routine into the coarse
+                # fallback range -- which then let the blind 0xFC string scan
+                # false-match a small-constant operand that read 0xFC (an object
+                # number of 252) and clobber the following branch byte. Peel
+                # only the contiguous 0x00 padding, one byte at a time.
+                align = 8 if self.version >= 8 else (4 if self.version >= 4 else 2)
+                pos = None
+                _strip = 1
+                while (_strip < align and _strip <= len(chunk)
+                       and chunk[-_strip] == 0):
+                    try:
+                        pos = _walk_large_const_positions(
+                            chunk[:-_strip], self.version, include_print_paddr)
+                        break
+                    except _PlaceholderScanDesync:
+                        pos = None
+                    _strip += 1
+                if pos is None:
                     fallback.append((cs, end))
                     continue
             for p in pos:
