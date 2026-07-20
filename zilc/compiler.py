@@ -599,7 +599,7 @@ class ZILCompiler:
         source = source.replace('^L', '\n')
         return source
 
-    def preprocess_zilf_directives(self, source: str) -> str:
+    def preprocess_zilf_directives(self, source: str, base_path=None) -> str:
         """
         Preprocess ZILF-specific directives:
         - COMPILATION-FLAG: Set compile-time flags
@@ -610,11 +610,16 @@ class ZILCompiler:
 
         Args:
             source: Source code with potential ZILF directives
+            base_path: Directory of the top-level source, used to locate USEd
+                library modules (e.g. the ZILF LIBMSG-DEFAULTS message data).
 
         Returns:
             Source code with directives evaluated and conditionals resolved
         """
         import re
+        from pathlib import Path
+        if base_path is None:
+            base_path = getattr(self, '_compile_base_path', None) or Path.cwd()
 
         # Track compile-time global values for %<COND> evaluation.
         # Seed the ZILCH compiler environment (fix B): Infocom sources probe
@@ -622,6 +627,11 @@ class ZILCompiler:
         # arm over the MDL-interpreter arm (whose code references listener
         # subrs: suspect's ELSE arms called ASCII/ERROR/NTH!-/QUITTER).
         self.compile_globals = {'ZILCH': True, 'PREDGEN': True}
+
+        # ZIP-OPTIONS enabled for this build (UNDO, COLOR, MOUSE, SOUND,
+        # DISPLAY). Populated by _process_zip_options after VERSION? runs, and
+        # consumed by _process_if_options to expand the IF-<OPTION> forms.
+        self.zip_options = set()
 
         # Extract SET and SETG directives to track compile-time values
         # <SET VARNAME value> or <SETG VARNAME value>
@@ -820,6 +830,47 @@ class ZILCompiler:
         # Third pass: Evaluate VERSION? conditionals
         # Process manually to handle nested brackets properly
         source = self._process_version(source)
+
+        # Third-and-a-half: Record surviving <ZIP-OPTIONS ...> (the ZILF
+        # library enables UNDO/COLOR only in the V5+ arm of its top-level
+        # VERSION?), then expand the IF-<OPTION> compile-time forms. Must run
+        # AFTER _process_version so options in a stripped version branch (e.g.
+        # the V5-only ELSE for a V3 build) are not counted -- that is exactly
+        # what strips the V5-only <ISAVE> from <IF-UNDO ...> in a V3 build.
+        source = self._process_zip_options(source)
+        source = self._process_if_options(source)
+        source = self._process_if_debug(source)
+        source = self._process_expand(source)
+        source = self._process_version_ops(source)
+
+        # Reproduce the ZILF pronoun subsystem's compile-time code generation
+        # (<PRONOUN ...>/<FINISH-PRONOUNS>) before DEFSTRUCT so its own
+        # compile-time-only <DEFSTRUCT PRONOUN VECTOR ...> is removed here.
+        source = self._process_pronouns(source)
+
+        # Expand ZILF <DEFSTRUCT ...> field accessors and MAKE-<NAME> forms
+        # (the parser's OOPS-RECORD / NOUN-PHRASE / OBJSPEC / PARSER-RESULT
+        # records) so accessor calls like <PST-PRSA .X> / <NP-MODE .NP 0>
+        # become the underlying GET/PUT/GETB/PUTB. Run before DEFAULT-DEFINITION
+        # so accessors inside default bodies are rewritten too.
+        source = self._inline_table_constructors(source)
+        source = self._process_defstruct(source)
+        source = self._fold_table_sizes(source)
+
+        # Unwrap ZILF <DEFAULT-DEFINITION NAME body...> forms (installs the
+        # default body unless NAME is defined elsewhere) so the library's
+        # default routines/macros -- DARKNESS-F, the MAIN-LOOP-* / HOOK-*
+        # DEFMACs, STATUS-LINE, etc. -- actually reach the parser.
+        source = self._process_default_definition(source)
+
+        # Third-and-three-quarters: expand the ZILF library-message system.
+        # <LIBRARY-MESSAGE CAT NAME [((BND VAL)...)]> is a stdlib DEFMAC that
+        # splices a per-(category,name) sequence of TELL tokens (defined by
+        # <DEFAULT-LIBRARY-MESSAGES>/<REPLACE-LIBRARY-MESSAGES> in a USEd module)
+        # into the enclosing TELL, substituting the message's LVAL placeholders
+        # with the call's bindings. Must run after VERSION?/flag stripping so we
+        # only resolve calls that survive.
+        source = self._process_library_messages(source, base_path)
 
         # Fourth pass: Evaluate %<COND> compile-time conditionals
         source = self._process_compile_cond(source)
@@ -1314,6 +1365,1081 @@ class ZILCompiler:
 
         return ''.join(result)
 
+    def _process_zip_options(self, source: str) -> str:
+        """Record enabled <ZIP-OPTIONS ...> and strip the forms (they emit no
+        code).
+
+        In the ZILF standard library, `<ZIP-OPTIONS UNDO COLOR>` turns on the
+        matching IF-UNDO / IF-COLOR / ... compile-time forms. That form appears
+        only in the V5+ arm of the library's top-level VERSION?, so this MUST
+        run after _process_version: for a V3/V4 build that arm has already been
+        stripped and no options survive, so IF-UNDO strips its V5-only ISAVE.
+        """
+        import re
+        result = []
+        pos = 0
+        known = {'UNDO', 'COLOR', 'MOUSE', 'SOUND', 'DISPLAY'}
+        while pos < len(source):
+            match = re.search(r'<\s*ZIP-OPTIONS\b', source[pos:], re.IGNORECASE)
+            if not match:
+                result.append(source[pos:])
+                break
+            start = pos + match.start()
+            result.append(source[pos:start])
+            content, end = self._extract_balanced_content(source, start)
+            if not content:
+                # Unbalanced; leave as-is to avoid mangling source.
+                result.append(match.group(0))
+                pos += match.end()
+                continue
+            # content is like <ZIP-OPTIONS UNDO COLOR>; drop the token, read opts
+            inner = re.sub(r'^<\s*ZIP-OPTIONS\b', '', content[:-1],
+                           flags=re.IGNORECASE)
+            for opt in inner.split():
+                opt = opt.strip().upper()
+                if opt:
+                    self.zip_options.add(opt)
+                    if opt not in known:
+                        self.log(f"  ZIP-OPTIONS: unknown option '{opt}'")
+            self.log(f"  ZIP-OPTIONS enabled: {sorted(self.zip_options)}")
+            pos = end  # strip the form (emit nothing)
+        return ''.join(result)
+
+    def _process_if_options(self, source: str) -> str:
+        """Expand ZILF IF-<OPTION> compile-time forms per the enabled ZIP-OPTIONS.
+
+        `<IF-UNDO body...>` -> `body...` iff the UNDO option is enabled, else
+        nothing; likewise IF-COLOR, IF-MOUSE, IF-SOUND, IF-DISPLAY. These are
+        ZILF built-ins (no stdlib DEFMAC defines them), so we resolve them at
+        preprocess time. Balanced-scan based, so nested `<...>` and strings in
+        the body are handled and the forms may appear inside routines. Runs to
+        a fixpoint so IF-* forms nested inside a kept body also expand.
+        """
+        import re
+        option_forms = {
+            'IF-UNDO': 'UNDO',
+            'IF-COLOR': 'COLOR',
+            'IF-MOUSE': 'MOUSE',
+            'IF-SOUND': 'SOUND',
+            'IF-DISPLAY': 'DISPLAY',
+        }
+        name_re = r'IF-UNDO|IF-COLOR|IF-MOUSE|IF-SOUND|IF-DISPLAY'
+        for _ in range(50):
+            result = []
+            pos = 0
+            changed = False
+            while pos < len(source):
+                match = re.search(r'<\s*(' + name_re + r')\b',
+                                  source[pos:], re.IGNORECASE)
+                if not match:
+                    result.append(source[pos:])
+                    break
+                start = pos + match.start()
+                result.append(source[pos:start])
+                content, end = self._extract_balanced_content(source, start)
+                if not content:
+                    # Unbalanced; leave alone.
+                    result.append(match.group(0))
+                    pos += match.end()
+                    continue
+                head = re.match(r'<\s*(' + name_re + r')\b', content,
+                                re.IGNORECASE)
+                form_name = head.group(1).upper()
+                body = content[head.end():-1]  # between the form name and '>'
+                option = option_forms[form_name]
+                if option in self.zip_options:
+                    result.append(body)
+                # else: option disabled -> emit nothing (strip body)
+                changed = True
+                pos = end
+            source = ''.join(result)
+            if not changed:
+                break
+        return source
+
+    # ------------------------------------------------------------------
+    # ZILF standard-library message system (LIBMSG / LIBMSG-DEFAULTS).
+    #
+    # ZILF stores each library message in the GVAL of a computed atom on a
+    # per-category OBLIST, and <LIBRARY-MESSAGE ...> is a DEFMAC that resolves
+    # it through that OBLIST machinery. We don't model MDL OBLISTs, so we
+    # implement the observable behaviour directly: build a (category,name) ->
+    # expansion map from the <DEFAULT-/REPLACE-LIBRARY-MESSAGES> data forms
+    # (which live in a USEd module we otherwise don't include), then rewrite
+    # every <LIBRARY-MESSAGE ...> into its expansion, substituting the message's
+    # LVAL placeholders with the call's bindings. The expansions are ordinary
+    # TELL token sequences (T/A/CT/WORD/IF/IFELSE/... from <ADD-TELL-TOKENS>),
+    # which the existing TELL codegen already handles.
+    # ------------------------------------------------------------------
+    _MSG_ATOM_CHARS = set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-?!/")
+
+    def _process_default_definition(self, source: str) -> str:
+        """Unwrap <DEFAULT-DEFINITION NAME body...> forms.
+
+        DEFAULT-DEFINITION is a ZILF construct that installs `body` (a
+        <ROUTINE>/<DEFMAC>/... that defines NAME) only when NAME is not already
+        defined -- letting a game override a library default. We emit the body
+        unless a competing top-level definition of NAME exists outside this
+        form; without this, the wrapped routines/macros are silently dropped."""
+        import re
+        forms = self._find_named_forms(source, 'DEFAULT-DEFINITION')
+        if not forms:
+            return source
+        out = []
+        pos = 0
+        for (start, end, content) in forms:
+            out.append(source[pos:start])
+            pos = end
+            m = re.match(r'<\s*DEFAULT-DEFINITION\b', content, re.IGNORECASE)
+            name, body = self._read_atom(content[m.end():-1])
+            if name is None:
+                out.append(content)  # malformed; leave untouched
+                continue
+            other = source[:start] + source[end:]
+            if self._has_competing_definition(other, name.upper()):
+                continue  # overridden elsewhere -> drop the default
+            out.append(body)
+        out.append(source[pos:])
+        return ''.join(out)
+
+    def _has_competing_definition(self, text: str, name: str) -> bool:
+        import re
+        pat = re.compile(
+            r'<\s*(?:ROUTINE|DEFMAC|DEFINE|GLOBAL|CONSTANT|OBJECT|ROOM'
+            r'|DEFINE-GLOBALS)\s+' + re.escape(name) + r'(?![A-Z0-9?!/\-])',
+            re.IGNORECASE)
+        return bool(pat.search(text))
+
+    # ------------------------------------------------------------------
+    # ZILF DEFSTRUCT: table-backed structures with generated field accessors.
+    #
+    # <DEFSTRUCT NAME (BASE ('NTH getter) ('PUT putter) ('START-OFFSET s))
+    #            (FIELD TYPE ['OFFSET n] ['NTH g] ['PUT p]) ...>
+    # generates, for each field, an accessor macro:
+    #   <FIELD struct>       -> <getter struct offset>          (read)
+    #   <FIELD struct value> -> <putter struct offset value>    (write)
+    # plus a MAKE-<NAME> constructor. Fields without an explicit 'OFFSET take
+    # the next sequential index (getter units), which an explicit 'OFFSET
+    # resets. We resolve accessors by direct rewrite (ZGET/ZPUT are word GET/PUT,
+    # GETB/PUTB are byte ops) and reduce MAKE-<NAME> to its base value.
+    # ------------------------------------------------------------------
+    def _process_defstruct(self, source: str) -> str:
+        import re
+        forms = self._find_named_forms(source, 'DEFSTRUCT')
+        if not forms:
+            return source
+        get_map = {'ZGET': 'GET', 'ZPUT': 'PUT'}
+        accessors = {}   # FIELD -> (offset, getter, putter)
+        make_names = set()
+        for (_s, _e, content) in forms:
+            m = re.match(r'<\s*DEFSTRUCT\b', content, re.IGNORECASE)
+            sname, rest = self._read_atom(content[m.end():-1])
+            if sname is None:
+                continue
+            if not rest.lstrip().startswith('('):
+                # Bare base type (e.g. VECTOR): a compile-time-only struct with
+                # no runtime table accessors -- skip.
+                continue
+            clauses = self._split_paren_clauses(rest)
+            if not clauses:
+                continue
+            make_names.add('MAKE-' + sname.upper())
+            # Base spec: (BASE-TYPE ('NTH g) ('PUT p) ('START-OFFSET s))
+            _btype, bopts = self._read_atom(clauses[0])
+            default_get, default_put, start = 'ZGET', 'ZPUT', 0
+            for sub in self._split_paren_clauses(bopts):
+                key, val = self._read_atom(sub.lstrip("'"))
+                if key is None:
+                    continue
+                k, val = key.upper(), val.strip()
+                if k == 'NTH':
+                    default_get = val
+                elif k == 'PUT':
+                    default_put = val
+                elif k == 'START-OFFSET':
+                    try:
+                        start = int(val)
+                    except ValueError:
+                        start = 0
+            counter = start
+            for fclause in clauses[1:]:
+                fname, frest = self._read_atom(fclause)
+                if fname is None:
+                    continue
+                _ftype, fopts = self._read_atom(frest)  # drop the type token
+                fopts = fopts or ''
+                offm = re.search(r"'OFFSET\s+(-?\d+)", fopts)
+                getm = re.search(r"'NTH\s+([A-Za-z0-9?!/\-]+)", fopts)
+                putm = re.search(r"'PUT\s+([A-Za-z0-9?!/\-]+)", fopts)
+                if offm:
+                    off = int(offm.group(1))
+                    counter = off + 1
+                else:
+                    off = counter
+                    counter += 1
+                getter = (getm.group(1) if getm else default_get).upper()
+                putter = (putm.group(1) if putm else default_put).upper()
+                accessors[fname.upper()] = (off,
+                                            get_map.get(getter, getter),
+                                            get_map.get(putter, putter))
+        source = self._strip_named_forms(source, 'DEFSTRUCT')
+        # (0-arg table-constructor DEFINEs -- NOUN-PHRASE, PARSER-RESULT,
+        # PRSTBL, MAKE-READBUF, ... -- were already inlined by
+        # _inline_table_constructors, so MAKE-<STRUCT> calls are present here.)
+        # <MAKE-NAME 'NAME base 'FIELD val ...> -> the base structure with each
+        # FIELD element initialized to val. For an explicit <TABLE ...> base we
+        # splice vals into the matching element (by byte offset); other bases
+        # (e.g. <ITABLE ...>) keep the base and drop the inits.
+        if make_names:
+            alt = '|'.join(re.escape(mk) for mk in
+                           sorted(make_names, key=len, reverse=True))
+            for (start, end, content) in reversed(
+                    self._find_named_forms(source, alt)):
+                toks = self._split_tokens(content[1:-1])
+                base = toks[2] if len(toks) >= 3 else '<>'
+                base = self._build_struct_table(base, toks[3:], accessors)
+                source = source[:start] + base + source[end:]
+        # Field accessors (fixpoint; a write value may itself be a read).
+        source = self._rewrite_accessors(source, accessors)
+        # Field-macro generators: <MAPF <> <FUNCTION (F) <EVAL `<DEFMAC
+        # ~<PARSE <STRING "P-" <SPNAME .F>>> ("ARGS" A) `<~.F ,GLOBAL ~'~!.A>>>>
+        # '(F1 F2 ...)> makes P-<F> wrappers that apply accessor F to a fixed
+        # global (the parser's P-OOPS-* on ,P-OOPS-DATA). Reproduce them.
+        source = self._process_generated_field_macros(source, accessors)
+        return source
+
+    def _process_generated_field_macros(self, source: str, accessors: dict) -> str:
+        import re
+        fixed = {}   # NAME -> (global_text, offset, getter, putter)
+        strip_spans = []
+        for (start, end, content) in self._find_named_forms(source, 'MAPF'):
+            if '<DEFMAC' not in content.upper() or '<SPNAME' not in content.upper():
+                continue
+            pm = re.search(r'<\s*STRING\s+"([^"]*)"\s+<\s*SPNAME', content,
+                           re.IGNORECASE)
+            gm = re.search(r'~\.[A-Za-z0-9?!/\-]+\s+(,[A-Za-z0-9?!/\-]+)', content)
+            lm = re.findall(r"'\(([^)]*)\)", content)
+            if not (pm and gm and lm):
+                continue
+            prefix, gtext = pm.group(1), gm.group(1)
+            for field in lm[-1].split():
+                acc = accessors.get(field.upper())
+                if not acc:
+                    continue
+                off, getter, putter = acc
+                fixed[(prefix + field).upper()] = (gtext, off, getter, putter)
+            strip_spans.append((start, end))
+        if not fixed:
+            return source
+        for (start, end) in sorted(strip_spans, reverse=True):
+            source = source[:start] + source[end:]
+        alt = '|'.join(re.escape(k) for k in sorted(fixed, key=len, reverse=True))
+        for _ in range(50):
+            forms = self._find_named_forms(source, alt)
+            if not forms:
+                break
+            out = []
+            pos = 0
+            for (start, end, content) in forms:
+                out.append(source[pos:start])
+                pos = end
+                toks = self._split_tokens(content[1:-1])
+                if not toks or toks[0].upper() not in fixed:
+                    out.append(content)
+                    continue
+                gtext, off, getter, putter = fixed[toks[0].upper()]
+                args = toks[1:]
+                if not args:
+                    out.append(f'<{getter} {gtext} {off}>')
+                else:
+                    out.append(f'<{putter} {gtext} {off} {" ".join(args)}>')
+            out.append(source[pos:])
+            source = ''.join(out)
+        return source
+
+    def _inline_table_constructors(self, source: str) -> str:
+        """Inline 0-arg table-constructor DEFINEs.
+
+        The ZILF parser wraps its runtime tables in helper DEFINEs -- PRSTBL,
+        MAKE-READBUF, MAKE-LEXBUF, NOUN-PHRASE, PARSER-RESULT -- and uses them as
+        <CONSTANT/GLOBAL X <PRSTBL>>. zorkie can't evaluate the DEFINE call, so X
+        would get a stub table (and every parser write overruns it). We inline
+        `<NAME>` with the DEFINE's body, to a fixpoint (bodies nest, e.g.
+        PARSER-RESULT embeds <PRSTBL>/<MAKE-READBUF>)."""
+        import re
+        tabhead = re.compile(
+            r'<\s*(?:ITABLE|TABLE|LTABLE|PTABLE|MAKE-[A-Za-z0-9?!/\-]+)\b',
+            re.IGNORECASE)
+        ctor = {}
+        for (_s, _e, content) in self._find_named_forms(source, 'DEFINE'):
+            m = re.match(r'<\s*DEFINE\b', content, re.IGNORECASE)
+            dtoks = self._split_tokens(content[m.end():-1])
+            if len(dtoks) == 3 and dtoks[1] == '()' and tabhead.match(dtoks[2]):
+                ctor[dtoks[0].upper()] = dtoks[2]
+        if not ctor:
+            return source
+        for name in ctor:
+            source = self._strip_forms_by_head(
+                source, r'<\s*DEFINE\s+' + re.escape(name) + self._ATOM_BOUND)
+        alt = '|'.join(re.escape(n) for n in sorted(ctor, key=len, reverse=True))
+        for _ in range(30):
+            forms = self._find_named_forms(source, alt)
+            if not forms:
+                break
+            out = []
+            pos = 0
+            changed = False
+            for (start, end, content) in forms:
+                out.append(source[pos:start])
+                pos = end
+                toks = self._split_tokens(content[1:-1])
+                if len(toks) == 1 and toks[0].upper() in ctor:
+                    out.append(ctor[toks[0].upper()])
+                    changed = True
+                else:
+                    out.append(content)
+            out.append(source[pos:])
+            source = ''.join(out)
+            if not changed:
+                break
+        return source
+
+    def _fold_table_sizes(self, source: str) -> str:
+        """Fold compile-time arithmetic in <ITABLE ...> sizes and strip the MDL
+        quote left on version-selected flag groups.
+
+        Inlined constructors leave sizes like <ITABLE <+ 1 ,P-MAX-OBJECTS> '(BYTE)>
+        or <ITABLE <* 2 ,P-MAX-OBJSPECS>>; zorkie's size folding doesn't evaluate
+        these constant expressions (so the table shrinks to one word and parser
+        writes overrun it). Evaluate them against the integer CONSTANTs and drop
+        the leading ' on '(BYTE)/'(WORD)."""
+        import re
+        consts = {}
+        for m in re.finditer(
+                r'<\s*CONSTANT\s+([A-Za-z0-9?!/\-]+)\s+<?\s*(-?\d+)\s*>?\s*>',
+                source, re.IGNORECASE):
+            consts[m.group(1).upper()] = int(m.group(2))
+
+        def ev(tok):
+            tok = tok.strip()
+            if re.fullmatch(r'-?\d+', tok):
+                return int(tok)
+            if tok.startswith(','):
+                return consts.get(tok[1:].upper())
+            am = re.match(r'<\s*([+\-*])\s+(.*)>\s*$', tok, re.S)
+            if am:
+                vals = [ev(a) for a in self._split_tokens(am.group(2))]
+                if any(v is None for v in vals) or not vals:
+                    return None
+                r = vals[0]
+                for v in vals[1:]:
+                    r = r + v if am.group(1) == '+' else (
+                        r - v if am.group(1) == '-' else r * v)
+                return r
+            return None
+
+        forms = self._find_named_forms(source, 'ITABLE')
+        if not forms:
+            return source
+        out = []
+        pos = 0
+        for (start, end, content) in forms:
+            out.append(source[pos:start])
+            pos = end
+            m = re.match(r'<\s*ITABLE\b', content, re.IGNORECASE)
+            toks = self._split_tokens(content[m.end():-1])
+            new = []
+            size_done = False
+            for t in toks:
+                if not size_done and t.upper() in ('NONE', 'BYTE', 'WORD'):
+                    new.append(t)
+                    continue
+                if not size_done:
+                    v = ev(t)
+                    if v is not None:
+                        new.append(str(v))
+                    else:
+                        new.append(t)
+                    size_done = True
+                    continue
+                new.append(t[1:] if t.startswith("'(") else t)
+            out.append('<ITABLE ' + ' '.join(new) + '>')
+        out.append(source[pos:])
+        return ''.join(out)
+
+    def _build_struct_table(self, base: str, inits, accessors: dict) -> str:
+        """Splice MAKE-<STRUCT> field initializers into an explicit <TABLE ...>
+        base, replacing the element at each field's byte offset with its value
+        (so e.g. NOUN-PHRASE's NP-YTBL/NP-NTBL point at their real sub-tables).
+        Non-<TABLE> bases (ITABLE runs) are returned unchanged."""
+        import re
+        m = re.match(r'<\s*(TABLE|LTABLE|PTABLE)\b', base, re.IGNORECASE)
+        if not m or not inits:
+            return base
+        tabop = m.group(1)
+        elem_toks = self._split_tokens(base[m.end():-1])
+        # A leading (BYTE)/(WORD)/(PURE ...) group is a table flag, not an element.
+        prefix = []
+        idx = 0
+        while idx < len(elem_toks) and elem_toks[idx].startswith('('):
+            prefix.append(elem_toks[idx])
+            idx += 1
+        elems = elem_toks[idx:]
+        default_byte = any('BYTE' in f.upper() for f in prefix)
+        off_to_elem = {}
+        off = 0
+        for ei, e in enumerate(elems):
+            off_to_elem[off] = ei
+            is_byte = default_byte or re.match(r'<\s*BYTE\b', e, re.IGNORECASE)
+            off += 1 if is_byte else 2
+        k = 0
+        while k + 1 < len(inits):
+            nm = inits[k].lstrip("'").upper()
+            val = inits[k + 1]
+            k += 2
+            acc = accessors.get(nm)
+            if not acc:
+                continue
+            foff, getter, _putter = acc
+            byteoff = foff if getter.upper() in ('GETB', 'PUTB') else foff * 2
+            ei = off_to_elem.get(byteoff)
+            if ei is not None:
+                elems[ei] = val
+        return '<' + tabop + ' ' + ' '.join(prefix + elems) + '>'
+
+    def _rewrite_accessors(self, source: str, accessors: dict) -> str:
+        import re
+        if not accessors:
+            return source
+        alt = '|'.join(re.escape(k) for k in
+                       sorted(accessors, key=len, reverse=True))
+        for _ in range(50):
+            forms = self._find_named_forms(source, alt)
+            if not forms:
+                break
+            out = []
+            pos = 0
+            for (start, end, content) in forms:
+                out.append(source[pos:start])
+                pos = end
+                toks = self._split_tokens(content[1:-1])
+                if not toks or toks[0].upper() not in accessors:
+                    out.append(content)
+                    continue
+                off, getter, putter = accessors[toks[0].upper()]
+                args = toks[1:]
+                if len(args) <= 1:
+                    struct = args[0] if args else '0'
+                    out.append(f'<{getter} {struct} {off}>')
+                else:
+                    struct, val = args[0], ' '.join(args[1:])
+                    out.append(f'<{putter} {struct} {off} {val}>')
+            out.append(source[pos:])
+            source = ''.join(out)
+        return source
+
+    def _split_tokens(self, text: str):
+        """Split text into top-level ZIL tokens (operator + args of a form body),
+        honoring strings, char literals, bare backslash escapes, and nested
+        <> () [] groups. Prefix chars (' , . ~ ! %) stay attached to the token."""
+        tokens = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text[i] in ' \t\r\n':
+                i += 1
+                continue
+            start = i
+            da = dp = db = 0
+            while i < n:
+                c = text[i]
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == '"':
+                    i += 1
+                    while i < n and text[i] != '"':
+                        if text[i] == '\\' and i + 1 < n:
+                            i += 2
+                        else:
+                            i += 1
+                    i += 1
+                    continue
+                if c == '!' and i + 1 < n and text[i + 1] == '\\':
+                    i += 3
+                    continue
+                if c == '<':
+                    da += 1
+                elif c == '>':
+                    if da == 0:
+                        break
+                    da -= 1
+                elif c == '(':
+                    dp += 1
+                elif c == ')':
+                    if dp == 0:
+                        break
+                    dp -= 1
+                elif c == '[':
+                    db += 1
+                elif c == ']':
+                    if db == 0:
+                        break
+                    db -= 1
+                elif c in ' \t\r\n' and da == 0 and dp == 0 and db == 0:
+                    break
+                i += 1
+            tokens.append(text[start:i])
+        return tokens
+
+    def _process_library_messages(self, source: str, base_path) -> str:
+        if 'LIBRARY-MESSAGE' not in source.upper():
+            return source
+        # 1. Build the message map. DEFAULT forms establish messages; REPLACE
+        #    forms override them, so apply all DEFAULTs before all REPLACEs.
+        msgs = {}
+        texts = list(self._locate_used_message_files(source, base_path))
+        texts.append(source)
+        for kind in ('DEFAULT-LIBRARY-MESSAGES', 'REPLACE-LIBRARY-MESSAGES'):
+            for text in texts:
+                for _s, _e, content in self._find_named_forms(text, kind):
+                    self._parse_library_message_defs(content, msgs)
+        # 2. Strip any DEFAULT/REPLACE forms inlined in the compiled source so
+        #    they never reach codegen (they are pure compile-time data).
+        source = self._strip_named_forms(
+            source, 'DEFAULT-LIBRARY-MESSAGES|REPLACE-LIBRARY-MESSAGES')
+        # 3. Rewrite every <LIBRARY-MESSAGE ...> call.
+        for _ in range(20):
+            forms = self._find_named_forms(source, 'LIBRARY-MESSAGE')
+            if not forms:
+                break
+            out = []
+            pos = 0
+            for (start, end, content) in forms:
+                out.append(source[pos:start])
+                out.append(self._resolve_library_message(content, msgs))
+                pos = end
+            out.append(source[pos:])
+            source = ''.join(out)
+        return source
+
+    def _locate_used_message_files(self, source: str, base_path):
+        """Read the files named by surviving <USE "NAME"> forms (and their own
+        nested USEs), so their <DEFAULT-/REPLACE-LIBRARY-MESSAGES> data can be
+        collected. ZILF library modules live in a `zillib/` sibling directory."""
+        import re
+        from pathlib import Path
+        base_path = Path(base_path)
+        search = [base_path, base_path / 'zillib']
+        for p in self.include_paths:
+            search.append(Path(p))
+            search.append(Path(p) / 'zillib')
+        texts = []
+        seen = set()
+        worklist = re.findall(r'<\s*USE\s+"([^"]+)"', source, re.IGNORECASE)
+        idx = 0
+        while idx < len(worklist):
+            name = worklist[idx]
+            idx += 1
+            key = name.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            found = None
+            for d in search:
+                for cand in (d / (name.lower() + '.zil'), d / (name + '.zil')):
+                    if cand.exists():
+                        found = cand
+                        break
+                if found:
+                    break
+            if not found:
+                continue
+            try:
+                txt = found.read_text(encoding='utf-8')
+            except Exception:
+                continue
+            texts.append(txt)
+            for nm in re.findall(r'<\s*USE\s+"([^"]+)"', txt, re.IGNORECASE):
+                if nm.upper() not in seen:
+                    worklist.append(nm)
+        return texts
+
+    def _find_named_forms(self, text: str, name_alt: str):
+        """Yield (start, end, content) for each top-level <NAME ...> form whose
+        operator matches name_alt (a regex alternation), skipping matches inside
+        strings and !\\ char literals. Balanced via _extract_balanced_content.
+
+        The operator boundary is a ZIL atom boundary (not \\b): the char after
+        the name must not continue an atom. This both rejects longer names
+        (LIBRARY-MESSAGE vs LIBRARY-MESSAGES) and lets a shorter accessor name
+        (PST-V) coexist with a longer one (PST-V-WORD), since '-' is an atom
+        char that \\b would treat as a boundary."""
+        import re
+        pat = re.compile(r'<\s*(?:' + name_alt + r')(?![A-Za-z0-9?!/\-])',
+                         re.IGNORECASE)
+        results = []
+        n = len(text)
+        i = 0
+        while i < n:
+            ch = text[i]
+            if ch == '\\':  # MDL bare escape: \X quotes next char (e.g. \")
+                i += 2
+                continue
+            if ch == '"':
+                i += 1
+                while i < n and text[i] != '"':
+                    if text[i] == '\\' and i + 1 < n:
+                        i += 2
+                    else:
+                        i += 1
+                i += 1
+                continue
+            if ch == '!' and i + 1 < n and text[i + 1] == '\\':
+                i += 3
+                continue
+            if ch == '<' and pat.match(text, i):
+                content, end = self._extract_balanced_content(text, i)
+                if content:
+                    results.append((i, end, content))
+                    i = end
+                    continue
+            i += 1
+        return results
+
+    def _strip_named_forms(self, source: str, name_alt: str) -> str:
+        forms = self._find_named_forms(source, name_alt)
+        if not forms:
+            return source
+        out = []
+        pos = 0
+        for (start, end, _content) in forms:
+            out.append(source[pos:start])
+            pos = end
+        out.append(source[pos:])
+        return ''.join(out)
+
+    def _read_atom(self, text: str):
+        """Return (atom, rest) reading one leading atom token (after skipping
+        whitespace). (None, rest) if the next token is not an atom."""
+        i = 0
+        n = len(text)
+        while i < n and text[i] in ' \t\r\n':
+            i += 1
+        j = i
+        while j < n and text[j] in self._MSG_ATOM_CHARS:
+            j += 1
+        if j == i:
+            return None, text[i:]
+        return text[i:j], text[j:]
+
+    def _atoms_of(self, text: str):
+        atoms = []
+        while True:
+            atom, text = self._read_atom(text)
+            if atom is None:
+                break
+            atoms.append(atom)
+        return atoms
+
+    def _split_paren_clauses(self, text: str):
+        """Split text into the contents of its top-level (...) groups, honoring
+        strings, char literals, and nested parens."""
+        clauses = []
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == '\\':  # MDL bare escape: \X quotes next char (e.g. \")
+                i += 2
+                continue
+            if ch == '"':
+                i += 1
+                while i < n and text[i] != '"':
+                    if text[i] == '\\' and i + 1 < n:
+                        i += 2
+                    else:
+                        i += 1
+                i += 1
+                continue
+            if ch == '!' and i + 1 < n and text[i + 1] == '\\':
+                i += 3
+                continue
+            if ch == '(':
+                depth = 1
+                j = i + 1
+                start = j
+                while j < n and depth > 0:
+                    c = text[j]
+                    if c == '\\':  # MDL bare escape: \X quotes next char
+                        j += 2
+                        continue
+                    if c == '"':
+                        j += 1
+                        while j < n and text[j] != '"':
+                            if text[j] == '\\' and j + 1 < n:
+                                j += 2
+                            else:
+                                j += 1
+                        j += 1
+                        continue
+                    if c == '!' and j + 1 < n and text[j + 1] == '\\':
+                        j += 3
+                        continue
+                    if c == '(':
+                        depth += 1
+                    elif c == ')':
+                        depth -= 1
+                    j += 1
+                clauses.append(text[start:j - 1])
+                i = j
+                continue
+            i += 1
+        return clauses
+
+    def _find_forms_by_head(self, text: str, head_pat):
+        """Like _find_named_forms but matches a full head regex at '<' (so it can
+        key on operator+name, e.g. r'<\\s*DEFINE\\s+PRONOUN\\b'). String/char-
+        literal/backslash aware. Returns (start, end, content) list."""
+        import re
+        if isinstance(head_pat, str):
+            head_pat = re.compile(head_pat, re.IGNORECASE)
+        results = []
+        n = len(text)
+        i = 0
+        while i < n:
+            ch = text[i]
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '"':
+                i += 1
+                while i < n and text[i] != '"':
+                    if text[i] == '\\' and i + 1 < n:
+                        i += 2
+                    else:
+                        i += 1
+                i += 1
+                continue
+            if ch == '!' and i + 1 < n and text[i + 1] == '\\':
+                i += 3
+                continue
+            if ch == '<' and head_pat.match(text, i):
+                content, end = self._extract_balanced_content(text, i)
+                if content:
+                    results.append((i, end, content))
+                    i = end
+                    continue
+            i += 1
+        return results
+
+    def _strip_forms_by_head(self, source: str, head_regex: str) -> str:
+        forms = self._find_forms_by_head(source, head_regex)
+        if not forms:
+            return source
+        out = []
+        pos = 0
+        for (start, end, _content) in forms:
+            out.append(source[pos:start])
+            pos = end
+        out.append(source[pos:])
+        return ''.join(out)
+
+    _ATOM_BOUND = r'(?![A-Za-z0-9?!/\-])'
+
+    def _process_if_debug(self, source: str) -> str:
+        """Expand ZILF <IF-DEBUG body...> -> body iff the DEBUG compilation flag
+        is set (a built-in tied to COMPILATION-FLAG DEBUG, off by default)."""
+        import re
+        forms = self._find_named_forms(source, 'IF-DEBUG')
+        if not forms:
+            return source
+        debug_on = bool(self.compilation_flags.get('DEBUG'))
+        out = []
+        pos = 0
+        for (start, end, content) in forms:
+            out.append(source[pos:start])
+            pos = end
+            if debug_on:
+                m = re.match(r'<\s*IF-DEBUG\b', content, re.IGNORECASE)
+                out.append(content[m.end():-1])
+            # else strip
+        out.append(source[pos:])
+        return ''.join(out)
+
+    def _process_version_ops(self, source: str) -> str:
+        """Resolve the ZILF stdlib version-abstraction macros (GET/B, PUT/B,
+        IN-PB/WTBL?, IN-B/WTBL?) to the op their <VERSION?>-selected DEFMAC would
+        pick. They are trivial aliases (<GET/B t o> -> <GETB t o> on V3, <GET t o>
+        elsewhere), but zorkie's macro expander occasionally leaves one
+        unexpanded in a deeply nested COND/DO/BIND body; resolving them here is
+        equivalent and robust. Gated on the DEFMAC actually being present so a
+        game that repurposes these names is untouched."""
+        import re
+        if self.version == 3:
+            mapping = {'GET/B': 'GETB', 'PUT/B': 'PUTB',
+                       'IN-PB/WTBL?': 'IN-PBTBL?', 'IN-B/WTBL?': 'IN-BTBL?'}
+        else:
+            mapping = {'GET/B': 'GET', 'PUT/B': 'PUT',
+                       'IN-PB/WTBL?': 'IN-PWTBL?', 'IN-B/WTBL?': 'IN-WTBL?'}
+        active = {mac: op for mac, op in mapping.items()
+                  if re.search(r'<\s*DEFMAC\s+' + re.escape(mac) + self._ATOM_BOUND,
+                               source, re.IGNORECASE)}
+        if not active:
+            return source
+        alt = '|'.join(re.escape(m) for m in sorted(active, key=len, reverse=True))
+        heads = {m: re.compile(r'<\s*' + re.escape(m) + self._ATOM_BOUND,
+                               re.IGNORECASE) for m in active}
+        for _ in range(50):
+            forms = self._find_named_forms(source, alt)
+            if not forms:
+                break
+            out = []
+            pos = 0
+            changed = False
+            for (start, end, content) in forms:
+                out.append(source[pos:start])
+                pos = end
+                mac = next((m for m in active if heads[m].match(content)), None)
+                if mac is None:
+                    out.append(content)
+                    continue
+                out.append('<' + active[mac] + content[heads[mac].match(content).end():])
+                changed = True
+            out.append(source[pos:])
+            source = ''.join(out)
+            if not changed:
+                break
+        return source
+
+    def _process_expand(self, source: str) -> str:
+        """Unwrap the MDL <EXPAND form> primitive to `form`. EXPAND forces
+        macro expansion of its argument at expansion time; the normal macro
+        expander then processes the revealed form, so unwrapping is equivalent
+        and avoids EXPAND reaching codegen as an undefined call."""
+        import re
+        for _ in range(10):
+            forms = self._find_named_forms(source, 'EXPAND')
+            if not forms:
+                break
+            out = []
+            pos = 0
+            for (start, end, content) in forms:
+                out.append(source[pos:start])
+                pos = end
+                m = re.match(r'<\s*EXPAND\b', content, re.IGNORECASE)
+                out.append(content[m.end():-1])
+            out.append(source[pos:])
+            source = ''.join(out)
+        return source
+
+    def _process_pronouns(self, source: str) -> str:
+        """Reproduce the ZILF pronoun subsystem's compile-time code generation.
+
+        <PRONOUN NAME (VAR ...) cond...> registers a pronoun; <FINISH-PRONOUNS>
+        (a DEFINE that iterates the registered pronouns with MAPF/EVAL) emits the
+        P-PRO-<NAME>-OBJS tables, the PRO-TRY-SET-* / PRO-FORCE-SET-* routines,
+        and SET-PRONOUNS / EXPAND-PRONOUN / V-PRONOUNS. zorkie's MDL evaluator
+        cannot run that generator, so we emit the equivalent code directly."""
+        import re
+        forms = self._find_named_forms(source, 'PRONOUN')
+        pronouns = []
+        for (_s, _e, content) in forms:
+            m = re.match(r'<\s*PRONOUN\b', content, re.IGNORECASE)
+            toks = self._split_tokens(content[m.end():-1])
+            if len(toks) < 2 or not toks[1].startswith('('):
+                continue
+            name = toks[0].upper()
+            binds = self._split_tokens(toks[1][1:-1])
+            stmts = toks[2:]
+            pronouns.append((name, binds, stmts))
+        if not pronouns and '<FINISH-PRONOUNS>' not in source.upper().replace(' ', ''):
+            return source
+
+        # Table size 1 + P-MAX-OBJECTS; V3 uses byte elements, else word.
+        mx = re.search(r'<\s*CONSTANT\s+P-MAX-OBJECTS\s+(\d+)', source,
+                       re.IGNORECASE)
+        tblsize = (int(mx.group(1)) if mx else 50) + 1
+        tblflags = '(BYTE)' if self.version == 3 else '(WORD)'
+
+        gen = ['\n;"pronoun subsystem (generated by zorkie for <FINISH-PRONOUNS>)"\n']
+        for (name, binds, stmts) in pronouns:
+            first = binds[0] if binds else 'X'
+            extra = (' ' + ' '.join(binds[1:])) if len(binds) > 1 else ''
+            cond = stmts[0] if len(stmts) == 1 else '<PROG () ' + ' '.join(stmts) + '>'
+            gen.append(f'<CONSTANT P-PRO-{name}-OBJS <ITABLE {tblsize} {tblflags}>>\n')
+            gen.append(
+                f'<ROUTINE PRO-TRY-SET-{name} ({first} PRO?OBJS{extra})\n'
+                f'    <COND ({cond}\n'
+                f'           <PRO-FORCE-SET-{name} .PRO?OBJS>)>>\n')
+            gen.append(
+                f'<ROUTINE PRO-FORCE-SET-{name} (PRO?OBJS)\n'
+                f'    <COPY-PRSTBL .PRO?OBJS ,P-PRO-{name}-OBJS>\n'
+                f'    <RTRUE>>\n')
+        # SET-PRONOUNS
+        tries = '\n    '.join(f'<PRO-TRY-SET-{n} .O .OBJS>' for (n, _b, _s) in pronouns)
+        gen.append(
+            '<ROUTINE SET-PRONOUNS (O OBJS "AUX" PT MAX)\n'
+            '    <COND (<=? .O <> ,ROOMS> <RFALSE>)\n'
+            '          (<SET PT <GETPT .O ,P?PRONOUN>>\n'
+            '           <SET MAX <- </ <PTSIZE .PT> 2> 1>>\n'
+            '           <DO (I 0 .MAX) <APPLY <GET .PT .I> .OBJS>>\n'
+            '           <RTRUE>)>\n'
+            f'    {tries}>\n')
+        # EXPAND-PRONOUN
+        exp = '\n          '.join(
+            f'(<=? .W <VOC "{n}" OBJECT>> <COPY-PRSTBL ,P-PRO-{n}-OBJS .OBJS>)'
+            for (n, _b, _s) in pronouns)
+        gen.append(
+            '<ROUTINE EXPAND-PRONOUN (W OBJS "AUX" CNT)\n'
+            f'    <COND {exp}\n'
+            '          (ELSE <RFALSE>)>\n'
+            '    <SET CNT <GETB .OBJS 0>>\n'
+            '    <COND (<0? .CNT>\n'
+            '           <TELL "You haven\'t seen any \\"" B .W "\\" yet." CR>\n'
+            '           <RETURN ,EXPAND-PRONOUN-FAILED>)>\n'
+            '    <COND (<NOT <STILL-VISIBLE-CHECK .OBJS>> <RETURN ,EXPAND-PRONOUN-FAILED>)>\n'
+            '    <COND (<1? .CNT> <RETURN <GET/B .OBJS 1>>)\n'
+            '          (ELSE <RETURN ,MANY-OBJECTS>)>>\n')
+        # V-PRONOUNS
+        vp = '\n    '.join(
+            f'<TELL "{n}" ,SP-MEANS-SP>'
+            f' <LIST-OBJECTS ,P-PRO-{n}-OBJS <> <+ ,L-PRSTABLE ,L-THE ,L-SCENERY>>'
+            f' <TELL "." CR>'
+            for (n, _b, _s) in pronouns)
+        gen.append(f'<ROUTINE V-PRONOUNS ()\n    {vp}>\n')
+        generated = ''.join(gen)
+
+        b = self._ATOM_BOUND
+        for head in (r'<\s*PRONOUN' + b,
+                     r'<\s*DEFINE\s+PRONOUN' + b,
+                     r'<\s*DEFINE\s+FINISH-PRONOUNS' + b,
+                     r'<\s*DEFINE\s+PRONOUN-PROPSPEC' + b,
+                     r'<\s*DEFSTRUCT\s+PRONOUN' + b,
+                     r'<\s*SETG\s+PRONOUN-DEFINITIONS' + b,
+                     r'<\s*PUTPROP\s+PRONOUN' + b):
+            source = self._strip_forms_by_head(source, head)
+        source = re.sub(r'<\s*FINISH-PRONOUNS\s*>', lambda _m: generated,
+                        source, count=1, flags=re.IGNORECASE)
+        return source
+
+    def _parse_library_message_defs(self, content: str, msgs: dict):
+        """Parse one <DEFAULT-/REPLACE-LIBRARY-MESSAGES CAT (NAME ...)...> form
+        into msgs[(CAT,NAME)] = ('tokens', text) | ('alias', (CAT2, NAME2))."""
+        import re
+        m = re.match(r'<\s*(?:DEFAULT|REPLACE)-LIBRARY-MESSAGES\b', content,
+                     re.IGNORECASE)
+        inner = content[m.end():-1]
+        cat, rest = self._read_atom(inner)
+        if cat is None:
+            return
+        cat = cat.upper()
+        for clause in self._split_paren_clauses(rest):
+            name, crest = self._read_atom(clause)
+            if name is None:
+                continue
+            name = name.upper()
+            crest = crest.strip()
+            am = re.match(r'=\s*(.*)$', crest, re.DOTALL)
+            if am:
+                toks = self._atoms_of(am.group(1))
+                if len(toks) == 1:
+                    msgs[(cat, name)] = ('alias', (cat, toks[0].upper()))
+                elif len(toks) >= 2:
+                    msgs[(cat, name)] = ('alias',
+                                         (toks[0].upper(), toks[1].upper()))
+            else:
+                msgs[(cat, name)] = ('tokens', crest)
+
+    def _lookup_message(self, cat: str, name: str, msgs: dict, tried: set):
+        key = (cat, name)
+        if key in tried:
+            return None
+        tried.add(key)
+        entry = msgs.get(key)
+        if entry is None:
+            return None
+        kind, val = entry
+        if kind == 'tokens':
+            return val
+        return self._lookup_message(val[0], val[1], msgs, tried)
+
+    def _parse_bindings(self, rest: str):
+        rest = rest.strip()
+        if not rest.startswith('('):
+            return {}
+        outer = self._split_paren_clauses(rest)
+        if not outer:
+            return {}
+        bindings = {}
+        for clause in self._split_paren_clauses(outer[0]):
+            bname, bval = self._read_atom(clause)
+            if bname is None:
+                continue
+            bindings[bname.upper()] = bval.strip()
+        return bindings
+
+    def _substitute_lvals(self, text: str, bindings: dict) -> str:
+        """Replace each LVAL placeholder .NAME (whose NAME is bound) with its
+        binding value text, leaving strings and char literals untouched."""
+        if not bindings:
+            return text
+        out = []
+        i = 0
+        n = len(text)
+        ac = self._MSG_ATOM_CHARS
+        while i < n:
+            ch = text[i]
+            if ch == '\\':  # MDL bare escape: \X quotes next char
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if ch == '"':
+                j = i + 1
+                while j < n and text[j] != '"':
+                    if text[j] == '\\' and j + 1 < n:
+                        j += 2
+                    else:
+                        j += 1
+                out.append(text[i:min(j + 1, n)])
+                i = j + 1
+                continue
+            if ch == '!' and i + 1 < n and text[i + 1] == '\\':
+                out.append(text[i:i + 3])
+                i += 3
+                continue
+            if ch == '.':
+                prev = text[i - 1] if i > 0 else ' '
+                if prev not in ac and i + 1 < n and text[i + 1] in ac:
+                    j = i + 1
+                    while j < n and text[j] in ac:
+                        j += 1
+                    name = text[i + 1:j].upper()
+                    out.append(bindings[name] if name in bindings
+                               else text[i:j])
+                    i = j
+                    continue
+            out.append(ch)
+            i += 1
+        return ''.join(out)
+
+    def _resolve_library_message(self, content: str, msgs: dict) -> str:
+        import re
+        m = re.match(r'<\s*LIBRARY-MESSAGE\b', content, re.IGNORECASE)
+        inner = content[m.end():-1]
+        cat, rest = self._read_atom(inner)
+        name, rest = self._read_atom(rest)
+        if cat is None or name is None:
+            return '""'
+        tokens = self._lookup_message(cat.upper(), name.upper(), msgs, set())
+        if tokens is None:
+            self.log(f"  LIBRARY-MESSAGE: undefined message "
+                     f"{cat.upper()} {name.upper()} -> empty")
+            return '""'
+        bindings = self._parse_bindings(rest)
+        return self._substitute_lvals(tokens, bindings)
+
     def _extract_balanced_content(self, source: str, start_pos: int) -> tuple:
         """
         Extract content with balanced angle brackets.
@@ -1337,6 +2463,13 @@ class ZILCompiler:
                     pos += 1
                 if pos < len(source):
                     pos += 1  # skip closing "
+            elif ch == '\\':
+                # MDL bare backslash quotes the next char into an atom name --
+                # e.g. the buzzword atom \" (a literal quote) in
+                # <BUZZ ... UNDO OOPS \. \, \">. The escaped char, especially a
+                # quote, must NOT open a string or count as a bracket; skipping
+                # only the backslash would leave the " to flip string parity.
+                pos += 2
             elif ch == '!':
                 # Only !\X is a character literal (e.g. !\> is a literal >, not a
                 # bracket). Other uses of ! are segment/splice operators -- !<form>,
@@ -3450,7 +4583,8 @@ class ZILCompiler:
 
         # Preprocess ZILF directives (COMPILATION-FLAG, IFFLAG, VERSION?)
         self.log("Preprocessing ZILF directives...")
-        source = self.preprocess_zilf_directives(source)
+        self._compile_base_path = base_path
+        source = self.preprocess_zilf_directives(source, base_path)
 
         # Lexical analysis
         self.log("Lexing...")
