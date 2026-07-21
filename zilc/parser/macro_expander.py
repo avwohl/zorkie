@@ -226,6 +226,30 @@ def _macro_computes_on_aux(macro):
     return _body_writes_names(macro.body, aux)
 
 
+def _body_is_ct_list_setg(macro, ct_globals):
+    """True when a DEFINE's body is <SETG X ...> and X is a compile-time LIST
+    accumulator (present in ct_globals with a list value) -- the ZILF scope
+    engine's <DEFINE SCOPE-STAGE ...>, which appends a <VECTOR ...> of quoted
+    code onto ,SCOPE-STAGES.  Such a DEFINE must be MDL-EVALUATED, not
+    substituted: the legacy path INLINES the quoted INIT-CODE/NEXT-CODE and then
+    re-evaluates it, collapsing the nested <COND ...>/<BIND ...> to their first
+    branch (VEHICLE's stage then never cleared SCOPE-STATE and MAP-SCOPE looped
+    forever).  Evaluating keeps quoted params as references."""
+    if not ct_globals:
+        return False
+    body = macro.body
+    if isinstance(body, list):
+        body = body[0] if len(body) == 1 else None
+    if not isinstance(body, FormNode) or not isinstance(body.operator, AtomNode):
+        return False
+    if body.operator.value.upper() not in ('SETG', 'SETG20'):
+        return False
+    if not body.operands or not isinstance(body.operands[0], AtomNode):
+        return False
+    nm = body.operands[0].value.upper()
+    return nm in ct_globals and isinstance(ct_globals[nm], list)
+
+
 class MDLEvaluator:
     """
     Compile-time MDL evaluator for macro expansion.
@@ -659,8 +683,29 @@ class MDLEvaluator:
         if len(operands) < 2:
             return []
 
+        # MDL MAPF is <MAPF finalization loop-function structure...>: the loop
+        # function runs per element and the finalization function is applied to
+        # ALL collected results.  Capture the finalization operator's NAME so a
+        # reducing finalization (,MAX / ,MIN / ,+ / ,*) folds the results down
+        # to a scalar -- the scope engine sizes SCOPE-STATE with
+        # <MAPF ,MAX 2 ,SCOPE-STAGES>.
+        final_name = self._callable_name(operands[0])
         collector = self.evaluate(operands[0], env)
         func = self.evaluate(operands[1], env)
+
+        # A fixnum loop-function is an NTH selector: <MAPF ,MAX 2 ,SCOPE-STAGES>
+        # applies <2 stage> = <NTH stage 2> to each stage.
+        nth_index = func if isinstance(func, int) else None
+
+        def _apply(*call_args):
+            if nth_index is not None:
+                lst = self._as_mdl_list(call_args[-1])
+                if lst is not None and 1 <= nth_index <= len(lst):
+                    return lst[nth_index - 1]
+                return None
+            if callable(func):
+                return func(*call_args)
+            return call_args[-1]
 
         # Get iteration source(s)
         sources = [self.evaluate(op, env) for op in operands[2:]]
@@ -673,7 +718,7 @@ class MDLEvaluator:
             if callable(func):
                 while True:
                     try:
-                        result = func(env)
+                        result = _apply(env)
                         if result is not None:
                             if isinstance(result, list):
                                 results.extend(result)
@@ -689,10 +734,7 @@ class MDLEvaluator:
             if isinstance(source, list):
                 for item in source:
                     try:
-                        if callable(func):
-                            result = func(env, item)
-                        else:
-                            result = item
+                        result = _apply(env, item)
                         if result is not None:
                             if isinstance(result, list):
                                 results.extend(result)
@@ -703,7 +745,54 @@ class MDLEvaluator:
                     except MapRet as mr:
                         results.extend(mr.values)
 
+        # Apply a reducing finalization function (,MAX / ,MIN / ,+ / ,*) over
+        # the collected results.  LIST/VECTOR/TABLE finalizations (and <>) just
+        # return the collected list, which is the default.
+        reduced = self._reduce_mapf(final_name, results)
+        if reduced is not None:
+            return reduced
         return results
+
+    @staticmethod
+    def _callable_name(node) -> Optional[str]:
+        """The atom NAME of a MAPF finalization operand (,MAX, <GVAL MAX>, MAX)."""
+        if isinstance(node, GlobalVarNode):
+            return node.name.upper()
+        if isinstance(node, AtomNode):
+            return node.value.upper()
+        if (isinstance(node, FormNode) and isinstance(node.operator, AtomNode)
+                and node.operator.value.upper() == 'GVAL' and node.operands
+                and isinstance(node.operands[0], AtomNode)):
+            return node.operands[0].value.upper()
+        return None
+
+    @staticmethod
+    def _reduce_mapf(final_name, results):
+        """Fold MAPF results with a reducing finalization function; returns None
+        when the finalization is not a reducer (the caller keeps the list)."""
+        if not final_name:
+            return None
+        def _as_int(v):
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, int):
+                return v
+            if isinstance(v, NumberNode):   # STATE-WORDS may arrive as an AST node
+                return v.value
+            return None
+        nums = [x for x in (_as_int(r) for r in results) if x is not None]
+        if final_name == 'MAX':
+            return max(nums) if nums else 0
+        if final_name == 'MIN':
+            return min(nums) if nums else 0
+        if final_name == '+':
+            return sum(nums)
+        if final_name == '*':
+            out = 1
+            for n in nums:
+                out *= n
+            return out
+        return None
 
     def _eval_mapr(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate MAPR (map and return last non-false result)."""
@@ -902,6 +991,21 @@ class MDLEvaluator:
 
         value = self.evaluate(operands[1], env)
         env[name] = value
+        # Persist top-level (compile-time) SETGs into the macro expander's
+        # ct_globals so their value THREADS across successive top-level forms.
+        # The ZILF scope engine relies on this: <SETG SCOPE-STAGES ()> then a
+        # sequence of <SCOPE-STAGE ...> DEFINE calls each do
+        # <SETG SCOPE-STAGES <LIST !,SCOPE-STAGES <VECTOR ...>>>, accumulating
+        # into the compile-time list read later by ,SCOPE-STAGES.  Only persist
+        # while evaluating top-level forms (in_zilch False), never while
+        # generating runtime code inside routines (in_zilch True), and only for
+        # concrete compile-time values (lists/scalars) so a bare unresolved
+        # GlobalVarNode never shadows a real runtime global.
+        me = self.macro_expander
+        if me is not None and not getattr(me, 'in_zilch', True):
+            ct = getattr(me, 'ct_globals', None)
+            if ct is not None and isinstance(value, (list, int, str, bool)):
+                ct[name] = value
         return value
 
     @staticmethod
@@ -1239,6 +1343,11 @@ class MDLEvaluator:
             name = name_node.value.upper()
             if name in env:
                 return env[name]
+            # Fall back to compile-time globals (the scope engine's SCOPE-STAGES
+            # accumulator etc.) so <GVAL X> folds identically to ,X.
+            _ct = getattr(self.macro_expander, 'ct_globals', None)
+            if _ct is not None and name in _ct:
+                return _ct[name]
             # Return as GlobalVarNode for runtime resolution
             return GlobalVarNode(name, 0, 0)
 
@@ -1647,37 +1756,13 @@ class MDLEvaluator:
                         return None
 
             elif op_name == 'ROUTINE':
-                # Create a routine dynamically
-                # <ROUTINE name (params) body...>
-                if len(arg.operands) >= 1:
-                    name_node = arg.operands[0]
-                    if isinstance(name_node, AtomNode):
-                        name = name_node.value.upper()
-                        # Parse params (second operand should be a FormNode with () operator)
-                        params = []
-                        body = []
-                        start_idx = 1
-
-                        if len(arg.operands) > 1:
-                            param_node = arg.operands[1]
-                            if isinstance(param_node, FormNode):
-                                if isinstance(param_node.operator, AtomNode) and param_node.operator.value == '()':
-                                    # Empty param list
-                                    start_idx = 2
-                                else:
-                                    # Non-empty param list - extract param names
-                                    start_idx = 2
-                            elif isinstance(param_node, list):
-                                # List of params
-                                start_idx = 2
-
-                        # Body is the remaining operands
-                        body = list(arg.operands[start_idx:])
-
-                        # Create RoutineNode and add to pending list
-                        routine_node = RoutineNode(name, params, [], body)
-                        self.macro_expander.pending_routines.append(routine_node)
-                        return None
+                # Create a routine dynamically:
+                # <ROUTINE name [activation] (params) body...>
+                routine_node = self.macro_expander._routine_from_form_operands(
+                    arg.operands, arg.line, arg.column)
+                if routine_node is not None:
+                    self.macro_expander.pending_routines.append(routine_node)
+                return None
 
         # For other forms, just evaluate and return result
         return arg
@@ -1791,10 +1876,20 @@ class MDLEvaluator:
         binding_list = operands[0] if operands else None
         body = operands[1:] if len(operands) > 1 else []
 
-        # Create a new environment with any bindings
-        new_env = env.copy()
+        # BIND/PROG rebinds ONLY its declared atoms.  A <SET OTHER ...> in the
+        # body must affect the ENCLOSING binding (MDL scoping).  The old code
+        # ran the body in a COPY of env, so a nested <SET OUTER ...> was silently
+        # dropped -- the scope engine's default-stages branch builds its
+        # INIT-STAGES list inside <BIND ((I 0)) <SET INIT-STAGES <MAPF ...>>>,
+        # and losing that SET left SCOPE-CURRENT-STAGES empty (every command
+        # then said "You don't see that here").  Use the shared env and
+        # save/restore just the declared vars around the body.
+        declared_saved = []  # (name, had_before, old_value)
 
-        # Parse and evaluate bindings
+        def _bind_one(var_name, init_node, has_init):
+            declared_saved.append((var_name, var_name in env, env.get(var_name)))
+            env[var_name] = self.evaluate(init_node, env) if has_init else None
+
         if binding_list:
             bindings_to_process = []
             if isinstance(binding_list, FormNode):
@@ -1806,32 +1901,63 @@ class MDLEvaluator:
             for binding in bindings_to_process:
                 if isinstance(binding, FormNode):
                     # (VAR init-expr) - operator is var name, operand is initializer
-                    if isinstance(binding.operator, AtomNode):
-                        var_name = binding.operator.value.upper()
-                        if binding.operands:
-                            init_value = self.evaluate(binding.operands[0], new_env)
-                            new_env[var_name] = init_value
-                        else:
-                            new_env[var_name] = None
+                    if isinstance(binding.operator, AtomNode) and binding.operator.value != '()':
+                        _bind_one(binding.operator.value.upper(),
+                                  binding.operands[0] if binding.operands else None,
+                                  bool(binding.operands))
                 elif isinstance(binding, list) and len(binding) >= 1:
                     # [VAR init-expr] list form
                     if isinstance(binding[0], AtomNode):
-                        var_name = binding[0].value.upper()
-                        if len(binding) > 1:
-                            init_value = self.evaluate(binding[1], new_env)
-                            new_env[var_name] = init_value
-                        else:
-                            new_env[var_name] = None
-                elif isinstance(binding, AtomNode):
+                        _bind_one(binding[0].value.upper(),
+                                  binding[1] if len(binding) > 1 else None,
+                                  len(binding) > 1)
+                elif isinstance(binding, AtomNode) and binding.value != '()':
                     # Just a variable name with no initializer
-                    new_env[binding.value.upper()] = None
+                    _bind_one(binding.value.upper(), None, False)
 
         # Execute body expressions in order, return last value
-        result = None
-        for expr in body:
-            result = self.evaluate(expr, new_env)
+        try:
+            result = None
+            for expr in body:
+                result = self.evaluate(expr, env)
+            return result
+        finally:
+            # Restore the declared vars (unwind the BIND scope), preserving any
+            # body mutation of enclosing variables.
+            for var_name, had_before, old_value in reversed(declared_saved):
+                if had_before:
+                    env[var_name] = old_value
+                else:
+                    env.pop(var_name, None)
 
-        return result
+    @staticmethod
+    def _qq_leaf(val):
+        """A quasiquote form operand must be an AST node.  Raw Python scalars
+        produced by unquote -- a fixnum counter ~.I, a <LENGTH ...> result --
+        would otherwise reach codegen as a bare int and be mis-encoded (the
+        scope engine's <PUT ,SCOPE-CURRENT-STAGES ~.I ...> all collapsed to
+        index 0).  Only lift the scalar cases; leave AST/str/list untouched so
+        no other quasiquote shifts."""
+        if isinstance(val, bool):
+            return AtomNode('T' if val else '<>', 0, 0)
+        if isinstance(val, int):
+            return NumberNode(val, 0, 0)
+        return val
+
+    def _expand_quasiquote_seq(self, items, env):
+        """Expand a sequence of quasiquote items, splicing ~!.X (SpliceUnquote)
+        elements.  Shared by the FormNode-operand and COND-clause-list paths."""
+        out = []
+        for op in items:
+            if isinstance(op, SpliceUnquoteNode):
+                val = self.evaluate(op.expr, env)
+                if isinstance(val, list):
+                    out.extend(self._qq_leaf(v) for v in val)
+                else:
+                    out.append(self._qq_leaf(val))
+            else:
+                out.append(self._qq_leaf(self._expand_quasiquote(op, env)))
+        return out
 
     def _expand_quasiquote(self, node: ASTNode, env: Dict[str, Any]) -> Any:
         """Expand quasiquoted expression."""
@@ -1839,20 +1965,26 @@ class MDLEvaluator:
             return self.evaluate(node.expr, env)
 
         if isinstance(node, FormNode):
-            new_operands = []
-            for op in [node.operator] + node.operands:
-                if isinstance(op, SpliceUnquoteNode):
-                    val = self.evaluate(op.expr, env)
-                    if isinstance(val, list):
-                        new_operands.extend(val)
-                    else:
-                        new_operands.append(val)
-                else:
-                    new_operands.append(self._expand_quasiquote(op, env))
-
+            new_operands = self._expand_quasiquote_seq(
+                [node.operator] + node.operands, env)
             if new_operands:
                 return FormNode(new_operands[0], new_operands[1:], node.line, node.column)
             return node
+
+        # A COND clause inside a quasiquoted <ROUTINE ...> template arrives as a
+        # Python list [condition ~!.BODY]; without recursing here the ~!.BODY
+        # SpliceUnquote never expanded and the scope-stage routines' clauses ran
+        # empty (SCOPE-CRAWL was never emitted, so scope yielded no objects).
+        if isinstance(node, list):
+            return self._expand_quasiquote_seq(node, env)
+
+        if isinstance(node, CondNode):
+            new_clauses = []
+            for cond, actions in node.clauses:
+                new_cond = self._qq_leaf(self._expand_quasiquote(cond, env))
+                new_actions = self._expand_quasiquote_seq(actions, env)
+                new_clauses.append((new_cond, new_actions))
+            return CondNode(new_clauses, node.line, node.column)
 
         return node
 
@@ -2207,7 +2339,8 @@ class MacroExpander:
         if (isinstance(macro.body, RepeatNode)
                 or _body_is_ct_cond_mdl(
                     macro.body, _ct_bound_names(bindings), self.ct_globals)
-                or _macro_computes_on_aux(macro)):
+                or _macro_computes_on_aux(macro)
+                or _body_is_ct_list_setg(macro, self.ct_globals)):
             _env = {}
             _defaulted = getattr(self, '_last_defaulted_params', set())
             for _k, _v in bindings.items():
@@ -2413,6 +2546,186 @@ class MacroExpander:
 
         return bindings
 
+    def _maybe_fold_ct_constant(self, value):
+        """Fold a <CONSTANT NAME <expr>> value to an integer literal when the
+        expression is a compile-time reduction over a ct-globals list.
+
+        The ZILF scope engine sizes its tables this way:
+            <CONSTANT SCOPE-STATE-SIZE          <MAPF ,MAX 2 ,SCOPE-STAGES>>
+            <CONSTANT SCOPE-CURRENT-STAGES-SIZE <LENGTH ,SCOPE-STAGES>>
+        Only fold when the top operator is a known compile-time reducer and the
+        result is a concrete int, so table/ITABLE/runtime constant values are
+        left untouched."""
+        if not isinstance(value, FormNode) or not isinstance(value.operator, AtomNode):
+            return value
+        op = value.operator.value.upper()
+        if op not in ('LENGTH', 'MAPF', 'MAPR', 'NTH', '+', '-', '*', '/', 'MOD'):
+            return value
+        try:
+            result = self.mdl_evaluator.evaluate(value, {})
+        except Exception:
+            return value
+        if isinstance(result, bool) or not isinstance(result, int):
+            return value
+        return NumberNode(result, value.line, value.column)
+
+    def _cond_form_to_node(self, node):
+        """Recursively convert <COND ...> FormNodes (as produced by quasiquote
+        expansion of a ROUTINE template) into real CondNodes.
+
+        Codegen only applies its routine-tail value-context handling to a
+        CondNode: a stage routine whose tail clause ends in a void <PUT ...>
+        must RETURN TRUE (that is what tells MAP-SCOPE-START the stage is
+        active), but a FormNode(COND) tail fell through to RET_POPPED / RFALSE,
+        so every scope stage's init returned false and scope found nothing."""
+        if isinstance(node, list):
+            return [self._cond_form_to_node(x) for x in node]
+        if isinstance(node, CondNode):
+            return CondNode(
+                [(self._cond_form_to_node(c), self._cond_form_to_node(a))
+                 for c, a in node.clauses], node.line, node.column)
+        if not isinstance(node, FormNode):
+            return node
+        if (isinstance(node.operator, AtomNode)
+                and node.operator.value.upper() == 'COND'):
+            clauses = []
+            for cl in node.operands:
+                items = None
+                if isinstance(cl, list):
+                    items = cl
+                elif (isinstance(cl, FormNode)
+                      and isinstance(cl.operator, AtomNode)
+                      and cl.operator.value == '()'):
+                    items = list(cl.operands)
+                if not items:
+                    continue
+                cond = self._cond_form_to_node(items[0])
+                acts = [self._cond_form_to_node(a) for a in items[1:]]
+                clauses.append((cond, acts))
+            return CondNode(clauses, node.line, node.column)
+        return FormNode(node.operator,
+                        [self._cond_form_to_node(o) for o in node.operands],
+                        node.line, node.column)
+
+    @staticmethod
+    def _collect_binding_vars(blist, acc):
+        items = None
+        if (isinstance(blist, FormNode) and isinstance(blist.operator, AtomNode)
+                and blist.operator.value == '()'):
+            items = list(blist.operands)
+        elif isinstance(blist, list):
+            items = blist
+        if not items:
+            return
+        for b in items:
+            if isinstance(b, AtomNode) and b.value != '()':
+                acc.append(b.value.upper().split(':')[0])
+            elif (isinstance(b, FormNode) and isinstance(b.operator, AtomNode)
+                  and b.operator.value != '()'):
+                acc.append(b.operator.value.upper().split(':')[0])
+            elif isinstance(b, list) and b and isinstance(b[0], AtomNode):
+                acc.append(b[0].value.upper().split(':')[0])
+
+    def _collect_local_vars(self, node, acc):
+        """Collect BIND/PROG/REPEAT-introduced local variable names anywhere in a
+        routine body.  The Z-machine has no dynamic locals -- every BIND/PROG
+        binding shares the routine's fixed local slots -- so a routine built from
+        an <EVAL <ROUTINE ...>> must declare them up front or the block's <.O>
+        reads resolve to garbage (VEHICLE-SCOPE-STAGE's <BIND ((O ...)) ... .O>
+        returned the constant 3, so scope looped)."""
+        if isinstance(node, list):
+            for x in node:
+                self._collect_local_vars(x, acc)
+            return
+        if isinstance(node, CondNode):
+            for c, a in node.clauses:
+                self._collect_local_vars(c, acc)
+                self._collect_local_vars(a, acc)
+            return
+        if isinstance(node, RepeatNode):
+            self._collect_binding_vars(getattr(node, 'bindings', None), acc)
+            self._collect_local_vars(node.body, acc)
+            return
+        if isinstance(node, FormNode):
+            op = (node.operator.value.upper()
+                  if isinstance(node.operator, AtomNode) else '')
+            if op in ('BIND', 'PROG', 'REPEAT') and node.operands:
+                self._collect_binding_vars(node.operands[0], acc)
+                for o in node.operands[1:]:
+                    self._collect_local_vars(o, acc)
+            else:
+                for o in node.operands:
+                    self._collect_local_vars(o, acc)
+
+    def _routine_from_form_operands(self, operands, line=0, column=0):
+        """Build a RoutineNode from the operands of a (quasiquote-expanded)
+        <ROUTINE name [activation] (params) body...> form.
+
+        Handles the optional activation name between the routine name and the
+        parameter list, and an "AUX"/"OPT" parameter list -- the ZILF scope
+        engine emits <ROUTINE NAME-SCOPE-STAGE SCOPE-STAGE-ACTIVATION (INIT)
+        <COND ...>> routines this way via <EVAL <ROUTINE ...>>.  The earlier
+        hand-rolled parsing treated the activation atom as the parameter list
+        and folded it (and the real params) into the body, so the generated
+        scope-stage routines were malformed."""
+        if not operands or not isinstance(operands[0], AtomNode):
+            return None
+        name = operands[0].value.upper()
+        idx = 1
+        activation = None
+        # Optional activation name: a bare atom between the name and () params.
+        if idx < len(operands) and isinstance(operands[idx], AtomNode):
+            activation = operands[idx].value
+            idx += 1
+        params, aux_vars, opt_params, local_defaults = [], [], [], {}
+        if activation:
+            aux_vars.append(activation)
+        # Parameter list: FormNode('()' ...) or a Python list of param items.
+        if idx < len(operands):
+            pnode = operands[idx]
+            param_items = None
+            if (isinstance(pnode, FormNode)
+                    and isinstance(pnode.operator, AtomNode)
+                    and pnode.operator.value == '()'):
+                param_items = list(pnode.operands)
+                idx += 1
+            elif isinstance(pnode, list):
+                param_items = list(pnode)
+                idx += 1
+            if param_items is not None:
+                mode = 'req'
+                for p in param_items:
+                    if isinstance(p, StringNode):
+                        m = p.value.upper()
+                        if m == 'AUX':
+                            mode = 'aux'
+                        elif m in ('OPT', 'OPTIONAL'):
+                            mode = 'opt'
+                        continue
+                    nm_node = dflt = None
+                    if isinstance(p, AtomNode):
+                        nm_node = p
+                    elif isinstance(p, FormNode):
+                        nm_node = p.operator
+                        dflt = p.operands[0] if p.operands else None
+                    elif isinstance(p, list) and p:
+                        nm_node = p[0]
+                        dflt = p[1] if len(p) > 1 else None
+                    if isinstance(nm_node, AtomNode):
+                        nm = nm_node.value.upper().split(':')[0]
+                        if mode == 'aux':
+                            aux_vars.append(nm)
+                        elif mode == 'opt':
+                            opt_params.append(nm)
+                            aux_vars.append(nm)
+                        else:
+                            params.append(nm)
+                        if dflt is not None:
+                            local_defaults[nm] = dflt
+        body = [self._cond_form_to_node(b) for b in operands[idx:]]
+        return RoutineNode(name, params, aux_vars, body, line, column,
+                           local_defaults, activation, opt_params)
+
     def _evaluate_mdl(self, node: ASTNode, bindings: Dict[str, Any]) -> ASTNode:
         """
         Evaluate MDL constructs at compile time.
@@ -2582,36 +2895,12 @@ class MacroExpander:
 
         # Check for ROUTINE that creates a routine dynamically
         if op_name == 'ROUTINE':
-            # <ROUTINE name (params) body...>
-            if len(node.operands) >= 1:
-                name_node = node.operands[0]
-                if isinstance(name_node, AtomNode):
-                    name = name_node.value.upper()
-                    # Parse params (second operand should be a FormNode with () operator)
-                    params = []
-                    body = []
-                    start_idx = 1
-
-                    if len(node.operands) > 1:
-                        param_node = node.operands[1]
-                        if isinstance(param_node, FormNode):
-                            if isinstance(param_node.operator, AtomNode) and param_node.operator.value == '()':
-                                # Empty param list
-                                start_idx = 2
-                            else:
-                                # Non-empty param list - extract param names
-                                start_idx = 2
-                        elif isinstance(param_node, list):
-                            # List of params
-                            start_idx = 2
-
-                    # Body is the remaining operands
-                    body = list(node.operands[start_idx:])
-
-                    # Create RoutineNode and add to pending list
-                    routine_node = RoutineNode(name, params, [], body)
-                    self.pending_routines.append(routine_node)
-                    return None
+            # <ROUTINE name [activation] (params) body...>
+            routine_node = self._routine_from_form_operands(
+                node.operands, node.line, node.column)
+            if routine_node is not None:
+                self.pending_routines.append(routine_node)
+            return None
 
         # Recursively process operands
         new_operands = []
@@ -2810,6 +3099,24 @@ class MacroExpander:
                         else:
                             new_operands.append(copy.deepcopy(value))
                     continue
+
+                # Splice-unquote operand (!,X outside a quasiquote): when X
+                # evaluates to a compile-time LIST, splice its elements into the
+                # enclosing form.  The ZILF scope engine's SCOPE-STAGE DEFINE
+                # grows its list this way: <LIST !,SCOPE-STAGES <VECTOR ...>>.
+                # Historically _substitute stripped the splice wrapper to a bare
+                # reference (fine for a scalar, but it turned the accumulator
+                # into a nested element instead of splicing).  Only the LIST
+                # case changes behavior; anything else keeps the old strip so no
+                # other macro shifts.
+                if isinstance(operand, SpliceUnquoteNode):
+                    spliced = self.mdl_evaluator.evaluate(operand.expr, bindings)
+                    if isinstance(spliced, list):
+                        for item in spliced:
+                            new_operands.append(
+                                item if isinstance(item, ASTNode)
+                                else self._convert_result_to_ast(item))
+                        continue
 
                 substituted = self._substitute(operand, bindings)
                 new_operands.append(substituted)
@@ -3012,6 +3319,18 @@ class MacroExpander:
         if routine_rewriter:
             program = self._apply_routine_rewriter(program, routine_rewriter)
 
+        # Seed ct_globals from top-level <SETG X ()>-style globals whose value is
+        # a compile-time LIST.  These are compile-time metaprogramming
+        # accumulators (the ZILF scope engine's SCOPE-STAGES) that later
+        # top-level forms grow via <SETG X <LIST !,X ...>>; the value must be
+        # visible as ,X (GlobalVarNode / GVAL) before the first such form runs.
+        # Scalars are left alone -- only list-valued SETG globals are treated as
+        # compile-time accumulators.
+        for _g in program.globals:
+            if (getattr(_g, 'from_setg', False)
+                    and isinstance(getattr(_g, 'initial_value', None), list)):
+                self.ct_globals.setdefault(_g.name.upper(), _g.initial_value)
+
         # Process top-level forms (macro calls) with IN-ZILCH = false
         # These are compile-time operations that should be evaluated, not compiled
         self.in_zilch = False
@@ -3081,6 +3400,7 @@ class MacroExpander:
         for const in program.constants:
             if const.value:
                 const.value = self._expand_recursive(const.value)
+                const.value = self._maybe_fold_ct_constant(const.value)
 
         # Expand macros in TELL-TOKENS expansion bodies
         # This allows TELL tokens like MAC1 <PRINT-MAC-1> to work

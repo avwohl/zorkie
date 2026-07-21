@@ -1722,6 +1722,16 @@ class ImprovedCodeGenerator:
                 # Cap size to prevent memory overflow
                 initial_size = 1
 
+        # A bare WORD specifier makes the ITABLE length-prefixed: word 0 holds
+        # the element count, then `initial_size` elements follow (the BYTE
+        # specifier is handled above with a byte prefix).  Without this word
+        # prefix, <ITABLE WORD n> reserves only n words, so a table the game
+        # indexes 0..n (the ZILF scope engine's SCOPE-CURRENT-STAGES) overran
+        # its last element into static memory and every PUT there crashed.
+        if (is_length and not is_byte and table_type == 'ITABLE'
+                and initial_size):
+            table_data.extend(struct.pack('>H', initial_size))
+
         if initial_size and table_type == 'ITABLE' and values:
             # ITABLE with size and values: repeat pattern 'size' times
             # <ITABLE 2 1 2 3> = [1, 2, 3, 1, 2, 3] (pattern repeated 2x)
@@ -2364,6 +2374,15 @@ class ImprovedCodeGenerator:
                 val = self.global_values[name]
                 if isinstance(val, int):
                     return val
+            # A ,X reference may name a CONSTANT, not a runtime global -- the
+            # ZILF scope engine sizes its tables with
+            # <ITABLE WORD ,SCOPE-CURRENT-STAGES-SIZE> where the size is a
+            # folded <CONSTANT>. Resolve those so the ITABLE reserves the right
+            # number of words (else it shrinks to one word and every PUT past it
+            # crashes on the static-memory boundary).
+            nm = name.upper()
+            if nm in self.constants and isinstance(self.constants[nm], int):
+                return self.constants[nm]
             return None
         elif isinstance(node, FormNode):
             # Could be compile-time arithmetic or ZGET
@@ -3159,31 +3178,40 @@ class ImprovedCodeGenerator:
         fixups = []
         seen = set()
 
-        # Use tracked placeholder positions
+        # Use tracked placeholder positions. The CODE BYTES are authoritative:
+        # resolve each recorded position to whatever routine placeholder actually
+        # sits there, rather than to the index recorded at emission time.
+        #
+        # A tracked routine-call fixup for a NESTED call can point a couple of
+        # bytes early (at the call's opcode instead of its address operand), and
+        # a code transformation (peephole / branch resize / routine dedup) can
+        # leave a recorded index stale while the position still holds a real,
+        # different placeholder.  The old code validated `bytes == recorded_idx`
+        # and dropped BOTH cases; the second dropped a LIVE reference -- e.g. the
+        # ZILF scope engine's first <PUT ,SCOPE-CURRENT-STAGES 1
+        # ,INVENTORY-SCOPE-STAGE> in the huge inlined MAP-SCOPE, whose slot was
+        # recorded under a neighbouring routine's stale index, so the INVENTORY
+        # stage address stayed a 0xF0xx placeholder and APPLY jumped to garbage.
+        # Reading the actual bytes patches exactly the positions that genuinely
+        # hold a registered placeholder (the nested-call-opcode case still holds
+        # a non-placeholder 0xE0.. byte, so it is still skipped) and de-dups.
         for offset, placeholder_idx in self._placeholder_positions:
-            if placeholder_idx in self._routine_placeholders:
-                # Validate that the two bytes at this position actually hold the
-                # placeholder value. A tracked routine-call fixup for a NESTED call
-                # can end up pointing a couple of bytes early (at the call's opcode
-                # instead of its address operand) while the backup scan also records
-                # the real position -- applying the stray one would overwrite a real
-                # instruction byte and derail execution. Only patch where the bytes
-                # are genuinely the placeholder, and de-dup identical positions.
-                if offset + 1 >= len(self.code):
-                    continue
-                if ((self.code[offset] << 8) | self.code[offset + 1]) != placeholder_idx:
-                    continue
-                if offset in seen:
-                    continue
-                seen.add(offset)
-                routine_name = self._routine_placeholders[placeholder_idx]
-                if routine_name in self.routines:
-                    routine_offset = self.routines[routine_name]
-                    fixups.append((offset, routine_offset))
-                else:
-                    # Missing routine - track it and use offset 0
-                    self._missing_routines.add(routine_name)
-                    fixups.append((offset, 0))  # Will become 0x0000
+            if offset + 1 >= len(self.code):
+                continue
+            actual = (self.code[offset] << 8) | self.code[offset + 1]
+            routine_name = self._routine_placeholders.get(actual)
+            if routine_name is None:
+                continue
+            if offset in seen:
+                continue
+            seen.add(offset)
+            if routine_name in self.routines:
+                routine_offset = self.routines[routine_name]
+                fixups.append((offset, routine_offset))
+            else:
+                # Missing routine - track it and use offset 0
+                self._missing_routines.add(routine_name)
+                fixups.append((offset, 0))  # Will become 0x0000
 
         return fixups
 
@@ -5673,7 +5701,11 @@ class ImprovedCodeGenerator:
     def _body_contains_return(self, body: list) -> bool:
         """Check if a list of statements contains a RETURN anywhere."""
         for stmt in body:
-            if isinstance(stmt, FormNode) and isinstance(stmt.operator, AtomNode):
+            if isinstance(stmt, list):
+                # A nested statement list (e.g. a COND clause body).
+                if self._body_contains_return(stmt):
+                    return True
+            elif isinstance(stmt, FormNode) and isinstance(stmt.operator, AtomNode):
                 op_name = stmt.operator.value.upper()
                 if op_name == 'RETURN':
                     return True
@@ -5693,12 +5725,29 @@ class ImprovedCodeGenerator:
                     if self._body_contains_return(list(stmt.operands)):
                         return True
             elif isinstance(stmt, CondNode):
-                # Check CondNode branches (clauses are tuples: (condition, *body))
+                # CondNode clauses are (condition, actions_list) tuples: the
+                # actions are a LIST at clause[1], not flattened into the tuple.
+                # The old list(clause[1:]) wrapped that list in another list, so
+                # a <RETURN> in a clause body was never found -- MATCH-NOUN-PHRASE
+                # (whose tail <PROG BITS-SET () ... <COND (... <RETURN <GET/B
+                # .OUT 1>>)>>> returns the matched object) then compiled to RET 1,
+                # so PRSO became the object COUNT instead of the object.
                 for clause in stmt.clauses:
-                    if isinstance(clause, tuple) and len(clause) > 1:
-                        # clause is (condition, body1, body2, ...)
-                        if self._body_contains_return(list(clause[1:])):
+                    if isinstance(clause, tuple) and len(clause) >= 2:
+                        actions = clause[1]
+                        if isinstance(actions, list):
+                            if self._body_contains_return(actions):
+                                return True
+                        elif self._body_contains_return(list(clause[1:])):
                             return True
+                    # A guard-only clause condition can itself nest a RETURN.
+                    if isinstance(clause, tuple) and clause:
+                        if self._body_contains_return([clause[0]]):
+                            return True
+            elif isinstance(stmt, RepeatNode):
+                # <DO ...>/<REPEAT ...>/<MAP-* ...> loop bodies.
+                if self._body_contains_return(list(getattr(stmt, 'body', []) or [])):
+                    return True
         return False
 
     def generate_statement(self, node: ASTNode) -> bytes:
@@ -15963,20 +16012,43 @@ class ImprovedCodeGenerator:
                     # Mark as used
                     if hasattr(self, 'used_locals'):
                         self.used_locals.add(last_stmt.name)
-                    # Push local variable to stack using: ADD 0, local -> sp
-                    # 0x54 = 2OP:20 (ADD) with small, var operand types
-                    code.append(0x54)  # ADD small, var
+                    # Push local variable's VALUE: ADD 0 <var> -> sp.  The long
+                    # 2OP type bits are (op1,op2)=(small,var), which is opcode
+                    # 0x34 -- 0x54 is (var,small), i.e. ADD <stack> <var-number>,
+                    # so <BIND (...) ... .O> returned SP+O's-slot-number instead
+                    # of O (VEHICLE-SCOPE-STAGE looped forever on it).
+                    code.append(0x34)  # ADD small, var
                     code.append(0x00)  # First operand: 0
                     code.append(var_num & 0xFF)  # Second operand: local variable
                     code.append(0x00)  # Store to stack
             elif isinstance(last_stmt, GlobalVarNode):
                 var_num = self.globals.get(last_stmt.name)
                 if var_num is not None:
-                    # Push global variable to stack
-                    code.append(0x54)  # ADD small, var
+                    # Push global variable's VALUE (ADD 0 <var> -> sp; see above)
+                    code.append(0x34)  # ADD small, var
                     code.append(0x00)
                     code.append(var_num & 0xFF)
                     code.append(0x00)
+            elif isinstance(last_stmt, FormNode) and isinstance(
+                    last_stmt.operator, AtomNode) and last_stmt.operator.value.upper() in (
+                    'PRINTI', 'PRINT', 'PRINTR', 'PRINTC', 'PRINTB', 'PRINTD',
+                    'PRINTN', 'PRINTT', 'PRINTU', 'CRLF', 'TELL',
+                    'MOVE', 'REMOVE', 'SET', 'SETG', 'PUTP', 'PUTB', 'PUT',
+                    'FSET', 'FCLEAR', 'QUIT', 'RESTART', 'CLEAR', 'SCREEN',
+                    'ERASE', 'COLOR', 'SPLIT', 'HLIGHT', 'CURSET', 'CURGET',
+                    'DIROUT', 'DIRIN', 'BUFOUT', 'DISPLAY', 'THROW', 'COPYT',
+                    'COPY-TABLE'):
+                # A void op as the BIND's value is TRUE in ZILCH (matching
+                # gen_prog / the COND-clause void_ops rule).  gen_bind only
+                # materialized a bare local/global before, so <BIND (...)
+                # ... <PUT ...>> returned empty-stack garbage -- the ZILF scope
+                # engine's LOCATION stage init ends that way and returned FALSE,
+                # so MAP-SCOPE skipped the location scan and no room object was
+                # ever in scope.
+                if getattr(self, '_discard_prog_ops', None) != id(operands):
+                    code.append(0xE8)  # PUSH #1
+                    code.append(0x7F)
+                    code.append(0x01)
 
             # NOTE: For PROG, we add the default return value push LATER (after patching)
             # because PROG's exit_point needs to be AFTER the push for targeted RETURNs.
