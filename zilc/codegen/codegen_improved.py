@@ -5335,7 +5335,22 @@ class ImprovedCodeGenerator:
                         'QUIT', 'RESTART', 'CLEAR', 'SCREEN', 'ERASE', 'COLOR',
                         'SPLIT', 'HLIGHT', 'CURSET', 'CURGET', 'DIROUT', 'DIRIN',
                         'BUFOUT', 'DISPLAY', 'THROW', 'COPYT', 'COPY-TABLE',
-                        'BIND', 'PROG'  # Scoping constructs don't push to stack
+                        'BIND', 'PROG',  # Scoping constructs don't push to stack
+                        # MAP loops leave NO value on the stack when they
+                        # exhaust normally. Missing here, a routine whose last
+                        # form is one of these hit the RET_POPPED fallback and
+                        # popped the CALLER's frame -- e.g. spellbreaker's
+                        # FORGET-ALL ends in <MAP-CONTENTS ...>; dfrotz /
+                        # ZWALKER_STRICT=1 fault there while lenient zwalker
+                        # returned whatever lay beneath (found by the strict
+                        # L2 sweep). A loop containing <RETURN v> (incl. in an
+                        # (END ...) clause -- CUBE-COUNT/CCOUNT) still takes
+                        # the RET_POPPED path via the check below, matching
+                        # PROG/BIND/REPEAT. DO is NOT here: gen_do's exhaust
+                        # path already yields its own value (test_do_result
+                        # pins <DO (I 1 10) <>> == 1 and old tail-DO emission
+                        # is dfrotz-clean).
+                        'MAP-CONTENTS', 'MAP-DIRECTIONS'
                     }
                     if routine.name == "GO":
                         # GO routine should QUIT instead of RET
@@ -5348,8 +5363,16 @@ class ImprovedCodeGenerator:
                     elif op_name in void_ops:
                         # Check if PROG/BIND contains RETURN anywhere - if so, use RET_POPPED
                         # because RETURN pushes its value to the stack before jumping to exit
-                        if op_name in ('PROG', 'BIND', 'REPEAT') and self._prog_contains_return(last_stmt):
+                        if op_name in ('PROG', 'BIND', 'REPEAT', 'MAP-CONTENTS',
+                                       'MAP-DIRECTIONS') \
+                                and self._prog_contains_return(last_stmt):
                             routine_code.append(0xB8)  # RET_POPPED
+                        elif op_name in ('MAP-CONTENTS', 'MAP-DIRECTIONS'):
+                            # An exhausted MAP loop's value is FALSE (only
+                            # <RETURN v> gives it a value). RET 1 here scored
+                            # spellbreaker 365/600: a caller branched on the
+                            # now-truthy FORGET-ALL-style tail loop.
+                            routine_code.append(0xB1)  # RFALSE
                         else:
                             # Void operation - use RET 1 (success/true)
                             routine_code.append(0x9B)
@@ -5666,7 +5689,12 @@ class ImprovedCodeGenerator:
         be returned with RET_POPPED instead of RET 1.
         """
         op_name = form.operator.value.upper() if isinstance(form.operator, AtomNode) else ''
-        if op_name not in ('PROG', 'BIND', 'REPEAT'):
+        if op_name not in ('PROG', 'BIND', 'REPEAT',
+                           'MAP-CONTENTS', 'MAP-DIRECTIONS'):
+            # (The MAP loop forms matter too: a tail <MAP-CONTENTS ... (END
+            # <RETURN .CNT>) ...> yields via its END clause's RETURN --
+            # spellbreaker's CUBE-COUNT/CCOUNT -- so the epilogue must keep
+            # RET_POPPED for them, not RFALSE.)
             return False
 
         # Get the body statements (after bindings)
