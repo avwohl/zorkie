@@ -59,13 +59,15 @@ def _char_literal_code(node):
     if not isinstance(node, AtomNode):
         return None
     v = node.value
-    _esc = {'n': 10, 't': 9, 'r': 13, '0': 0}
-    # !\X  -- backslash-escaped character after !
+    # !\X is the character X taken LITERALLY -- the backslash is ZIL read
+    # syntax, not a C escape. !\n is the letter 'n' (110), !\0 is '0' (48), etc.
+    # (Kept in lock-step with codegen's _parse_char_literal.)
+    # !\X  -- literal character after !\
     if v.startswith('!\\') and len(v) == 3:
-        return _esc.get(v[2], ord(v[2]))
-    # \X   -- backslash-escaped character (len 2 only; \,TELL etc. are atoms)
+        return ord(v[2])
+    # \X   -- literal character (len 2 only; \,TELL etc. are atoms)
     if v.startswith('\\') and len(v) == 2:
-        return _esc.get(v[1], ord(v[1]))
+        return ord(v[1])
     # !X   -- single character after ! (len 2; bare ! and !</!,/!. splices differ)
     if v.startswith('!') and len(v) == 2 and v[1] not in '<,.':
         return ord(v[1])

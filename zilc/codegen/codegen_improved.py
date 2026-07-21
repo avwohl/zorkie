@@ -855,40 +855,23 @@ class ImprovedCodeGenerator:
         r"""Parse a ZIL character literal and return its ASCII code.
 
         ZIL character literal formats:
-        - !\x - escaped character (e.g., !\! = '!' = 33, !\n = newline = 10)
-        - \x - backslash character (e.g., \. = '.' = 46)
+        - !\x - the character x taken literally (e.g. !\! = 33, !\n = 'n' = 110,
+                !\0 = '0' = 48). The backslash is ZIL read syntax meaning "the
+                next character literally", NOT a C-style escape: !\n is the
+                LETTER n, not a newline. (Getting this wrong breaks every
+                digit parser -- <- .CHR !\0> means "char minus '0'" = 48 -- and
+                the YES?/menu routines' <EQUAL? .CHR !\N !\n> letter tests.)
+        - \x - backslash character (e.g. \. = '.' = 46), same literal rule.
 
         Returns ASCII code or None if not a character literal.
         """
-        # !\x format - two-character escape after !
+        # !\x format - the character after !\ taken literally
         if value.startswith('!\\') and len(value) == 3:
-            char = value[2]
-            # Handle common escape sequences
-            if char == 'n':
-                return 10  # newline
-            elif char == 't':
-                return 9   # tab
-            elif char == 'r':
-                return 13  # carriage return
-            elif char == '0':
-                return 0   # null
-            else:
-                return ord(char)
+            return ord(value[2])
 
-        # \x format - backslash followed by character
+        # \x format - backslash followed by a literal character
         if value.startswith('\\') and len(value) == 2:
-            char = value[1]
-            # Handle common escape sequences
-            if char == 'n':
-                return 10  # newline
-            elif char == 't':
-                return 9   # tab
-            elif char == 'r':
-                return 13  # carriage return
-            elif char == '0':
-                return 0   # null
-            else:
-                return ord(char)
+            return ord(value[1])
 
         # !x format (single char after !) - less common but possible
         if value.startswith('!') and len(value) == 2:

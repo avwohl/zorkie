@@ -880,6 +880,7 @@ class ZILCompiler:
         source = self._process_zip_options(source)
         source = self._process_if_options(source)
         source = self._process_if_debug(source)
+        source = self._process_if_beta(source)
         source = self._process_expand(source)
         source = self._process_version_ops(source)
 
@@ -902,6 +903,7 @@ class ZILCompiler:
         # default routines/macros -- DARKNESS-F, the MAIN-LOOP-* / HOOK-*
         # DEFMACs, STATUS-LINE, etc. -- actually reach the parser.
         source = self._process_default_definition(source)
+        source = self._process_replace_definition(source)
 
         # Third-and-three-quarters: expand the ZILF library-message system.
         # <LIBRARY-MESSAGE CAT NAME [((BND VAL)...)]> is a stdlib DEFMAC that
@@ -1539,6 +1541,36 @@ class ZILCompiler:
             other = source[:start] + source[end:]
             if self._has_competing_definition(other, name.upper()):
                 continue  # overridden elsewhere -> drop the default
+            out.append(body)
+        out.append(source[pos:])
+        return ''.join(out)
+
+    def _process_replace_definition(self, source: str) -> str:
+        """Unwrap <REPLACE-DEFINITION NAME body...> forms.
+
+        REPLACE-DEFINITION is the ZILF counterpart to DEFAULT-DEFINITION: the
+        game installs `body` (a <ROUTINE>/<DEFMAC>/... defining NAME)
+        UNCONDITIONALLY, overriding the library default. _process_default_-
+        definition already drops the matching default (the REPLACE body's inner
+        ROUTINE reads as a competing definition), so here we just splice the
+        body in place. Without this the override stays wrapped in an
+        unrecognized form and never reaches the parser -- exactly why advent's
+        DARKNESS-F / FAILS-HAVE-CHECK? / HOOK-END-OF-COMMAND / PRINT-GAME-OVER /
+        RESURRECT? read as undefined routines."""
+        import re
+        forms = self._find_named_forms(source, 'REPLACE-DEFINITION')
+        if not forms:
+            return source
+        out = []
+        pos = 0
+        for (start, end, content) in forms:
+            out.append(source[pos:start])
+            pos = end
+            m = re.match(r'<\s*REPLACE-DEFINITION\b', content, re.IGNORECASE)
+            name, body = self._read_atom(content[m.end():-1])
+            if name is None:
+                out.append(content)  # malformed; leave untouched
+                continue
             out.append(body)
         out.append(source[pos:])
         return ''.join(out)
@@ -2257,6 +2289,30 @@ class ZILCompiler:
             pos = end
             if debug_on:
                 m = re.match(r'<\s*IF-DEBUG\b', content, re.IGNORECASE)
+                out.append(content[m.end():-1])
+            # else strip
+        out.append(source[pos:])
+        return ''.join(out)
+
+    def _process_if_beta(self, source: str) -> str:
+        """Expand ZILF <IF-BETA body...> -> body iff the BETA compilation flag
+        is set (a built-in tied to COMPILATION-FLAG BETA, off by default).
+        Mirrors _process_if_debug; when BETA is off the whole form -- including
+        any <ROUTINE>/<SYNTAX> nested inside it (e.g. advent's SEED-RANDOM /
+        XLUCKY beta-tester extras) -- is stripped, so those routines are never
+        referenced or defined."""
+        import re
+        forms = self._find_named_forms(source, 'IF-BETA')
+        if not forms:
+            return source
+        beta_on = bool(self.compilation_flags.get('BETA'))
+        out = []
+        pos = 0
+        for (start, end, content) in forms:
+            out.append(source[pos:start])
+            pos = end
+            if beta_on:
+                m = re.match(r'<\s*IF-BETA\b', content, re.IGNORECASE)
                 out.append(content[m.end():-1])
             # else strip
         out.append(source[pos:])
