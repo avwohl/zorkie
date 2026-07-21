@@ -8360,16 +8360,43 @@ class ImprovedCodeGenerator:
         return bytes(code)
 
     def gen_voc(self, operands: List[ASTNode]) -> bytes:
-        """Generate VOC form - no-op as a statement.
+        """Generate <VOC "word" pos> as an EXPRESSION: push the dictionary
+        word's address (via the in-code vocab marker, patched by the assembler
+        like any W?WORD operand).
 
-        VOC is typically used as a value (e.g., in TELL with B operator).
-        When used as a value, the caller (like gen_printb) handles it via
-        _handle_voc_form which returns a placeholder value.
+        This used to return b'' ("VOC as a statement is a no-op"), which was
+        catastrophic in expression position: every comparison/operand site that
+        routed a VOC FormNode through generate_form (gen_equal, the COND
+        condition-test EQUAL? arms, _resolve_two_cmp_operands) pushed NOTHING
+        and then emitted `je x,(sp)` -- popping stale stack garbage. The ZILF
+        library's macro-generated EXPAND-PRONOUN does exactly that
+        (`<=? .W <VOC "it" OBJECT>>` per pronoun): in a strict interpreter the
+        pops read the LOCAL slots / caller values, so pronoun matching returned
+        interpreter-dependent nonsense (dfrotz garbled on "read message" while
+        zwalker happened to take the correct path). Pushing the marker makes
+        all those sites correct at once.
 
-        As a standalone statement, VOC has no effect.
+        (Value-context callers with their own VOC handling -- gen_printb,
+        table/global emission via _handle_voc_form -- do not come through
+        here, so they are unaffected.)
         """
-        # VOC as a statement is a no-op - it's handled inline when used as a value
-        return b''
+        if not operands:
+            return b''
+        word_node = operands[0]
+        if isinstance(word_node, (StringNode, AtomNode)):
+            word = word_node.value.lower()
+        else:
+            return b''
+        pos_type = None
+        if len(operands) >= 2 and isinstance(operands[1], AtomNode):
+            pos_type = operands[1].value.upper()
+        self.record_voc_word(word, pos_type)
+        placeholder_idx = self._intern_vocab_placeholder(word)
+        marker = self._code_vocab_marker(placeholder_idx)
+        # PUSH <large-const marker>  (VAR:0x08 push; type byte 0x3F = one
+        # large constant). The 0xFB-band marker bytes are found by the
+        # per-statement vocab scan and patched to the word's address.
+        return bytes([0xE8, 0x3F, (marker >> 8) & 0xFF, marker & 0xFF])
 
     def gen_string(self, operands: List[ASTNode]) -> bytes:
         """Generate STRING (build string with escape sequences).
