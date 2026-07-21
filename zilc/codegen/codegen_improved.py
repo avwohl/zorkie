@@ -13744,50 +13744,35 @@ class ImprovedCodeGenerator:
         # 1. Push starting offset to stack
         # 2. Loop: GETB 0 (stack peek), call handler, INC_CHK stack
 
-        # Use a label for the loop
-        loop_label = f"LOWCORE_TABLE_{self.label_counter}"
-        end_label = f"LOWCORE_TABLE_END_{self.label_counter}"
-        self.label_counter += 1
-
-        # STORE stack, field_offset (push initial offset)
-        code.append(0x0D)  # STORE 2OP
-        code.append(0x00)  # Variable 0 = stack (push)
-        code.append(field_offset)
-
-        # Mark loop start
-        loop_offset = len(code)
-
-        # GETB 0, (stack) -> stack
-        # This reads memory[0 + stack_top] and pushes result
-        # First we need to peek the stack value
-        # Use LOAD to get stack value, then GETB
-
-        # Unroll the loop for small lengths
-        # Since length is typically small (1-4), just emit the handler for each byte
-
+        # The loop is fully UNROLLED over the (small, compile-time) length, so
+        # each header byte is read with an absolute <GETB 0 field_offset+i> and
+        # no runtime loop counter is needed.
+        #
+        # An earlier version bracketed the unroll with `STORE 0 field_offset`
+        # (to "push" a counter) and `INC 0` (to "pop" it). But STORE/INC whose
+        # variable operand is 0 are INDIRECT references: per the Z-machine spec
+        # they read/write the TOP OF STACK IN PLACE -- they do NOT push or pop.
+        # With the stack empty (the ZILF library's <LOWCORE-TABLE SERIAL 6
+        # PRINTC> runs inside V-VERSION at startup, before anything is pushed),
+        # both underflow on a spec-strict interpreter (dfrotz: "Stack
+        # underflow"); a lenient interpreter that treats var-0 as push/pop of 0
+        # merely masks it. Emit only the unrolled handler calls.
         for i in range(length):
-            # Create a synthetic form: <handler <GETB 0 offset>>
-            # Build the GETB form
-            getb_form = FormNode([
+            # <handler <GETB 0 (field_offset + i)>>
+            # NOTE: FormNode(operator, operands) -- the operator is the FIRST
+            # positional and operands is a LIST. Passing a single list (with the
+            # operator inside it) leaves form.operator a list, so generate_form
+            # bails and emits nothing -- which is exactly why LOWCORE-TABLE used
+            # to print no serial bytes.
+            getb_form = FormNode(
                 AtomNode('GETB'),
-                NumberNode(0),
-                NumberNode(field_offset + i)
-            ])
-
-            # Build the handler form: <handler <GETB 0 offset>>
-            handler_form = FormNode([
+                [NumberNode(0), NumberNode(field_offset + i)]
+            )
+            handler_form = FormNode(
                 AtomNode(handler_name),
-                getb_form
-            ])
-
-            # Generate code for the handler form
-            handler_code = self.generate_form(handler_form)
-            code.extend(handler_code)
-
-        # Clean up the stack from the initial push
-        # POP (INC stack to discard)
-        code.append(0xA5)  # INC 1OP var
-        code.append(0x00)  # Variable 0 = stack
+                [getb_form]
+            )
+            code.extend(self.generate_form(handler_form))
 
         return bytes(code)
 
@@ -14040,6 +14025,14 @@ class ImprovedCodeGenerator:
 
         # DEC_CHK sp 0 -> branch forward (end)
         # DEC_CHK is 2OP:4, decrements first operand (var), branches if < second
+        # NOTE: <SPACES> is a LATENT, multiply-broken emitter -- no test game
+        # uses the bare builtin (games ship their own PRINT-SPACES routine). It
+        # has at least: this DEC_CHK type byte 0xAF (operand 2 = var-0 pops the
+        # compare value off the stack -> underflow on a strict interpreter, same
+        # class as the LOWCORE-TABLE store-0/inc-0 bug), a PRINT_CHAR type byte
+        # 0x01 that decodes as 4 operands (should be 0x3F), and off-by-two
+        # JUMP/branch offsets. Left as-is here; needs a full rewrite + a
+        # <SPACES> round-trip test before enabling.
         code.append(0xC4)  # VAR form of DEC_CHK
         code.append(0xAF)  # var, omit, omit, omit (using sp twice)
         code.append(0x00)  # Variable 0 (SP) - the counter
