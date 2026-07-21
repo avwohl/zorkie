@@ -20809,6 +20809,11 @@ class ImprovedCodeGenerator:
                     else:
                         op1_type, op1_val = self._get_operand_type_and_value(first_op)
 
+                    # Positions of the 2-byte internal chain branches emitted
+                    # for non-final JE groups; backpatched after the loop once
+                    # the actual encoded size of the chain is known.
+                    _je_internal_branches = []
+                    _je_final_false_pos = None
                     while remaining:
                         # Take up to 3 comparands (JE can do 1 vs up to 3)
                         group = remaining[:3]
@@ -20936,38 +20941,67 @@ class ImprovedCodeGenerator:
                                 code.append(v & 0xFF)
 
                         if remaining:
-                            # More to check - branch on TRUE to the code after this COND clause
-                            # We'll add a placeholder branch that means "if true, go forward"
-                            # For COND, we want: if any match, DON'T branch (take the clause)
-                            if branch_on_false:
-                                # We want to continue if true (don't branch), skip if all false
-                                # So for each JE, branch on TRUE to skip past remaining JEs
-                                # Calculate how many bytes the remaining JEs will take
-                                bytes_for_remaining = 0
-                                temp_remaining = remaining[:]
-                                while temp_remaining:
-                                    g = temp_remaining[:3]
-                                    temp_remaining = temp_remaining[3:]
-                                    # Internal skip branches are 2 bytes; only the
-                                    # final group's (caller-patched) branch is 1.
-                                    _br = 2 if temp_remaining else 1
-                                    if len(g) == 1:
-                                        bytes_for_remaining += 3 + _br  # opcode + 2 operands + branch
-                                    else:
-                                        bytes_for_remaining += 2 + len(g) + 1 + _br  # opcode + type + operands + branch
+                            # Non-final group: on a match the whole EQUAL? is
+                            # TRUE, so branch on TRUE past the rest of the chain
+                            # (bof=True: to the clause actions at END; bof=False:
+                            # to the trampoline). Emit a 2-byte placeholder and
+                            # BACKPATCH it after the loop, when the remaining
+                            # groups' ACTUAL encoded size is known. (The old
+                            # path precomputed that size assuming 1-byte
+                            # operands; dictionary-word / large-constant
+                            # comparands encode as 2 bytes each, so the skip
+                            # branch landed mid-instruction: PARSE-NOUN-PHRASE's
+                            # <EQUAL? .W ,W?ALL ,W?EVERY ...> jumped into the
+                            # second JE's operand bytes and "take all" became a
+                            # silent parser failure.)
+                            code.append(0x80)  # sense=TRUE, 2-byte form
+                            code.append(0x00)
+                            _je_internal_branches.append(len(code) - 2)
+                        elif not branch_on_false and _je_internal_branches:
+                            # Final group of a multi-group chain with
+                            # branch-on-true: it must branch on FALSE (2-byte,
+                            # patched below) PAST the trampoline to END, while
+                            # the internal groups branch on TRUE to the
+                            # trampoline, which carries the caller-patched
+                            # placeholder byte.
+                            code.append(0x00)  # sense=FALSE, 2-byte form
+                            code.append(0x00)
+                            _je_final_false_pos = len(code) - 2
+                        # Final group under branch_on_false: no branch byte here;
+                        # the shared epilogue appends the caller-patched byte.
 
-                                # Skip remaining JEs to get to actions (if any match succeeds)
-                                # The offset is relative to PC after branch byte, so +2
-                                skip_offset = bytes_for_remaining + 2
-                                # Always the 2-byte form: end-targeting branches
-                                # must be growable in place (registered below).
-                                code.append(0x80 | ((skip_offset >> 8) & 0x3F))
-                                code.append(skip_offset & 0xFF)
-                                self._last_test_meta.append({'pos': len(code) - 2, 'len': 2})
-                            else:
-                                # branch_on_false=False means branch when true
-                                code.append(0xC0)  # Placeholder
-                        # Last group - don't add branch yet, let caller handle it
+                    if _je_internal_branches:
+                        if branch_on_false:
+                            # Backpatch internal skips: target END = just after
+                            # the 1-byte caller-patched final branch appended by
+                            # the shared epilogue. offset = target - (pos+2) + 2.
+                            # Registered in _last_test_meta so the caller bumps
+                            # them when it grows the final branch to 2 bytes.
+                            chain_end = len(code)
+                            for _p in _je_internal_branches:
+                                _off = chain_end + 1 - _p
+                                code[_p] = 0x80 | ((_off >> 8) & 0x3F)
+                                code[_p + 1] = _off & 0xFF
+                                self._last_test_meta.append({'pos': _p, 'len': 2})
+                        else:
+                            # Branch-on-true trampoline (mirrors the OR/AND
+                            # composer): internal JEs [TRUE]-> trampoline; final
+                            # JE [FALSE]-> past it to END; trampoline = JZ #0
+                            # with the caller-patched placeholder byte from the
+                            # shared epilogue (always taken when reached).
+                            tramp_start = len(code)
+                            for _p in _je_internal_branches:
+                                _off = tramp_start - _p
+                                code[_p] = 0x80 | ((_off >> 8) & 0x3F)
+                                code[_p + 1] = _off & 0xFF
+                            _off = (tramp_start + 3) - _je_final_false_pos
+                            code[_je_final_false_pos] = (_off >> 8) & 0x3F
+                            code[_je_final_false_pos + 1] = _off & 0xFF
+                            # END-targeting: caller growth must bump it.
+                            self._last_test_meta.append(
+                                {'pos': _je_final_false_pos, 'len': 2})
+                            code.append(0x90)  # JZ small-const
+                            code.append(0x00)  # #0 -> test always true
 
             # Handle L? (JL)
             elif op_name in ('L?', '<'):
