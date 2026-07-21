@@ -9545,6 +9545,13 @@ class ImprovedCodeGenerator:
             # 2=var. A packed string address is always a large constant.
             return (0, _sv) if _st == 0 else (2, _sv)
         elif isinstance(node, AtomNode):
+            # ZIL character literal (!\X / \X): its ASCII code. The 2OP
+            # resolver checks this first; without the same check here, VAR-form
+            # users (PRINTN/PRINTC/arithmetic) compiled !\n to 0 (the atom fell
+            # through to "Unknown, default to 0").
+            char_code = self._parse_char_literal(node.value)
+            if char_code is not None:
+                return (1, char_code) if 0 <= char_code <= 255 else (0, char_code)
             if node.value in self.constants:
                 const_val = self.constants[node.value]
                 if 0 <= const_val <= 255:
@@ -14005,85 +14012,89 @@ class ImprovedCodeGenerator:
             return b''
 
         code = bytearray()
-        count = self.get_operand_value(operands[0])
 
-        # For compile-time constant ≤ 80, unroll PRINT_CHAR
-        if isinstance(count, int):
-            if count <= 0:
+        # Constant counts <= 80 unroll to bare PRINT_CHARs.
+        const_count = None
+        op = operands[0]
+        if isinstance(op, NumberNode):
+            const_count = op.value
+        elif isinstance(op, AtomNode) and op.value in self.constants:
+            const_count = self.constants[op.value]
+
+        if const_count is not None:
+            if const_count <= 0:
                 return b''
-            if count <= 80:
-                for _ in range(count):
-                    # PRINT_CHAR with space (ASCII 32)
+            if const_count <= 80:
+                for _ in range(const_count):
                     code.append(0xE5)  # PRINT_CHAR (VAR:0x05)
-                    code.append(0x01)  # Type byte: 1 small constant
+                    code.append(0x7F)  # Types: 1 small const, 3 omitted
                     code.append(32)    # Space character
                 return bytes(code)
 
-            # For larger constants, generate inline loop:
-            # 1. Push count to stack
-            # 2. Loop: DEC_CHK sp, 0 -> end
-            # 3. PRINT_CHAR 32
-            # 4. JUMP to step 2
-            # 5. End
+        # Loop case (large constant, variable, or expression). The counter
+        # lives in a dedicated scratch GLOBAL -- the previous version kept it
+        # on the stack and emitted DEC_CHK with type byte 0xAF, whose second
+        # operand was ALSO var-0: it popped the compare value off the stack
+        # every iteration (underflow on a spec-strict interpreter, same class
+        # as the LOWCORE-TABLE store-0/inc-0 bug), never actually decremented
+        # the counter, and its PRINT_CHAR type byte 0x01 decoded as FOUR
+        # operands. Full rewrite; round-trip tested in
+        # tests/zilf/test_queued_regressions.py.
+        if '_CMP_SCRATCH_' not in self.globals:
+            self.globals['_CMP_SCRATCH_'] = self.next_global
+            self.next_global += 1
+        scratch = self.globals['_CMP_SCRATCH_']
 
-            # Push count to stack (ADD 0 count -> sp)
-            if count <= 255:
-                code.append(0x54)  # ADD small, small
-                code.append(0x00)
-                code.append(count & 0xFF)
-                code.append(0x00)  # Store to SP
+        # scratch <- count
+        if const_count is not None:
+            if const_count <= 255:
+                code.append(0x0D)             # STORE (2OP long, small, small)
+                code.append(scratch)          # target variable number
+                code.append(const_count)      # value
             else:
-                code.append(0xD4)  # VAR form of ADD
-                code.append(0x0F)  # small, large
-                code.append(0x00)
-                code.append((count >> 8) & 0xFF)
-                code.append(count & 0xFF)
-                code.append(0x00)
-
+                code.append(0xCD)             # STORE (VAR form)
+                code.append(0x4F)             # Types: small, large, omit, omit
+                code.append(scratch)
+                code.append((const_count >> 8) & 0xFF)
+                code.append(const_count & 0xFF)
         else:
-            # Variable count - push to stack first
-            # STORE sp, var (copies variable value to stack)
-            var_num = count if isinstance(count, int) else 1
-            code.append(0x8D)  # 1OP:13 PUSH (short form, variable)
-            code.append(var_num & 0xFF)
+            op_type, op_val = self._get_operand_type_and_value(op)
+            if isinstance(op, (FormNode, CondNode)):
+                # Evaluate the expression (pushes its value), then pop into
+                # scratch: STORE's second operand read of var 0 is a normal
+                # (popping) access.
+                inner = self.generate_form(op) if isinstance(op, FormNode) \
+                    else self.generate_cond(op)
+                code.extend(inner)
+                code.append(0x2D)             # STORE (2OP long, small, VAR)
+                code.append(scratch)
+                code.append(0x00)             # var 0 = pop
+            elif op_type == 1:                # variable
+                code.append(0x2D)             # STORE (2OP long, small, VAR)
+                code.append(scratch)
+                code.append(op_val & 0xFF)
+            else:                             # small constant via resolver
+                code.append(0x0D)
+                code.append(scratch)
+                code.append(op_val & 0xFF)
 
-        # Loop start offset = current position
-        loop_start = len(code)
+        # if scratch < 1 -> skip the loop entirely (0 or negative count)
+        code.append(0x42)   # JL (2OP long, op1 VARIABLE, op2 small const)
+        code.append(scratch)
+        code.append(0x01)
+        code.append(0xCA)   # branch on TRUE, 1-byte offset 10 (past the loop)
 
-        # DEC_CHK sp 0 -> branch forward (end)
-        # DEC_CHK is 2OP:4, decrements first operand (var), branches if < second
-        # NOTE: <SPACES> is a LATENT, multiply-broken emitter -- no test game
-        # uses the bare builtin (games ship their own PRINT-SPACES routine). It
-        # has at least: this DEC_CHK type byte 0xAF (operand 2 = var-0 pops the
-        # compare value off the stack -> underflow on a strict interpreter, same
-        # class as the LOWCORE-TABLE store-0/inc-0 bug), a PRINT_CHAR type byte
-        # 0x01 that decodes as 4 operands (should be 0x3F), and off-by-two
-        # JUMP/branch offsets. Left as-is here; needs a full rewrite + a
-        # <SPACES> round-trip test before enabling.
-        code.append(0xC4)  # VAR form of DEC_CHK
-        code.append(0xAF)  # var, omit, omit, omit (using sp twice)
-        code.append(0x00)  # Variable 0 (SP) - the counter
-        code.append(0x00)  # Compare to 0 (end when counter < 0)
-        # Branch offset: we'll patch this after generating loop body
-        branch_pos = len(code)
-        code.append(0x00)  # Placeholder for branch offset
-
-        # PRINT_CHAR 32
-        code.append(0xE5)  # PRINT_CHAR (VAR:0x05)
-        code.append(0x01)  # Type byte: small constant
-        code.append(32)    # Space character
-
-        # JUMP back to loop start
-        # JUMP is 1OP:12, takes label address (we use relative offset)
-        jump_offset = loop_start - (len(code) + 3)  # Offset from after JUMP instruction
-        code.append(0x8C)  # 1OP:12 JUMP, small constant type
-        # Jump offset is signed 16-bit, packed in 2 bytes
-        code.append((jump_offset >> 8) & 0xFF)
-        code.append(jump_offset & 0xFF)
-
-        # End of loop - patch branch offset
-        end_offset = len(code) - branch_pos - 1
-        code[branch_pos] = 0x40 | (end_offset & 0x3F)  # Short branch, true condition
+        # L: print one space
+        code.append(0xE5)   # PRINT_CHAR
+        code.append(0x7F)   # Types: 1 small const
+        code.append(32)
+        # dec_chk scratch, 1 [FALSE -> L]  (loop while decremented value >= 1)
+        code.append(0x04)   # DEC_CHK (2OP long, small, small); op1 = var NUMBER
+        code.append(scratch)
+        code.append(0x01)
+        # 2-byte branch on FALSE, 14-bit signed offset -6 (back to L)
+        code.append(0x3F)   # 0b00xxxxxx: on-false, 2-byte, offset high bits
+        code.append(0xFA)   # offset low byte (0x3FFA = -6)
 
         return bytes(code)
 
@@ -16191,6 +16202,22 @@ class ImprovedCodeGenerator:
         start_node = spec_parts[1]
         end_node = spec_parts[2]
         step_node = spec_parts[3] if len(spec_parts) > 3 else None
+
+        # A FORM end that folds to a compile-time constant is a LIMIT, not a
+        # predicate. advent's <DO (I 0 %<* <- ,MAX-TREASURES 1> 2> 2)> arrives
+        # here as a plain form (the lexer drops the %-immediate marker); the
+        # predicate path emitted its "value" as a runtime expression whose
+        # ,CONSTANT read collapsed to 0, so the treasure-scoring scan ran for
+        # index 0 only and no treasure past the first ever scored. Fold first;
+        # only a genuinely non-constant form is a runtime predicate.
+        if isinstance(end_node, FormNode):
+            _folded_end = self.eval_expression(end_node)
+            if _folded_end is not None:
+                end_node = NumberNode(_folded_end)
+        if isinstance(start_node, FormNode):
+            _folded_start = self.eval_expression(start_node)
+            if _folded_start is not None:
+                start_node = NumberNode(_folded_start)
 
         # Get variable name
         if isinstance(var_node, AtomNode):

@@ -881,6 +881,7 @@ class ZILCompiler:
         source = self._process_if_options(source)
         source = self._process_if_debug(source)
         source = self._process_if_beta(source)
+        source = self._process_string_folds(source)
         source = self._process_expand(source)
         source = self._process_version_ops(source)
 
@@ -2332,6 +2333,88 @@ class ZILCompiler:
         out.append(source[pos:])
         return ''.join(out)
 
+    def _process_string_folds(self, source: str) -> str:
+        r"""Fold compile-time <STRING ...> forms whose arguments are ALL string
+        literals (or ,ATOMs naming string CONSTANTs defined in this program)
+        into ONE string literal.
+
+        ZILF evaluates <STRING ...> at compile time wherever its args are
+        known; games rely on that for composed constants -- advent's
+        <CONSTANT GAME-BANNER <STRING <IFFLAG (BETA "...") (ELSE "ADVENTURE|")>
+        "A Modern Classic|...">> (the IFFLAG arm has already been resolved by
+        the time this pass runs). Without the fold the CONSTANT never
+        registered at all and <TELL ,GAME-BANNER> printed from a garbage
+        address (dictionary goo in zwalker, "Print at illegal address" in
+        dfrotz). Runs after IFFLAG/VERSION?/IF-DEBUG/IF-BETA stripping; forms
+        with any non-foldable argument are left untouched (runtime STRING).
+        A %-immediate prefix (%<STRING ...>) is folded together with its %.
+        """
+        import re
+        forms = self._find_named_forms(source, 'STRING')
+        if not forms:
+            return source
+
+        # ,ATOM -> string-literal lookup table from <CONSTANT NAME "...">
+        _const_strs = {
+            m.group(1).upper(): m.group(2)
+            for m in re.finditer(
+                r'<\s*CONSTANT\s+([A-Z0-9?\-][A-Z0-9?!\-\.]*)\s+'
+                r'"((?:[^"\\]|\\.)*)"\s*>', source, re.IGNORECASE)
+        }
+
+        out = []
+        pos = 0
+        for (start, end, content) in forms:
+            m = re.match(r'<\s*STRING\b', content, re.IGNORECASE)
+            inner = content[m.end():-1]
+            # Tokenize: quoted literals and ,ATOM references only.
+            parts = []
+            ok = True
+            i, n = 0, len(inner)
+            while i < n:
+                ch = inner[i]
+                if ch.isspace():
+                    i += 1
+                    continue
+                if ch == '"':
+                    j = i + 1
+                    while j < n:
+                        if inner[j] == '\\':
+                            j += 2
+                            continue
+                        if inner[j] == '"':
+                            break
+                        j += 1
+                    if j >= n:
+                        ok = False
+                        break
+                    parts.append(inner[i + 1:j])  # raw source text, still valid
+                    i = j + 1
+                elif ch == ',':
+                    j = i + 1
+                    while j < n and not inner[j].isspace() and inner[j] not in '<>"(),':
+                        j += 1
+                    name = inner[i + 1:j].upper()
+                    if name in _const_strs:
+                        parts.append(_const_strs[name])
+                        i = j
+                    else:
+                        ok = False
+                        break
+                else:
+                    ok = False  # form/number/other -> leave for runtime STRING
+                    break
+            if not ok:
+                continue  # leave this form untouched
+            out.append(source[pos:start])
+            # fold the % of a %-immediate (%<STRING ...>) into the replacement
+            if out[-1].endswith('%'):
+                out[-1] = out[-1][:-1]
+            out.append('"' + ''.join(parts) + '"')
+            pos = end
+        out.append(source[pos:])
+        return ''.join(out)
+
     def _process_version_ops(self, source: str) -> str:
         """Resolve the ZILF stdlib version-abstraction macros (GET/B, PUT/B,
         IN-PB/WTBL?, IN-B/WTBL?) to the op their <VERSION?>-selected DEFMAC would
@@ -3119,6 +3202,20 @@ class ZILCompiler:
             else:
                 return (parts[0], '')
 
+    def _scan_ct_constants(self, source: str) -> dict:
+        """Record `<CONSTANT NAME <integer>>` values so %-immediate forms can
+        resolve ,NAME references (advent: %<* <- ,MAX-TREASURES 1> 2> with
+        <CONSTANT MAX-TREASURES 15>). Idempotent; first definition wins."""
+        import re
+        d = getattr(self, '_ct_constants', None)
+        if d is None:
+            d = self._ct_constants = {}
+        for m in re.finditer(
+                r'<\s*CONSTANT\s+([A-Z][A-Z0-9?!\-\./]*)\s+(-?\d+)\s*>',
+                source, re.IGNORECASE):
+            d.setdefault(m.group(1).upper(), int(m.group(2)))
+        return d
+
     def _process_compile_arithmetic(self, source: str) -> str:
         """
         Process compile-time arithmetic expressions.
@@ -3129,6 +3226,7 @@ class ZILCompiler:
         Similarly %<, %<. etc. are not compile-time forms.
         """
         import re
+        self._scan_ct_constants(source)
         result = []
         pos = 0
 
@@ -3657,6 +3755,13 @@ class ZILCompiler:
                         args.append(int(val))
                     else:
                         return None  # Can't handle non-numeric
+                elif var_name in getattr(self, '_ct_constants', {}):
+                    # ,NAME of an integer <CONSTANT> (advent's ,MAX-TREASURES
+                    # inside %<* <- ,MAX-TREASURES 1> 2>). Failing this lookup
+                    # made the whole %-form fall back to literal 0 -- advent's
+                    # treasure-scan DO loop got bound 0 and only ever scanned
+                    # the first treasure.
+                    args.append(int(self._ct_constants[var_name]))
                 else:
                     return None  # Unknown variable
 
@@ -3691,6 +3796,28 @@ class ZILCompiler:
                         return None
                 else:
                     return None
+
+            # Nested PLAIN form <...>: inside a %-immediate the whole tree is
+            # compile-time, so <- ,MAX-TREASURES 1> nested in
+            # %<* <- ,MAX-TREASURES 1> 2> evaluates recursively. This used to
+            # hit the "unknown token" arm -> None -> the caller substituted a
+            # literal 0.
+            elif args_str[pos] == '<':
+                depth = 1
+                start = pos
+                pos += 1
+                while pos < len(args_str) and depth > 0:
+                    if args_str[pos] == '<':
+                        depth += 1
+                    elif args_str[pos] == '>':
+                        depth -= 1
+                    pos += 1
+                if depth != 0:
+                    return None
+                nested_val = self._evaluate_compile_expr(args_str[start:pos])
+                if nested_val is None:
+                    return None
+                args.append(nested_val)
 
             else:
                 # Unknown token, can't parse

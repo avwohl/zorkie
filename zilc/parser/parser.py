@@ -2281,6 +2281,17 @@ class Parser:
 
         # Check for flags (BYTE), (PURE), (PATTERN (BYTE WORD)), etc.
         # Flags can be simple atoms or nested patterns like (PATTERN (BYTE [REST WORD]))
+        # A QUOTEd flag list -- '(BYTE) -- comes out of compile-time splices
+        # (advent: <TABLE %<VERSION? (ZIP '(BYTE)) (ELSE #SPLICE ())> ...>);
+        # the quote marks the list as literal for MDL evaluation and TABLE
+        # reads it as the same flag list. Without this skip it parsed as a
+        # zero DATA element, shifting every entry and word-typing the table
+        # (advent's ALL-TREASURES scan then read zeros -> no treasure ever
+        # scored, and the whole 350-point economy was dead).
+        if self.current_token.type == TokenType.QUOTE:
+            nxt = self.peek(1)
+            if nxt is not None and nxt.type == TokenType.LPAREN:
+                self.advance()  # consume the quote; flag parsing proceeds
         if self.current_token.type == TokenType.LPAREN:
             self.advance()
             paren_depth = 1
