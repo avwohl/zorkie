@@ -877,9 +877,9 @@ class Parser:
             items.append(self.parse_expression())
 
         self.expect(TokenType.RBRACKET)
-        # For now, treat vectors the same as lists
-        # In a full implementation, we'd have a VectorNode type
-        return items
+        # MdlVector behaves like a list everywhere but satisfies
+        # <TYPE? x VECTOR> (MAP-SCOPE option dispatch relies on it).
+        return MdlVector(items)
 
     def _normalize_param_decl(self, name: str) -> str:
         """Strip an MDL ADECL type declaration from a routine parameter name.

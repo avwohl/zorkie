@@ -293,10 +293,16 @@ class MDLEvaluator:
                 return True
             elif name == '<>' or name == 'FALSE':
                 return False
-            # Look up in environment
-            if name in env:
-                return env[name]
-            return node  # Return as-is if not found
+            # MDL: bare atoms SELF-EVALUATE.  Variables are only read via
+            # .X (LVAL) / ,X (GVAL).  Resolving a bare atom through the
+            # environment broke option-keyword tests inside DEFMACs whose
+            # AUX locals shadow the keyword: MAP-SCOPE's
+            # <==? <1 .SV> STAGES> compared against the AUX variable
+            # STAGES' value (the default stage list) instead of the atom,
+            # so [STAGES (...)] fell through to the all-stages default
+            # (SEARCH-FOR-LIGHT then saw GENERIC objects; advent's dark
+            # Plover-tunnel squeeze misbehaved).
+            return node
 
         # Handle local variable references (.VAR)
         if isinstance(node, LocalVarNode):
@@ -530,6 +536,23 @@ class MDLEvaluator:
             return self._eval_assigned(operands, env)
         elif op_name == 'EVAL':
             return self._eval_eval(operands, env)
+        elif op_name == 'UNPARSE':
+            # <UNPARSE x>: the printed representation of x as a STRING.
+            # advent's maze macros build room names with
+            # <PARSE <STRING "ALIKE-MAZE-" <UNPARSE .DEST>>>.
+            if operands:
+                _uv = self.evaluate(operands[0], env)
+                if isinstance(_uv, NumberNode):
+                    _uv = _uv.value
+                if isinstance(_uv, (int, float)):
+                    return str(_uv)
+                if isinstance(_uv, AtomNode):
+                    return _uv.value
+                if isinstance(_uv, StringNode):
+                    return _uv.value
+                if isinstance(_uv, str):
+                    return _uv
+            return ''
         elif op_name == 'IFFLAG':
             return self._eval_ifflag(operands, env)
         elif op_name == 'PRINC':
@@ -569,13 +592,15 @@ class MDLEvaluator:
         # Symbol table introspection
         elif op_name == 'ASSOCIATIONS':
             return self._eval_associations(operands, env)
+        elif op_name == 'GETPROP':
+            return self._eval_getprop(operands, env)
         elif op_name == 'NEXT':
             return self._eval_next(operands, env)
         elif op_name == 'SORT':
             return self._eval_sort(operands, env)
         elif op_name == 'VECTOR':
-            # VECTOR creates a vector from arguments (same as LIST for our purposes)
-            return [self.evaluate(op, env) for op in operands]
+            # VECTOR creates a vector: list-like, but satisfies TYPE? VECTOR.
+            return MdlVector(self.evaluate(op, env) for op in operands)
         elif op_name == 'DEFSTRUCT':
             return self._eval_defstruct(operands, env)
 
@@ -784,10 +809,15 @@ class MDLEvaluator:
                     try:
                         result = _apply(env, item)
                         if result is not None:
-                            if isinstance(result, list):
-                                results.extend(result)
-                            else:
-                                results.append(result)
+                            # MDL: a plain (non-MAPRET) result is ONE collected
+                            # element even when it is itself a LIST.  advent's
+                            # MAZE-ROOM builds exit groups with
+                            # <MAPF ,LIST <FUNCTION (C) ... <LIST .DIR TO .DEST>> .CS>
+                            # and splices them into <FORM ROOM ...> -- flattening
+                            # merged all exits into loose atoms and every maze
+                            # room lost its direction properties.  Splicing is
+                            # what MAPRET (below) is for.
+                            results.append(result)
                     except MapStop:
                         break
                     except MapRet as mr:
@@ -1186,6 +1216,10 @@ class MDLEvaluator:
                 if type_name == 'FIX' and isinstance(val, (int, NumberNode)):
                     return True
                 if type_name == 'LIST' and isinstance(val, list):
+                    return True
+                # MDL vectors: [a b c] literals and <VECTOR ...> results.
+                # MAP-SCOPE's option dispatch (<TYPE? .SV VECTOR>) needs this.
+                if type_name == 'VECTOR' and isinstance(val, MdlVector):
                     return True
                 # In MDL, .STR reads as <LVAL STR> and ,X as <GVAL X> -- both
                 # TYPE FORM (and a COND is a FORM too). starcross's 1982 TELL
@@ -1648,6 +1682,33 @@ class MDLEvaluator:
 
         return AssociationIterator(associations)
 
+    def _eval_getprop(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
+        """Evaluate <GETPROP atom indicator> against the compile symbol table.
+
+        Only the ZVAL indicator is modeled: it answers "what Z-machine value
+        does this atom name?"  For a ROUTINE the actual RoutineNode is
+        returned so <TYPE? <GETPROP .R ZVAL> ROUTINE> works -- the ZILF
+        pronoun engine validates each (PRONOUN IT THEM) entry this way in
+        PRONOUN-PROPSPEC before emitting PRO-FORCE-SET-* routine refs.
+        """
+        if len(operands) < 2:
+            return None
+        atom = self.evaluate(operands[0], env)
+        indicator = operands[1]
+        ind_name = indicator.value.upper() if isinstance(indicator, AtomNode) else ''
+        if not isinstance(atom, AtomNode) or ind_name != 'ZVAL':
+            return None
+        name = atom.value.upper()
+        program = getattr(self.macro_expander, 'program', None)
+        if program is not None:
+            for routine in program.routines:
+                if routine.name.upper() == name:
+                    return routine
+            for routine in getattr(self.macro_expander, 'pending_routines', []):
+                if routine.name.upper() == name:
+                    return routine
+        return None
+
     def _eval_next(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate NEXT - advance association iterator.
 
@@ -1822,6 +1883,25 @@ class MDLEvaluator:
                     # FINISH-HINTS stores that reference in HINT-CONDITION-TBL:
                     # <MAPF ,LIST <FUNCTION (I) ... <EVAL <FORM ROUTINE .RN ...>>>>.
                     return AtomNode(routine_node.name, arg.line, arg.column)
+                return None
+
+            elif op_name in ('ROOM', 'OBJECT'):
+                # Create a room/object dynamically:
+                # <EVAL <FORM ROOM name (PROP val...) ...>> -- advent's
+                # MAZE-ROOM / DIFFMAZE-ROOM / DEAD-END-ROOM macros build the
+                # whole maze this way.  Convert the constructed form into a
+                # RoomNode/ObjectNode and queue it for merging into the
+                # program after expansion.
+                def_node = self.macro_expander._object_def_from_form_operands(
+                    arg.operands, arg.line, arg.column,
+                    is_room=(op_name == 'ROOM'))
+                if def_node is not None:
+                    if op_name == 'ROOM':
+                        self.macro_expander.pending_rooms.append(def_node)
+                    else:
+                        self.macro_expander.pending_objects.append(def_node)
+                    # Evaluating an object definition yields its atom in MDL.
+                    return AtomNode(def_node.name, arg.line, arg.column)
                 return None
 
         # A DEFSTRUCT constructor/accessor form built with <FORM ...> must be
@@ -2312,6 +2392,12 @@ class MacroExpander:
         self.pending_constants: List[ConstantNode] = []
         # Routines created by EVAL during macro expansion (e.g., PRE-COMPILE hooks)
         self.pending_routines: List[RoutineNode] = []
+        # Rooms/objects created by EVAL during macro expansion.  advent's
+        # MAZE-ROOM / DIFFMAZE-ROOM / DEAD-END-ROOM DEFINEs each build a
+        # <FORM ROOM name props...> and <EVAL> it; the resulting RoomNodes
+        # accumulate here and merge into program.rooms after expansion.
+        self.pending_rooms: List[RoomNode] = []
+        self.pending_objects: List[ObjectNode] = []
         # IN-ZILCH flag: True when expanding macros for Z-machine code generation,
         # False when expanding for compile-time execution
         self.in_zilch: bool = False
@@ -3042,6 +3128,73 @@ class MacroExpander:
         return RoutineNode(name, params, aux_vars, body, line, column,
                            local_defaults, activation, opt_params)
 
+    def _object_def_from_form_operands(self, operands, line=0, column=0,
+                                       is_room=True):
+        """Build a RoomNode/ObjectNode from the operands of a constructed
+        <FORM ROOM name (PROP val...) ...> / <FORM OBJECT ...> form.
+
+        advent's MAZE-ROOM / DIFFMAZE-ROOM / DEAD-END-ROOM DEFINEs assemble
+        room definitions at compile time and <EVAL> them.  By the time we see
+        the form, _eval_form_constructor has normalized each property group
+        to a '()' FormNode (quoted lists stay '()' forms; compile-time LIST
+        results are converted); values inside are AST nodes.  Mirror
+        parser.parse_properties' storage rules (FLAGS combining, IN/LOC
+        aliasing, single value stored as scalar) so downstream stages see the
+        same shape as a source-level <ROOM ...>."""
+        if not operands or not isinstance(operands[0], AtomNode):
+            return None
+        name = operands[0].value.upper()
+        properties = {}
+        location_props = {'IN', 'LOC'}
+        _dir_exit_kws = ('TO', 'PER', 'SORRY', 'NEXIT', 'UEXIT', 'NE-EXIT',
+                         'CEXIT', 'FEXIT', 'DEXIT', 'DOOR', 'SETG', 'NONE',
+                         'IF')
+        for group in operands[1:]:
+            items = None
+            if (isinstance(group, FormNode)
+                    and isinstance(group.operator, AtomNode)
+                    and group.operator.value == '()'):
+                items = list(group.operands)
+            elif isinstance(group, list):
+                items = list(group)
+            if not items or not isinstance(items[0], AtomNode):
+                continue  # not a recognizable (PROP ...) group
+            prop_name = items[0].value.upper()
+            values = []
+            for v in items[1:]:
+                if isinstance(v, str):
+                    v = StringNode(v)
+                elif isinstance(v, int):
+                    v = NumberNode(v)
+                values.append(v)
+            is_nexit_string = (prop_name in location_props and len(values) == 1
+                               and isinstance(values[0], StringNode))
+            is_direction_exit = (bool(values) and isinstance(values[0], AtomNode)
+                                 and values[0].value.upper() in _dir_exit_kws)
+            if (prop_name in location_props and not is_nexit_string
+                    and not is_direction_exit):
+                for loc_prop in location_props:
+                    if loc_prop in properties and loc_prop != prop_name:
+                        del properties[loc_prop]
+            if (prop_name in location_props
+                    and (is_direction_exit or is_nexit_string)
+                    and prop_name in properties):
+                other = 'LOC' if prop_name == 'IN' else 'IN'
+                if other not in properties:
+                    properties[other] = properties[prop_name]
+            if prop_name == 'FLAGS' and prop_name in properties:
+                existing = properties[prop_name]
+                if not isinstance(existing, list):
+                    existing = [existing]
+                existing.extend(values)
+                properties[prop_name] = existing
+            elif len(values) == 1:
+                properties[prop_name] = values[0]
+            else:
+                properties[prop_name] = values
+        cls = RoomNode if is_room else ObjectNode
+        return cls(name, properties, line, column)
+
     def _evaluate_mdl(self, node: ASTNode, bindings: Dict[str, Any]) -> ASTNode:
         """
         Evaluate MDL constructs at compile time.
@@ -3751,6 +3904,30 @@ class MacroExpander:
                 if routine_node.name not in existing_names:
                     program.routines.append(routine_node)
                     existing_names.add(routine_node.name)
+
+        # Merge rooms/objects created by EVAL during macro expansion
+        # (advent's MAZE-ROOM / DIFFMAZE-ROOM / DEAD-END-ROOM machinery).
+        # Their property values were built by the compile-time evaluator, so
+        # run them through the same IN-ZILCH expansion pass source-level
+        # rooms/objects got above.
+        for pending, target in ((self.pending_rooms, program.rooms),
+                                (self.pending_objects, program.objects)):
+            if not pending:
+                continue
+            existing_names = {r.name for r in target}
+            for node in pending:
+                if node.name in existing_names:
+                    continue
+                for key, value in node.properties.items():
+                    if isinstance(value, ASTNode):
+                        node.properties[key] = self._expand_recursive(value)
+                    elif isinstance(value, list):
+                        node.properties[key] = [
+                            self._expand_recursive(v) if isinstance(v, ASTNode) else v
+                            for v in value
+                        ]
+                target.append(node)
+                existing_names.add(node.name)
 
         return program
 

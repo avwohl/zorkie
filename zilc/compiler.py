@@ -2569,6 +2569,25 @@ class ZILCompiler:
             source = self._strip_forms_by_head(source, head)
         source = re.sub(r'<\s*FINISH-PRONOUNS\s*>', lambda _m: generated,
                         source, count=1, flags=re.IGNORECASE)
+
+        # PRONOUN-PROPSPEC's job: rewrite object property clauses
+        # (PRONOUN IT THEM) -> (PRONOUN PRO-FORCE-SET-IT PRO-FORCE-SET-THEM)
+        # so P?PRONOUN holds routine addresses.  The generated SET-PRONOUNS
+        # APPLYs each word of that property; without this the raw pronoun
+        # atoms were emitted as encoded TEXT and SET-PRONOUNS called into
+        # z-string bytes (advent: "take bird" crashed the interpreter).
+        # All <PRONOUN ...> top-level forms are stripped above, so remaining
+        # "(PRONOUN ...)" occurrences are property clauses.
+        known = {n for (n, _b, _s) in pronouns}
+        def _rewrite_pronoun_prop(m):
+            names = m.group(1).split()
+            if not names or not all(nm.upper() in known for nm in names):
+                return m.group(0)
+            return ('(PRONOUN ' +
+                    ' '.join(f'PRO-FORCE-SET-{nm.upper()}' for nm in names) +
+                    ')')
+        source = re.sub(r'\(\s*PRONOUN\s+([A-Z][A-Z0-9 \t-]*?)\s*\)',
+                        _rewrite_pronoun_prop, source, flags=re.IGNORECASE)
         return source
 
     def _parse_library_message_defs(self, content: str, msgs: dict):
@@ -4474,6 +4493,11 @@ class ZILCompiler:
 
         action_num = 1  # Start from 1 (0 is often reserved)
 
+        # Per-syntax-line action-number overrides from "= routine pre name"
+        # action-name syntax (keyed by id(syntax_def); consumed when building
+        # syntax_entries below).
+        line_action_overrides = {}
+
         unique_verbs = set()  # Track unique verb words for limit checking
         verb_word_order = []  # Track verb words in order of appearance
         verb_numbers = {}  # verb_word -> verb_number (255, 254, ...)
@@ -4528,9 +4552,22 @@ class ZILCompiler:
                     verb_constants[const_name] = action_num
                     # Store the routine for this action number (same routine, new action number)
                     action_num_to_routine[action_num] = action_routine
-                    # The preaction is 0 since action name override uses <> or no preaction
-                    action_num_to_preaction[action_num] = None
+                    # ZILF semantics: "= routine preaction name" attaches the
+                    # preaction to the NAMED action.  advent's <SYNTAX WATER
+                    # OBJECT ... = V-POUR-LIQUID PRE-WATER WATER> must run
+                    # PRE-WATER when PERFORM dispatches V?WATER.
+                    action_num_to_preaction[action_num] = preaction_routine
                     action_num += 1
+                override_num = verb_constants[const_name]
+                if (preaction_routine
+                        and action_num_to_preaction.get(override_num) is None):
+                    action_num_to_preaction[override_num] = preaction_routine
+                # The syntax LINE's action is the named action: PRSA must
+                # become V?<name> so <VERB? name> matches.  Without this the
+                # line stored the routine's own (different) action number and
+                # PLANT-F's <VERB? WATER> arm never fired ("water plant" fell
+                # through to V-POUR-LIQUID's YOU-MASHER default).
+                line_action_overrides[id(syntax_def)] = override_num
 
             # Each verb word gets its own action number for syntax table lookup
             # The action routine may be shared by multiple actions
@@ -4608,6 +4645,14 @@ class ZILCompiler:
                 if _new_ntp.get(_nn) is None:
                     _new_ntp[_nn] = _pre
             action_num_to_routine, action_num_to_preaction = _new_ntr, _new_ntp
+            # Keep per-line action-name overrides in the dense numbering; the
+            # densify canonicalizes per ROUTINE, so for classic-parser games
+            # this collapses an override back to its routine's number
+            # (pre-existing classic behavior, unchanged).
+            line_action_overrides = {
+                _k: _remap.get(_v, _v)
+                for _k, _v in line_action_overrides.items()
+            }
             for _k in list(verb_constants):
                 _v = verb_constants[_k]
                 if not isinstance(_v, int) or _v not in _remap:
@@ -4813,7 +4858,12 @@ class ZILCompiler:
             # The routine field may be "V-PUT PRE-PUT"; take the first (action) routine.
             routine_name = str(syntax_def.routine).split()[0] if syntax_def.routine else ''
             verb_action_num = verb_constants.get(f'V?{verb_upper}', 0) or verb_constants.get(f'ACT?{verb_upper}', 0)
-            action_num = actions.get(routine_name, 0) or verb_action_num
+            if id(syntax_def) in line_action_overrides:
+                # "= routine pre name" line: PRSA must become the NAMED action's
+                # number (V?name), not the routine's own action number.
+                action_num = line_action_overrides[id(syntax_def)]
+            else:
+                action_num = actions.get(routine_name, 0) or verb_action_num
 
             object_flags = syntax_def.object_flags if hasattr(syntax_def, 'object_flags') else []
 
@@ -6712,11 +6762,32 @@ class ZILCompiler:
             if not isinstance(value, (list, tuple)) or not value:
                 return None
             toks = list(value)
+            def exit_msg_string(node):
+                """A NEXIT message may be a literal string or a ,CONSTANT
+                naming one (advent: (DOWN SORRY ,YOU-DONT-FIT)).  Returns the
+                text or None."""
+                if isinstance(node, _S):
+                    return node.value
+                from .parser.ast_nodes import GlobalVarNode as _GV
+                nm = None
+                if isinstance(node, _GV):
+                    nm = node.name.upper()
+                elif isinstance(node, _A):
+                    nm = node.value.upper()
+                if nm is not None:
+                    for _c in program.constants:
+                        if _c.name.upper() == nm and isinstance(
+                                getattr(_c, 'value', None), _S):
+                            return _c.value.value
+                return None
+
             if isinstance(toks[0], _S):                                    # (DIR "msg")
                 return nexit(_register_prop_string(toks[0].value))
             k0 = toks[0].value.upper() if isinstance(toks[0], _A) else ''
-            if k0 == 'SORRY' and len(toks) >= 2 and isinstance(toks[1], _S):
-                return nexit(_register_prop_string(toks[1].value))         # NEXIT
+            if k0 == 'SORRY' and len(toks) >= 2:
+                _msg = exit_msg_string(toks[1])
+                if _msg is not None:
+                    return nexit(_register_prop_string(_msg))              # NEXIT
             if k0 == 'PER' and len(toks) >= 2:
                 rtn = toks[1].value if isinstance(toks[1], _A) else str(toks[1])
                 ph = resolve_atom_value(rtn)  # 0xFA00|idx routine placeholder
@@ -6751,6 +6822,16 @@ class ZILCompiler:
                     return bytes(w2(dest) + w2(els) + [gnum & 0xFF])       # CEXIT
                 return bytes([dest & 0xFF, gnum & 0xFF] + w2(els))         # CEXIT
             return None
+
+        # The ZILF standard library's V-WALK dispatches exits by PTSIZE with
+        # the SAME record layouts as the classic Infocom parser (verbs.zil
+        # defines UEXIT/NEXIT/FEXIT/CEXIT/DEXIT itself), so any game that
+        # declares those constants needs the classic exit encodings.  The
+        # single-byte fallback flattened advent's (EAST PER EAST-FROM-IN-ALCOVE)
+        # to a 1-byte UEXIT of room 0 -- walking east through the Alcove
+        # tunnel GOTO'd the void and the game went permanently dark.
+        ptsize_exit_dispatch = any(
+            getattr(c, 'name', '') == 'UEXIT' for c in program.constants)
 
         # Helper to extract property number and value
         def extract_properties(obj_node, obj_idx):
@@ -6793,11 +6874,12 @@ class ZILCompiler:
                     elif hasattr(synonyms, 'value'):
                         words.append(synonyms.value)
 
-                    if not getattr(self, '_is_classic_parser', False):
-                        words = words[:1]
                     # The classic THIS-IT? matches the typed noun against the WHOLE
-                    # P?SYNONYM word array (ZMEMQ over PTSIZE/2 entries); storing
-                    # only the first synonym made "open trapdoor" etc. unfindable.
+                    # P?SYNONYM word array (ZMEMQ over PTSIZE/2 entries), and the
+                    # ZILF stdlib REFERS? does the same via IN-PWTBL?; storing
+                    # only the first synonym made "open trapdoor" (classic) and
+                    # advent's "take keys" (KEYS is SET-OF-KEYS' 2nd synonym)
+                    # unfindable.
                     # V3 property data caps at 8 bytes = 4 words. V4+ keeps
                     # the FULL synonym list (property cap 64 bytes = 31 words
                     # after markers): trinity's route types MARKER's 9th
@@ -6875,15 +6957,22 @@ class ZILCompiler:
                         else:
                             props[prop_num] = 0
                         continue
+                    # V3 stores adjective NUMBERS as a byte array for BOTH
+                    # dialects: the classic THIS-IT? ZMEMQBs A?<word> numbers,
+                    # and the ZILF stdlib's REFERS? compares
+                    # <CHKWORD? word PS?ADJECTIVE P1?ADJECTIVE> (the dict
+                    # entry's adjective-number byte) against P?ADJECTIVE via
+                    # IN-PBTBL? (byte scan).  The old non-classic fallback
+                    # stored ONE dict-word marker, so no ZILF-library V3
+                    # adjective ever matched ("take set of keys" et al).
                     adj_nums = []
-                    if getattr(self, '_is_classic_parser', False):
-                        for w in words[:8]:
-                            an = codegen.constants.get(f'A?{str(w).upper()}')
-                            if isinstance(an, int) and 0 < an <= 255:
-                                adj_nums.append(an)
-                            else:
-                                adj_nums = []
-                                break
+                    for w in words[:8]:
+                        an = codegen.constants.get(f'A?{str(w).upper()}')
+                        if isinstance(an, int) and 0 < an <= 255:
+                            adj_nums.append(an)
+                        else:
+                            adj_nums = []
+                            break
                     if adj_nums:
                         props[prop_num] = bytes(adj_nums)
                     elif words:
@@ -7004,7 +7093,8 @@ class ZILCompiler:
                             # to room 0/4 ("down" through minizork's trap door put
                             # HERE=0 and the game went dark forever).
                             encoded = None
-                            if getattr(self, '_is_classic_parser', False):
+                            if (getattr(self, '_is_classic_parser', False)
+                                    or ptsize_exit_dispatch):
                                 encoded = encode_exit_classic(value)
                             if encoded is not None:
                                 props[prop_num] = encoded

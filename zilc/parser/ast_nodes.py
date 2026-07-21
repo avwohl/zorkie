@@ -79,6 +79,20 @@ class ASTNode:
         return f"{self.__class__.__name__}(...)"
 
 
+class MdlVector(list):
+    """An MDL VECTOR literal [a b c].
+
+    Behaves exactly like the Python list the parser used to return (so every
+    isinstance(x, list) consumer is unaffected) but is distinguishable for
+    <TYPE? x VECTOR>.  The ZILF scope engine's MAP-SCOPE macro dispatches its
+    options ([BITS .B] / [STAGES (...)] / [NO-LIGHT]) on exactly that check;
+    without the distinction every MAP-SCOPE fell back to the all-stages
+    default and noun matching searched GENERIC/GLOBAL objects it never
+    should have (advent: "throw axe at dwarf" hit GENERIC-DWARF and asked
+    'Which do you mean, the ... dwarf or the ... dwarf?')."""
+    __slots__ = ()
+
+
 class AtomNode(ASTNode):
     """Atom/identifier node."""
     def __init__(self, value: str, line: int = 0, column: int = 0):
