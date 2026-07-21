@@ -10284,7 +10284,19 @@ class ImprovedCodeGenerator:
             raise ValueError("SPLIT requires exactly 1 operand")
 
         code = bytearray()
-        op_type, op_val = self._get_operand_type_and_value(operands[0])
+        # A FORM operand (trinity's <SPLIT <+ .LINES 4>> in WINDOW) must have
+        # its code EMITTED first; _get_operand_type_and_value alone returned
+        # (variable, 0) without generating anything, so split_window read a
+        # bare (SP) with nothing pushed -- a cross-frame pop that dfrotz /
+        # ZWALKER_STRICT=1 fault on (found by the strict L2 sweep).
+        if isinstance(operands[0], (FormNode, CondNode)):
+            inner = (self.generate_form(operands[0])
+                     if isinstance(operands[0], FormNode)
+                     else self.generate_cond(operands[0]))
+            code.extend(inner)
+            op_type, op_val = 1, 0  # value is on the stack
+        else:
+            op_type, op_val = self._get_operand_type_and_value(operands[0])
 
         code.append(0xEA)  # SPLIT_WINDOW (VAR opcode 0x0A)
         type_byte = 0x01 if op_type == 0 else 0x02
@@ -19884,6 +19896,17 @@ class ImprovedCodeGenerator:
                 _converted = False
                 if is_t_clause and len(actions) == 0:
                     _converted = True      # RTRUE emitted just above
+                elif _last_a is None and len(actions_code) == 0:
+                    # BODYLESS *test* clause in tail position -- lurkinghorror
+                    # INF-F's inner <COND (<EQUAL? ,OHERE ,INF-1 ...>) ...>.
+                    # The COND's value when such a clause matches is the test's
+                    # value (T for a matched branch-form test like EQUAL?), but
+                    # a branch instruction pushes nothing, so the unconverted
+                    # path jumped to the shared RET_POPPED and popped the
+                    # CALLER's frame (dfrotz / ZWALKER_STRICT=1 fault; found by
+                    # the strict L2 sweep). Return TRUE directly.
+                    actions_code.append(0xB0)  # RTRUE
+                    _converted = True
                 elif _last_a is not None and len(action_code) == 0 and not isinstance(_last_a, StringNode):
                     # bare-value PUSH emitted by the block above: convert to RET
                     if len(_p3) == 3 and _p3[0] == 0xE8 and _p3[1] == 0x7F:
