@@ -33,6 +33,22 @@ class MdlAgain(Exception):
     pass
 
 
+class MdlStruct:
+    """A compile-time DEFSTRUCT instance (e.g. advent's per-hint MAKE-HINT
+    vector).  `type_name` is the struct name (HINT); `fields` maps each field
+    name (HINT-PENALTY, HINT-LOCATION, ...) to its stored value.  Field
+    accessors read it and the constructor builds it -- see MDLEvaluator's
+    _eval_defstruct / _eval_make_struct / _eval_struct_get."""
+    __slots__ = ('type_name', 'fields')
+
+    def __init__(self, type_name: str, fields: Dict[str, Any]):
+        self.type_name = type_name
+        self.fields = fields
+
+    def __repr__(self):
+        return f"MdlStruct({self.type_name})"
+
+
 # Predicates that are meaningful at COMPILE time inside a macro expansion.
 # A COND built entirely from these may be folded by _evaluate_mdl; anything
 # else (FSET?, GETP, ...) is runtime and must reach codegen intact.
@@ -299,6 +315,12 @@ class MDLEvaluator:
             _ct = getattr(self.macro_expander, 'ct_globals', None)
             if _ct is not None and name in _ct:
                 return _ct[name]
+            # ,HINT-PENALTY as a MAPF loop function resolves to the accessor
+            # callable (advent builds the hint tables with
+            # <MAPF ,LIST ,HINT-PENALTY ,HINT-DEFINITIONS>).
+            _fn = self._struct_callable(name)
+            if _fn is not None:
+                return _fn
             # Return as GlobalVarNode - will be resolved at runtime
             return node
 
@@ -350,6 +372,17 @@ class MDLEvaluator:
                 else:
                     result.append(evaluated)
             return result
+
+        # Handle table constructors (<PLTABLE ...>, <LTABLE ...>, <ITABLE ...>):
+        # resolve any embedded MAPF/FORM/splice values to concrete AST nodes so
+        # the result can be emitted as a CONSTANT (advent's FINISH-HINTS).
+        if isinstance(node, TableNode):
+            return self._resolve_table_node(node, env)
+
+        # Handle a CONSTANT definition node evaluated for its side effect
+        # (FINISH-HINTS' body is 8 <CONSTANT HINT-*-TBL <...TABLE...>> nodes).
+        if isinstance(node, ConstantNode):
+            return self._emit_constant_node(node, env)
 
         # Return other nodes as-is
         return node
@@ -543,6 +576,8 @@ class MDLEvaluator:
         elif op_name == 'VECTOR':
             # VECTOR creates a vector from arguments (same as LIST for our purposes)
             return [self.evaluate(op, env) for op in operands]
+        elif op_name == 'DEFSTRUCT':
+            return self._eval_defstruct(operands, env)
 
         # Reader macro support
         elif op_name == 'MAKE-PREFIX-MACRO':
@@ -563,6 +598,17 @@ class MDLEvaluator:
                 else:
                     result.append(evaluated)
             return result
+
+        # DEFSTRUCT constructor / field accessor (advent's hint system).
+        # <MAKE-HINT 'HINT-PENALTY 4 ...> builds an MdlStruct; <HINT-PENALTY .I>
+        # reads a field.  Registered only after a <DEFSTRUCT ...>, so this is a
+        # no-op for every game that doesn't use DEFSTRUCT.
+        _me = self.macro_expander
+        if op_name in getattr(_me, 'struct_ctors', ()):
+            return self._eval_make_struct(_me.struct_ctors[op_name], operands, env)
+        if op_name in getattr(_me, 'struct_accessors', ()):
+            _sn, _fn = _me.struct_accessors[op_name]
+            return self._eval_struct_get(_fn, operands, env)
 
         # User DEFINE / DEFMAC application (e.g. lurkinghorror's PE helper
         # inside the P? macro).  Bind evaluated args (raw AST for quoted
@@ -1279,6 +1325,13 @@ class MDLEvaluator:
                         form_operands.append(StringNode(sub))
                     elif isinstance(sub, int):
                         form_operands.append(NumberNode(sub))
+                    elif isinstance(sub, list):
+                        # A spliced element that is itself an MDL list stays ONE
+                        # operand -- a () form -- rather than being dropped.
+                        # advent's <FORM MAKE-HINT ... !.CTOR-ARGS> splices a
+                        # multi-room HINT-LOCATION list as a single field value;
+                        # dropping it misaligned every following field pair.
+                        form_operands.append(self._convert_list_to_form(sub))
             elif isinstance(item, ASTNode):
                 form_operands.append(item)
             elif isinstance(item, str):
@@ -1764,10 +1817,239 @@ class MDLEvaluator:
                     arg.operands, arg.line, arg.column)
                 if routine_node is not None:
                     self.macro_expander.pending_routines.append(routine_node)
+                    # In MDL, evaluating a ROUTINE definition yields the routine
+                    # (its atom, resolving to a packed address).  advent's
+                    # FINISH-HINTS stores that reference in HINT-CONDITION-TBL:
+                    # <MAPF ,LIST <FUNCTION (I) ... <EVAL <FORM ROUTINE .RN ...>>>>.
+                    return AtomNode(routine_node.name, arg.line, arg.column)
                 return None
+
+        # A DEFSTRUCT constructor/accessor form built with <FORM ...> must be
+        # APPLIED here: in MDL, <EVAL <FORM MAKE-HINT ...>> evaluates the value
+        # passed to it, i.e. runs MAKE-HINT.  advent's HINT macro relies on this
+        # to turn each hint into an MdlStruct in HINT-DEFINITIONS.
+        if isinstance(arg, FormNode) and isinstance(arg.operator, AtomNode):
+            _opn = arg.operator.value.upper()
+            me = self.macro_expander
+            if (_opn in getattr(me, 'struct_ctors', ())
+                    or _opn in getattr(me, 'struct_accessors', ())):
+                return self.evaluate(arg, env)
 
         # For other forms, just evaluate and return result
         return arg
+
+    # ---- DEFSTRUCT compile-time support (advent's hint system) -------------
+
+    _TABLE_FLAG_ATOMS = frozenset(
+        {'BYTE', 'WORD', 'PURE', 'LENGTH', 'NONE', 'PARSER-TABLE'})
+
+    def _eval_defstruct(self, operands: List[ASTNode], env: Dict[str, Any]):
+        """<DEFSTRUCT NAME VECTOR (FIELD1 TYPE1) (FIELD2 TYPE2) ...>.
+
+        Registers a constructor MAKE-<NAME> and a field accessor per field so
+        later macros can build and read the struct at compile time.  Only the
+        subset advent needs (a flat VECTOR of named fields) is modeled."""
+        if not operands or not isinstance(operands[0], AtomNode):
+            return None
+        struct_name = operands[0].value.upper()
+        field_names = []
+        # operands[1] is the base type (VECTOR); the rest are field specs.
+        for spec in operands[2:]:
+            fld = None
+            if isinstance(spec, FormNode) and spec.operator is not None:
+                # (FIELD TYPE) parses as a '()' form: operator = FIELD atom.
+                if isinstance(spec.operator, AtomNode) and spec.operator.value == '()':
+                    if spec.operands and isinstance(spec.operands[0], AtomNode):
+                        fld = spec.operands[0].value.upper()
+                elif isinstance(spec.operator, AtomNode):
+                    fld = spec.operator.value.upper()
+            elif isinstance(spec, list) and spec and isinstance(spec[0], AtomNode):
+                fld = spec[0].value.upper()
+            elif isinstance(spec, AtomNode):
+                fld = spec.value.upper()
+            if fld:
+                field_names.append(fld)
+        me = self.macro_expander
+        me.structs[struct_name] = field_names
+        me.struct_ctors[f'MAKE-{struct_name}'] = struct_name
+        for fld in field_names:
+            me.struct_accessors[fld] = (struct_name, fld)
+        return None
+
+    def _eval_make_struct(self, struct_name: str, operands: List[ASTNode],
+                          env: Dict[str, Any]) -> 'MdlStruct':
+        """<MAKE-HINT 'HINT-NAME v 'HINT-PENALTY v ...> -> MdlStruct.
+
+        Operands are alternating (field-name-atom, value); missing fields
+        default to False (MDL's <>)."""
+        me = self.macro_expander
+        fields = {fn: False for fn in me.structs.get(struct_name, [])}
+        i = 0
+        while i < len(operands):
+            key = self.evaluate(operands[i], env)
+            if isinstance(key, AtomNode):
+                key = key.value
+            key = str(key).upper()
+            val = self.evaluate(operands[i + 1], env) if i + 1 < len(operands) else False
+            fields[key] = val
+            i += 2
+        return MdlStruct(struct_name, fields)
+
+    def _eval_struct_get(self, field_name: str, operands: List[ASTNode],
+                         env: Dict[str, Any]) -> Any:
+        """<HINT-PENALTY .I> -> the field value of struct .I (False if absent)."""
+        if not operands:
+            return False
+        obj = self.evaluate(operands[0], env)
+        if isinstance(obj, MdlStruct):
+            return obj.fields.get(field_name.upper(), False)
+        return False
+
+    def _struct_callable(self, name: str):
+        """Return a Python callable for a struct constructor/accessor NAME used
+        as a value (e.g. a MAPF loop function), or None."""
+        me = self.macro_expander
+        name = name.upper()
+        accessors = getattr(me, 'struct_accessors', None)
+        if accessors and name in accessors:
+            _sn, fld = accessors[name]
+            fld = fld.upper()
+
+            def _acc(_call_env, *args):
+                obj = args[0] if args else None
+                if isinstance(obj, MdlStruct):
+                    return obj.fields.get(fld, False)
+                return False
+            return _acc
+        ctors = getattr(me, 'struct_ctors', None)
+        if ctors and name in ctors:
+            sn = ctors[name]
+
+            def _ctor(_call_env, *args):
+                # Wrap positional (field, value) pairs back into AST-ish nodes.
+                ops = []
+                for a in args:
+                    ops.append(a if isinstance(a, ASTNode) else self._value_to_node(a))
+                return self._eval_make_struct(sn, ops, _call_env)
+            return _ctor
+        return None
+
+    # ---- Compile-time table construction (FINISH-HINTS) --------------------
+
+    def _table_flag_from_value(self, v) -> Optional[str]:
+        """A bare (LENGTH)/(PURE)/(BYTE)... flag-list table value -> the flag."""
+        if isinstance(v, list) and len(v) == 1 and isinstance(v[0], AtomNode):
+            f = v[0].value.upper()
+            if f in self._TABLE_FLAG_ATOMS:
+                return f
+        if (isinstance(v, FormNode) and isinstance(v.operator, AtomNode)
+                and v.operator.value == '()' and len(v.operands) == 1
+                and isinstance(v.operands[0], AtomNode)):
+            f = v.operands[0].value.upper()
+            if f in self._TABLE_FLAG_ATOMS:
+                return f
+        return None
+
+    def _value_to_node(self, v) -> ASTNode:
+        """Convert a compile-time value to an AST node usable as a table element.
+        False/None becomes 0 (MDL <> in a word table)."""
+        if isinstance(v, ASTNode):
+            # A bare <> (false) -- either the atom or the empty form the FUNCTION
+            # bodies return for a missing location/condition -- is 0 in the table.
+            if isinstance(v, AtomNode) and v.value.upper() in ('<>', 'FALSE'):
+                return NumberNode(0, 0, 0)
+            if (isinstance(v, FormNode) and isinstance(v.operator, AtomNode)
+                    and v.operator.value.upper() in ('<>', 'FALSE')
+                    and not v.operands):
+                return NumberNode(0, 0, 0)
+            return v
+        if isinstance(v, bool):
+            return NumberNode(1 if v else 0, 0, 0)
+        if isinstance(v, int):
+            return NumberNode(v, 0, 0)
+        if isinstance(v, str):
+            return StringNode(v, 0, 0)
+        if v is None:
+            return NumberNode(0, 0, 0)
+        return NumberNode(0, 0, 0)
+
+    def _resolve_table_node(self, node: 'TableNode', env: Dict[str, Any]) -> 'TableNode':
+        """Return a copy of a TableNode with all embedded MAPF / splice / form
+        values evaluated down to concrete AST element nodes, ready for codegen."""
+        table_type = node.table_type.upper()
+        flags = list(node.flags)
+        size = node.size
+
+        if table_type == 'ITABLE':
+            # <ITABLE <LENGTH ,HINT-DEFINITIONS> (LENGTH)>: the size is a form
+            # (the parser only captures a literal NUMBER) and (LENGTH) parses as
+            # a value, not a flag.  Recover both here.
+            new_size = size
+            for v in node.values:
+                flag = self._table_flag_from_value(v)
+                if flag is not None:
+                    if flag not in flags:
+                        flags.append(flag)
+                    continue
+                if new_size is None:
+                    ev = self.evaluate(v, env)
+                    if isinstance(ev, NumberNode):
+                        ev = ev.value
+                    if isinstance(ev, int):
+                        new_size = ev
+                        continue
+            return TableNode('ITABLE', flags, new_size, [],
+                             getattr(node, 'line', 0), getattr(node, 'column', 0),
+                             list(getattr(node, 'pattern_spec', []) or []))
+
+        # TABLE / LTABLE (PLTABLE arrives as LTABLE+PURE): evaluate every value,
+        # splicing MAPF/!.X results, and convert each element to a node.
+        values = []
+        for v in node.values:
+            if isinstance(v, SpliceUnquoteNode):
+                res = self.evaluate(v.expr, env)
+                items = res if isinstance(res, list) else (
+                    res.items if isinstance(res, SpliceResultNode) else [res])
+                for it in items:
+                    values.append(self._table_element_node(it, env))
+                continue
+            ev = self.evaluate(v, env)
+            if isinstance(ev, SpliceResultNode):
+                for it in ev.items:
+                    values.append(self._table_element_node(it, env))
+            elif isinstance(ev, list):
+                for it in ev:
+                    values.append(self._table_element_node(it, env))
+            else:
+                values.append(self._table_element_node(ev, env))
+        return TableNode(table_type, flags, size, values,
+                         getattr(node, 'line', 0), getattr(node, 'column', 0),
+                         list(getattr(node, 'pattern_spec', []) or []))
+
+    def _table_element_node(self, v, env: Dict[str, Any]) -> ASTNode:
+        """Convert one resolved MAPF element to a table-element AST node.
+        Nested TableNodes and routine/object AtomNodes pass through so codegen
+        emits nested-table pointers / packed addresses."""
+        if isinstance(v, TableNode):
+            return self._resolve_table_node(v, env)
+        return self._value_to_node(v)
+
+    def _emit_constant_node(self, node: 'ConstantNode', env: Dict[str, Any]):
+        """Resolve a <CONSTANT NAME value> node's value (a table / number /
+        string / form) and append it to pending_constants (side effect)."""
+        value = node.value
+        if isinstance(value, TableNode):
+            value = self._resolve_table_node(value, env)
+        else:
+            ev = self.evaluate(value, env)
+            if isinstance(ev, ASTNode):
+                value = ev
+            elif ev is not None and not isinstance(ev, (list, SpliceResultNode)):
+                value = self._value_to_node(ev)
+        self.macro_expander.pending_constants.append(
+            ConstantNode(node.name, value, getattr(node, 'line', 0),
+                         getattr(node, 'column', 0)))
+        return None
 
     def _eval_ifflag(self, operands: List[ASTNode], env: Dict[str, Any]) -> Any:
         """Evaluate IFFLAG (compile-time conditional based on flags).
@@ -2044,6 +2326,13 @@ class MacroExpander:
         # form/debug-gating macros fold at expansion time instead of leaking
         # compile-time-only ops (ASSIGNED?, EMPTY?) into Z-code.  name -> value.
         self.ct_globals: Dict[str, Any] = {}
+        # DEFSTRUCT registries (advent's hint system).  structs maps a struct
+        # name to its ordered field-name list; struct_ctors maps MAKE-<NAME> to
+        # the struct name; struct_accessors maps each field-accessor name to
+        # (struct_name, field_name).  Empty for games without DEFSTRUCT.
+        self.structs: Dict[str, List[str]] = {}
+        self.struct_ctors: Dict[str, str] = {}
+        self.struct_accessors: Dict[str, Tuple[str, str]] = {}
 
     def define_macro(self, macro: MacroNode):
         """Store a macro definition."""
@@ -2332,6 +2621,21 @@ class MacroExpander:
         # Build parameter bindings
         bindings = self._bind_parameters(macro, form.operands)
 
+        # A compile-time definition macro whose body is entirely <CONSTANT ...>
+        # nodes (advent's FINISH-HINTS emits the 8 HINT-*-TBL tables this way).
+        # Evaluate each once for its side effect -- _emit_constant_node resolves
+        # the embedded MAPF/table values and appends to pending_constants -- and
+        # expand to nothing so expand_all does not re-evaluate (and double) them.
+        # (Guarded to top-level processing, in_zilch False, so routine-body
+        # macro expansion is completely unaffected.)
+        _def_body = macro.body if isinstance(macro.body, list) else [macro.body]
+        if (not self.in_zilch and _def_body
+                and all(isinstance(b, ConstantNode) for b in _def_body)):
+            _cenv = {str(k).upper(): v for k, v in bindings.items()}
+            for _b in _def_body:
+                self.mdl_evaluator.evaluate(copy.deepcopy(_b), _cenv)
+            return SpliceResultNode([], form.line, form.column)
+
         # A DEFMAC whose body is a top-level MDL loop (moonmist's DOBJ?/IOBJ?
         # <REPEAT () ...>) is real compile-time MDL: evaluate it directly with
         # the MDL evaluator (env = bindings).  The legacy path below would
@@ -2378,6 +2682,16 @@ class MacroExpander:
             if _res is not None and not isinstance(_res, RepeatNode):
                 _res = self._convert_result_to_ast(_res)
                 return self._unwrap_quote(_res)
+            # A side-effect-only compile-time macro invoked as a TOP-LEVEL form
+            # (advent's <HINT ...>, which appends to HINT-DEFINITIONS and
+            # EVAL-emits a <CONSTANT HNT?...>) has already run its body above.
+            # Falling through to the legacy path re-substitutes and lets
+            # expand_all evaluate the residual a SECOND time, doubling the
+            # accumulation (HINT-DEFINITIONS grew to 16 for advent's 8 hints).
+            # Expand to nothing instead.  Guarded to top-level processing
+            # (in_zilch False) so routine-body macro expansion is unchanged.
+            if _res is None and not self.in_zilch:
+                return SpliceResultNode([], form.line, form.column)
             # else: fall through to the legacy path
 
         # Expand the macro body with parameter substitution

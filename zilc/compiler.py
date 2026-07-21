@@ -1604,15 +1604,20 @@ class ZILCompiler:
         get_map = {'ZGET': 'GET', 'ZPUT': 'PUT'}
         accessors = {}   # FIELD -> (offset, getter, putter)
         make_names = set()
+        processed_spans = []  # paren-base structs we handle here (stripped below)
         for (_s, _e, content) in forms:
             m = re.match(r'<\s*DEFSTRUCT\b', content, re.IGNORECASE)
             sname, rest = self._read_atom(content[m.end():-1])
             if sname is None:
                 continue
             if not rest.lstrip().startswith('('):
-                # Bare base type (e.g. VECTOR): a compile-time-only struct with
-                # no runtime table accessors -- skip.
+                # Bare base type (e.g. <DEFSTRUCT HINT VECTOR (FIELD TYPE) ...>):
+                # a compile-time-only struct with no runtime table accessors.
+                # Leave it in the source so the parser + MDL evaluator handle its
+                # MAKE-<NAME> constructor and field accessors (advent's hint
+                # system builds its hint tables from these at compile time).
                 continue
+            processed_spans.append((_s, _e))
             clauses = self._split_paren_clauses(rest)
             if not clauses:
                 continue
@@ -1655,7 +1660,16 @@ class ZILCompiler:
                 accessors[fname.upper()] = (off,
                                             get_map.get(getter, getter),
                                             get_map.get(putter, putter))
-        source = self._strip_named_forms(source, 'DEFSTRUCT')
+        # Strip only the paren-base structs we processed above; bare-base
+        # (VECTOR) compile-time structs are left for the parser + macro expander.
+        if processed_spans:
+            _out = []
+            _pos = 0
+            for (_start, _end) in processed_spans:
+                _out.append(source[_pos:_start])
+                _pos = _end
+            _out.append(source[_pos:])
+            source = ''.join(_out)
         # (0-arg table-constructor DEFINEs -- NOUN-PHRASE, PARSER-RESULT,
         # PRSTBL, MAKE-READBUF, ... -- were already inlined by
         # _inline_table_constructors, so MAKE-<STRUCT> calls are present here.)
