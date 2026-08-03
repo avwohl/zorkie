@@ -107,6 +107,9 @@ Remaining frontier:
 - moonmist: fits (130196) but its route stalls on a pre-existing ask/tell
   topic-resolution bug ("Bolitho looks confused"); needs a parser-table
   lockstep investigation.
+  **[SUPERSEDED: moonmist WINS as of 90eaf8f ("moonmist WINS: 6 parser/
+  compile-time fixes"), which fixed exactly this ask/tell topic resolution. It
+  is a counted (non-frontier) game in the zwalker L2 registry.]**
 - planetfall: SOURCE truncated (comptwo.zil ends mid-object at TRIFFID);
   re-check upstream for a complete revision -- not a zorkie bug.
   **[RESOLVED 2026-08-03: the upstream re-check landed as e8c4c10; compiles and
@@ -216,6 +219,16 @@ oracle: compile ZIL -> run the .z in zwalker -> replay a walkthrough to a verifi
 
 ## Real Infocom games: measured status
 
+> **[SNAPSHOT -- SUPERSEDED. This section records session-7 state (4 winners, 9
+> size-blocked, 13 not compiling) and every bucket below it is obsolete.** Rounds
+> 5-9 unblocked all of them: the zwalker L2 registry
+> (`../zwalker/scripts/test_zorkie_game.py`) now lists **31 counted games with
+> none marked frontier** — all 26 Infocom ZIL games plus microquest/mazekey/
+> reactor, cloak and advent. Kept for history; read the top of this file for
+> current state. **Provenance: derived from the L2 registry and the round-5..9
+> commit records cited in the markers below, NOT re-measured on 2026-08-03 —
+> planetfall is the only game re-measured this session.]**
+
 Of zwalker's 50 verified solves, 26 are Infocom ZIL (the only zorkie candidates;
 the rest are Inform). Compile results for those 26 (source in
 tests/test-games/infocom-zil/<game>/):
@@ -233,9 +246,21 @@ see bucket 2) -- 9 games, the single biggest bucket:
 	  hitchhikersguide 155KB
 	V4 (>256KB): trinity 349KB, amfv 324KB
 
+**[SUPERSEDED: all 9 now fit and win.]** The size-reduction pass (a7c1876,
+greedy-vs-freq abbreviations + peephole G + VERBS trim) plus rounds 5-9 closed
+every gap: ballyhoo 085bf78, wishbringer/hollywoodhijinx 5519bcf, stationfall +
+plunderedhearts + spellbreaker e6811e0, leathergoddesses + lurkinghorror +
+moonmist-fits 0c172ef, moonmist-wins 90eaf8f, trinity + amfv abb320f (the first
+V4 wins). The sizes above are session-7 figures and no longer describe any build.
+
 DOES NOT COMPILE yet (see buckets 3 and 4):
 	lurkinghorror, spellbreaker, zork2, deadline, suspect, witness, sorcerer,
 	planetfall, suspended, hollywoodhijinx, cutthroats, infidel, enchanter
+
+**[SUPERSEDED: all 13 now compile and win.]** Marked alongside the size list
+because leaving it would preserve the same contradiction one line down. The last
+holdout was planetfall, resolved 2026-08-03 (see the top of this file); the other
+12 fell across rounds 2-9.
 
 ## Blocker buckets
 
@@ -456,7 +481,15 @@ consumed, leaking the stack. zork3 still crashes earlier on a write to static me
 at 0x2826 (a separate bad STORE/PUT). starcross's vocabulary lookup is a separate
 issue.
 
-### 2. Too big for the story-file size limit (abbreviation/packing gap) -- BIGGEST BUCKET
+### 2. FIXED: Too big for the story-file size limit (abbreviation/packing gap)
+
+**[SUPERSEDED: this bucket is empty.]** Better abbreviation selection landed in
+a7c1876 (greedy-vs-frequency selection + peephole G + VERBS trim) and rounds 5-9
+closed the rest; all 9 games below now fit their version cap and win their
+routes. The "highest-leverage compile-unblock" framing is spent — the live
+frontier is the ZILF-library parser-table format and the V5 target, per the top
+of this file. Original text follows.
+
 The 9 games above code-generate fully but exceed the version size limit because text
 compression is under-implemented (abbreviation selection is greedy/first-match; no
 better packing). Infra exists (zilc/zmachine/abbreviations.py, text_encoding.py;
