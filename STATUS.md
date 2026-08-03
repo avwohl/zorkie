@@ -27,17 +27,29 @@ not status reports.
   table byte layout zorkie doesn't emit — MATCH-SYNTAX never sets PRSA so every
   command mis-dispatches. That parser-table format is the next frontier.
 - Every V3 corpus game with a verified route now wins from source. planetfall
-  stays SOURCE-blocked (truncated comptwo.zil). The remaining frontier is the
-  ZILF-library parser-table format (cloak) and a V5 target.
+  stays SOURCE-blocked (truncated comptwo.zil). **[SUPERSEDED 2026-08-03:
+  planetfall compiles and wins 80/80 -- see "planetfall: RESOLVED" below.]** The
+  remaining frontier is the ZILF-library parser-table format (cloak) and a V5
+  target.
 
-## Two corrections (recovered from an unpushed local commit)
+## planetfall: RESOLVED (measured 2026-08-03); and one disproven size lever
 
-- **planetfall's source truncation is resolved.** The "SOURCE-blocked (truncated
-  comptwo.zil)" line above predates commit e8c4c10, which repointed the submodule
-  to the-infocom-files/planetfall. That source terminates TRIFFID properly
-  (`(FLAGS ACTORBIT)>`, 97,122 bytes) and is byte-identical to an independent
-  hand-reconstruction of the historicalsource copy, so the provenance is settled
-  two ways. Whether planetfall now compiles and wins is unmeasured.
+- **planetfall compiles and WINS 80/80.** Every "SOURCE-blocked (truncated
+  comptwo.zil)" note in this file predates commit e8c4c10, which repointed the
+  submodule to the-infocom-files/planetfall. That source terminates TRIFFID
+  properly (`(FLAGS ACTORBIT)>`, 97,122 bytes) and is byte-identical to an
+  independent hand-reconstruction of the historicalsource copy, so the
+  provenance is settled two ways. Measured 2026-08-03: `zorkie planetfall.zil
+  -v 3` exits 0 in 12m10s and emits a 105,230-byte V3 story file (V3 cap
+  131,072; the official binary is 109,398), and the zwalker L2 replay of the
+  OFFICIAL 444-command route scores **80/80, died=False, seed=1**. The ZILF
+  golden scores identically, so both halves of the L2 test pass -- the source
+  is winnable as preserved AND zorkie compiles it correctly. Two non-fatal
+  build warnings: FUNNY-GLOBALS auto-enables (hard slots exhausted at
+  MARKSMANSHIP-COUNTER), and GWIM reports `RMUNGBIT` unknown -- 11 references,
+  four of them `(FIND RMUNGBIT)` clauses on CLIMB UP / SIT DOWN / STAND UP /
+  DISEMBARK. RMUNGBIT is never declared anywhere in the source; it sits off the
+  winning route, so it is latent, not broken.
 - **Disproven size lever -- do not re-chase.** Round 4 hypothesized a string-table
   GC worth ~3.5KB on amfv and ~10KB on trinity from entries registered but never
   referenced. Measured directly: trinity has 6 orphans totalling 66 bytes of
@@ -57,6 +69,8 @@ that has a verified route now compiles AND wins; moonmist fits the cap and
 replays its route to completion but stalls on a pre-existing ask/tell topic
 bug; planetfall's preserved source is truncated (comptwo.zil ends mid-object,
 a provenance problem). pytest 696/3 pre-existing throughout.
+**[SUPERSEDED 2026-08-03: planetfall's truncation is resolved and it wins
+80/80 -- see "planetfall: RESOLVED" near the top.]**
 
 Landed in session 9 (commit-by-commit catalog in git; highlights):
 - **Round-7** (spellbreaker/stationfall/plunderedhearts): VOC part-of-speech
@@ -95,6 +109,8 @@ Remaining frontier:
   lockstep investigation.
 - planetfall: SOURCE truncated (comptwo.zil ends mid-object at TRIFFID);
   re-check upstream for a complete revision -- not a zorkie bug.
+  **[RESOLVED 2026-08-03: the upstream re-check landed as e8c4c10; compiles and
+  wins 80/80. See "planetfall: RESOLVED" near the top.]**
 - cloak: ZILF-stdlib ISAVE (V5+ opcode) in a V3 build; the V5 target itself
   is the real frontier (call_vs2 and the V4 fixes are a head start).
 - Cosmetics: stray \x01 for some CRLFs in V4 output; TELL two-space family;
@@ -157,6 +173,9 @@ Frontier (compile+fit; being driven to wins on the reduced base):
 - planetfall: comptwo.zil is a TRUNCATED historical checkout (ends mid-object at
   the TRIFFID definition); a provenance problem, not a zorkie bug -- do not "fix"
   by accepting unbalanced input.
+  **[RESOLVED 2026-08-03: fixed the right way -- the submodule was repointed to a
+  complete upstream source, not by loosening the parser. Compiles and wins
+  80/80. See "planetfall: RESOLVED" near the top.]**
 
 Machine migration (Linux /home/wohl -> macOS /Users/wohl): the tests/test-games
 sources were bare gitlinks with no .gitmodules; added .gitmodules (commit "Add
@@ -456,7 +475,7 @@ this bucket -- they now generate all code and are blocked only on size.
   build. The full compile-time MDL/DEFMAC evaluator is still the deeper gap.
 
 ### 4. Single-game blockers
-	planetfall	parse error: unclosed property (planetfall.zil:13177)
+	planetfall	RESOLVED 2026-08-03 -- was: parse error: unclosed property (planetfall.zil:13177), a truncated source rather than a parser bug; submodule repointed, now compiles and wins 80/80
 	suspended	CLEAR requires V4 or later (uses a V4+ opcode in a V3 build)
 	hollywoodhijinx	too many attributes (got 51, V3 max 32) -- attribute over-count
 	cutthroats / infidel	run a top-level compile-time PRINC then exit 1 with no error message
