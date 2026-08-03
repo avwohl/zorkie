@@ -30,6 +30,22 @@ not status reports.
   stays SOURCE-blocked (truncated comptwo.zil). The remaining frontier is the
   ZILF-library parser-table format (cloak) and a V5 target.
 
+## Two corrections (recovered from an unpushed local commit)
+
+- **planetfall's source truncation is resolved.** The "SOURCE-blocked (truncated
+  comptwo.zil)" line above predates commit e8c4c10, which repointed the submodule
+  to the-infocom-files/planetfall. That source terminates TRIFFID properly
+  (`(FLAGS ACTORBIT)>`, 97,122 bytes) and is byte-identical to an independent
+  hand-reconstruction of the historicalsource copy, so the provenance is settled
+  two ways. Whether planetfall now compiles and wins is unmeasured.
+- **Disproven size lever -- do not re-chase.** Round 4 hypothesized a string-table
+  GC worth ~3.5KB on amfv and ~10KB on trinity from entries registered but never
+  referenced. Measured directly: trinity has 6 orphans totalling 66 bytes of
+  12,964 (0.5%); zork1 has 0 of 436. StringTable is append-only with no
+  refcounting so the mechanism is real, but the payload is nowhere near the
+  554-1,620 byte near-miss gaps that motivated it. Re-measure any game with
+  `tools/measure_string_orphans.py <entry.zil> [version]`.
+
 ## Session 9 (2026-07-19 continued): 20 -> 27 games; V3 corpus complete-but-two; V4 arrives
 
 The zwalker L2 suite (compile ZIL source -> replay a source-matched walkthrough
