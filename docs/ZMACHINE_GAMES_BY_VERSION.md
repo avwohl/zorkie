@@ -123,7 +123,7 @@ Examples:
 
 #### IF Archive
 ```
-https://www.ifarchive.org/if-archive/infocom/gamefiles/
+https://eblong.com/infocom/gamefiles/
 ```
 Examples:
 - `trinity-r11-s860509.z4`
