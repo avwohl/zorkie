@@ -46,7 +46,7 @@ official binary over the whole route.
   games over the story-file size limit, `PRSO?`/`PRSI?` parser macros are
   unexpanded (zork2 and others), and the compile-time MDL/`DEFMAC` evaluator
   (e.g. `LIBRARY-MESSAGE` in the ZILF library, which blocks Cloak of Darkness)
-  is still open. See **[STATUS.md](STATUS.md)** for the measured, per-game
+  is still open. See **[STATUS.md](https://github.com/avwohl/zorkie/blob/main/STATUS.md)** for the measured, per-game
   frontier.
 
 ## Installation
@@ -127,11 +127,11 @@ zilc/
 
 ## Documentation
 
-- [STATUS.md](STATUS.md) — measured project status, per-game frontier, next steps
-- [docs/ZIL_SPECIFICATION.md](docs/ZIL_SPECIFICATION.md) — the ZIL language
-- [docs/ZMACHINE_SPECIFICATION.md](docs/ZMACHINE_SPECIFICATION.md) — the Z-machine bytecode format
-- [docs/ZMACHINE_GAMES_BY_VERSION.md](docs/ZMACHINE_GAMES_BY_VERSION.md) — Z-machine version reference
+- [STATUS.md](https://github.com/avwohl/zorkie/blob/main/STATUS.md) — measured project status, per-game frontier, next steps
+- [docs/ZIL_SPECIFICATION.md](https://github.com/avwohl/zorkie/blob/main/docs/ZIL_SPECIFICATION.md) — the ZIL language
+- [docs/ZMACHINE_SPECIFICATION.md](https://github.com/avwohl/zorkie/blob/main/docs/ZMACHINE_SPECIFICATION.md) — the Z-machine bytecode format
+- [docs/ZMACHINE_GAMES_BY_VERSION.md](https://github.com/avwohl/zorkie/blob/main/docs/ZMACHINE_GAMES_BY_VERSION.md) — Z-machine version reference
 
 ## License
 
-GNU General Public License v3.0 — see [LICENSE](LICENSE).
+GNU General Public License v3.0 — see [LICENSE](https://github.com/avwohl/zorkie/blob/main/LICENSE).
